@@ -32,6 +32,7 @@ const connStatus = document.getElementById("conn-status");
 const btnReset = document.getElementById("btn-reset");
 const teamOverlay = document.getElementById("team-overlay");
 const teamListEl = document.getElementById("team-list");
+const btnReferral = document.getElementById("btn-referral");
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -116,6 +117,7 @@ function setFooterMode() {
   const joined = myTeamId != null;
   paletteEl.hidden = online;
   teamBadge.hidden = !online || !joined;
+  if (btnReferral) btnReferral.hidden = !online || !joined;
   if (online && joined) updateTeamBadge();
 }
 
@@ -224,11 +226,100 @@ function trySessionJoin() {
   ws.send(JSON.stringify({ type: "joinTeam", teamId: Number(saved) }));
 }
 
+/**
+ * Реферал: ?team= или ?ref= (число id команды), либо Telegram Mini App start_param: team_1, team1, t1
+ */
+function getReferralTeamId() {
+  const q = new URLSearchParams(location.search);
+  const raw = q.get("team") ?? q.get("ref");
+  if (raw != null && raw !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n === Math.floor(n)) return n;
+  }
+  const tg = window.Telegram?.WebApp;
+  const sp = tg?.initDataUnsafe?.start_param;
+  if (sp && typeof sp === "string") {
+    const s = sp.trim();
+    const m = /^team_?(\d+)$/i.exec(s) ?? /^t(\d+)$/i.exec(s);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+function stripTeamFromUrl() {
+  try {
+    const u = new URL(location.href);
+    if (!u.searchParams.has("team") && !u.searchParams.has("ref")) return;
+    u.searchParams.delete("team");
+    u.searchParams.delete("ref");
+    const qs = u.searchParams.toString();
+    history.replaceState({}, "", u.pathname + (qs ? `?${qs}` : "") + u.hash);
+  } catch {
+    /* ignore */
+  }
+}
+
+function buildWebReferralUrl() {
+  if (myTeamId == null) return "";
+  const u = new URL(location.href);
+  u.searchParams.set("team", String(myTeamId));
+  u.searchParams.delete("ref");
+  return u.toString();
+}
+
+function buildTelegramReferralUrl() {
+  const bot = document.querySelector('meta[name="pixel-battle-tg-bot"]')?.getAttribute("content")?.trim();
+  const app = document.querySelector('meta[name="pixel-battle-tg-app"]')?.getAttribute("content")?.trim();
+  if (!bot || !app || myTeamId == null) return null;
+  const cleanBot = bot.replace(/^@/, "");
+  const cleanApp = app.replace(/^\//, "");
+  return `https://t.me/${cleanBot}/${cleanApp}?startapp=team_${myTeamId}`;
+}
+
+async function copyReferralLink() {
+  if (myTeamId == null) return;
+  const web = buildWebReferralUrl();
+  const tgUrl = buildTelegramReferralUrl();
+  const text = tgUrl ? `${web}\n${tgUrl}` : web;
+  const tg = window.Telegram?.WebApp;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (typeof tg?.showAlert === "function") tg.showAlert("Ссылка скопирована в буфер.");
+    else if (typeof tg?.HapticFeedback?.notificationOccurred === "function") {
+      tg.HapticFeedback.notificationOccurred("success");
+    }
+  } catch {
+    if (typeof tg?.showAlert === "function") {
+      tg.showAlert(text.slice(0, 350) + (text.length > 350 ? "…" : ""));
+    } else {
+      window.prompt("Скопируйте ссылку:", text);
+    }
+  }
+}
+
+function setupReferralButton() {
+  if (!btnReferral) return;
+  btnReferral.addEventListener("click", () => {
+    copyReferralLink();
+  });
+}
+
 function onMeta(msg) {
   teamsMeta = msg.teams || [];
   teamCounts = msg.teamCounts || {};
   maxPerTeam = msg.maxPerTeam ?? 200;
   rebuildTeamList();
+
+  const ref = getReferralTeamId();
+  const validRef = ref != null && teamsMeta.some((t) => t.id === ref);
+
+  if (validRef) {
+    sessionStorage.setItem(SESSION_TEAM, String(ref));
+    trySessionJoin();
+    teamOverlay.hidden = true;
+    return;
+  }
+
   const saved = sessionStorage.getItem(SESSION_TEAM);
   if (saved) {
     trySessionJoin();
@@ -307,13 +398,15 @@ function connectWs() {
       myTeamId = msg.teamId;
       sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
       teamOverlay.hidden = true;
+      stripTeamFromUrl();
       setFooterMode();
       schedulePersist();
       return;
     }
     if (msg.type === "joinError") {
-      if (msg.reason === "full") {
+      if (msg.reason === "full" || msg.reason === "team") {
         sessionStorage.removeItem(SESSION_TEAM);
+        stripTeamFromUrl();
       }
       teamOverlay.hidden = false;
       rebuildTeamList();
@@ -710,6 +803,7 @@ async function bootstrap() {
     buildPalette();
   }
   setFooterMode();
+  setupReferralButton();
   setupReset();
   setupGestures();
 

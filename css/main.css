@@ -271,3 +271,19 @@ body {
   font-size: 0.78rem;
   color: var(--tg-hint);
 }
+
+.team-badge__invite {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--tg-button) 55%, transparent);
+  background: color-mix(in srgb, var(--tg-button) 18%, transparent);
+  color: var(--tg-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.team-badge__invite:active {
+  opacity: 0.88;
+}
