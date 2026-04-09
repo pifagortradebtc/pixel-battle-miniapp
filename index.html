@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#17212b" />
+  <title>Pixel Battle</title>
+  <link rel="stylesheet" href="css/main.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="toolbar">
+      <div class="toolbar__title">Pixel Battle</div>
+      <div class="toolbar__actions">
+        <span id="conn-status" class="toolbar__conn" title="Состояние сети" data-state="local">локально</span>
+        <button type="button" id="btn-reset" class="toolbar__btn">Сброс</button>
+        <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
+      </div>
+    </header>
+
+    <main class="stage-wrap">
+      <canvas id="board" class="board" aria-label="Игровое поле"></canvas>
+      <div id="hint" class="hint">Два пальца — масштаб и сдвиг. Один тап — пиксель.</div>
+    </main>
+
+    <footer class="palette-bar">
+      <div id="palette" class="palette" role="listbox" aria-label="Палитра"></div>
+    </footer>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
