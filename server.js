@@ -1,11 +1,13 @@
 /**
- * Статика + WebSocket: карта мира (регионы), фиксированные команды, лимит 200 на команду.
+ * Статика + WebSocket: карта, только пользовательские команды (динамические).
+ * Соло: имя + цвет; публичные команды — в списке для вступления. Цвет команды один на всех.
  * Запуск: npm start
  */
 
 import http from "http";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 
@@ -16,46 +18,8 @@ const WS_PATH = "/ws";
 
 const GRID_W = 320;
 const GRID_H = 320;
-const COOLDOWN_MS = 1200;
+const COOLDOWN_MS = 0;
 const MAX_PER_TEAM = 200;
-
-/** Слоты команд (id и цвет фиксированы). Название и эмодзи настраивают участники. */
-const TEAMS = [
-  { id: 1, name: "Альфа", color: "#e94560", emoji: "🔴" },
-  { id: 2, name: "Бета", color: "#00cec9", emoji: "🔵" },
-  { id: 3, name: "Гамма", color: "#fdcb6e", emoji: "🟡" },
-  { id: 4, name: "Дельта", color: "#6c5ce7", emoji: "🟣" },
-  { id: 5, name: "Эпсилон", color: "#e17055", emoji: "🟠" },
-  { id: 6, name: "Дзета", color: "#0984e3", emoji: "💙" },
-  { id: 7, name: "Эта", color: "#00b894", emoji: "💚" },
-  { id: 8, name: "Тета", color: "#fab1a0", emoji: "🩷" },
-];
-
-const TEAM_CUSTOM_PATH = path.join(ROOT, "data", "team-custom.json");
-
-/** @type {Record<string, { name?: string, emoji?: string }>} */
-let teamCustom = {};
-
-function loadTeamCustom() {
-  try {
-    if (fs.existsSync(TEAM_CUSTOM_PATH)) {
-      teamCustom = JSON.parse(fs.readFileSync(TEAM_CUSTOM_PATH, "utf8"));
-      if (!teamCustom || typeof teamCustom !== "object") teamCustom = {};
-    }
-  } catch (e) {
-    console.warn("team-custom load:", e.message);
-    teamCustom = {};
-  }
-}
-
-function saveTeamCustom() {
-  try {
-    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
-    fs.writeFileSync(TEAM_CUSTOM_PATH, JSON.stringify(teamCustom), "utf8");
-  } catch (e) {
-    console.warn("team-custom save:", e.message);
-  }
-}
 
 function sanitizeTeamName(s) {
   return String(s ?? "")
@@ -69,20 +33,82 @@ function sanitizeTeamEmoji(s) {
   return t;
 }
 
-function getMergedTeam(teamId) {
-  const base = TEAMS.find((t) => t.id === teamId);
-  if (!base) return null;
-  const c = teamCustom[String(teamId)] || {};
-  const name = typeof c.name === "string" && c.name.trim() ? sanitizeTeamName(c.name) : base.name;
-  const emoji = typeof c.emoji === "string" && c.emoji.trim() ? sanitizeTeamEmoji(c.emoji) : base.emoji;
-  return { id: teamId, color: base.color, name, emoji };
+/** Цвет команды #RRGGBB */
+function sanitizeHexColor(s) {
+  const t = String(s ?? "")
+    .trim()
+    .replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(t)) return "";
+  return `#${t.toLowerCase()}`;
 }
 
 function teamsForMeta() {
-  return TEAMS.map((t) => getMergedTeam(t.id));
+  return dynamicTeams.map((t) => ({
+    id: t.id,
+    name: t.name,
+    emoji: t.emoji,
+    color: t.color,
+    solo: !!t.solo,
+  }));
 }
 
-loadTeamCustom();
+const DYNAMIC_TEAMS_PATH = path.join(ROOT, "data", "dynamic-teams.json");
+
+/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean }[]} */
+let dynamicTeams = [];
+let nextTeamId = 1;
+
+function newTeamEditToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+function loadDynamicTeams() {
+  try {
+    if (fs.existsSync(DYNAMIC_TEAMS_PATH)) {
+      const j = JSON.parse(fs.readFileSync(DYNAMIC_TEAMS_PATH, "utf8"));
+      dynamicTeams = Array.isArray(j.teams) ? j.teams : [];
+      dynamicTeams = dynamicTeams.map((t) => {
+        const raw = typeof t.color === "string" ? t.color.trim() : "";
+        const hex = raw ? sanitizeHexColor(raw) : "";
+        const color = hex || (raw || "#888888");
+        return {
+          ...t,
+          color,
+          solo: !!t.solo,
+        };
+      });
+      if (typeof j.nextId === "number" && j.nextId >= 1) {
+        nextTeamId = j.nextId;
+      } else {
+        const maxId = dynamicTeams.reduce((m, t) => Math.max(m, t.id || 0), 0);
+        nextTeamId = Math.max(1, maxId + 1);
+      }
+    }
+  } catch (e) {
+    console.warn("dynamic-teams load:", e.message);
+    dynamicTeams = [];
+    nextTeamId = 1;
+  }
+}
+
+function saveDynamicTeams() {
+  try {
+    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    fs.writeFileSync(
+      DYNAMIC_TEAMS_PATH,
+      JSON.stringify({ nextId: nextTeamId, teams: dynamicTeams }),
+      "utf8"
+    );
+  } catch (e) {
+    console.warn("dynamic-teams save:", e.message);
+  }
+}
+
+function validTeamId(teamId) {
+  return dynamicTeams.some((t) => t.id === teamId);
+}
+
+loadDynamicTeams();
 
 /** @type {WeakMap<object, number>} */
 const lastTeamUpdate = new WeakMap();
@@ -98,7 +124,7 @@ const MIME = {
   ".webp": "image/webp",
 };
 
-/** @type {Uint8Array} id страны на клетку, 0 = океан */
+/** @type {Uint8Array} регион: 0 океан, 1 река (не захватывается), ≥2 суша (регион Вороного) */
 let landGrid = null;
 try {
   const raw = fs.readFileSync(path.join(ROOT, "data", "regions-320.json"), "utf8");
@@ -112,45 +138,39 @@ try {
   console.warn("Нет data/regions-320.json — npm run build-map", e.message);
 }
 
+/** Все клетки суши — знаменатель для «% территории» (100% = вся суша). */
+let landPixelsTotal = GRID_W * GRID_H;
+if (landGrid) {
+  let n = 0;
+  for (let i = 0; i < landGrid.length; i++) {
+    if (landGrid[i] >= 2) n++;
+  }
+  landPixelsTotal = n;
+}
+
+/** 0 — океан, 1 — река, ≥2 — суша (регион). Рисовать можно только на суше. */
 function isLand(x, y) {
   if (!landGrid) return true;
   if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return false;
-  return landGrid[y * GRID_W + x] > 0;
+  return landGrid[y * GRID_W + x] >= 2;
 }
 
-/** @type {Map<string, number>} key "x,y" -> teamId */
+/** @type {Map<string, number>} key "x,y" → teamId */
 const pixels = new Map();
+
+function pixelTeam(val) {
+  if (val && typeof val === "object") return val.teamId;
+  return val;
+}
 /** @type {Map<object, number>} */
 const lastPlace = new WeakMap();
 /** @type {Map<number, number>} teamId -> число игроков */
 const teamPlayerCounts = new Map();
 
-function countTeamPixels(teamId) {
-  let n = 0;
-  for (const v of pixels.values()) {
-    if (v === teamId) n++;
-  }
-  return n;
-}
-
-function hasAdjacentOwn(teamId, x, y) {
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      if (dx === 0 && dy === 0) continue;
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) continue;
-      if (pixels.get(`${nx},${ny}`) === teamId) return true;
-    }
-  }
-  return false;
-}
-
-function canPlace(teamId, x, y) {
+/** Любая клетка суши; соседство с своими пикселями не требуется. */
+function canPlace(_teamId, x, y) {
   if (!isLand(x, y)) return "ocean";
-  if (countTeamPixels(teamId) === 0) return "ok";
-  if (hasAdjacentOwn(teamId, x, y)) return "ok";
-  return "no_adj";
+  return "ok";
 }
 
 function safePath(urlPath) {
@@ -183,9 +203,10 @@ function serveStatic(req, res) {
 
 function fullPayload() {
   const list = [];
-  for (const [key, t] of pixels) {
+  for (const [key, val] of pixels) {
     const [x, y] = key.split(",").map(Number);
-    list.push([x, y, t]);
+    const tid = pixelTeam(val);
+    list.push([x, y, tid]);
   }
   return JSON.stringify({ type: "full", pixels: list });
 }
@@ -201,6 +222,65 @@ function broadcast(obj) {
 const server = http.createServer(serveStatic);
 
 const wss = new WebSocketServer({ server, path: WS_PATH });
+
+function countOnlineClients() {
+  let n = 0;
+  for (const c of wss.clients) {
+    if (c.readyState === 1) n++;
+  }
+  return n;
+}
+
+function buildStatsPayload() {
+  /** @type {Map<number, number>} */
+  const byTeam = new Map();
+  for (const val of pixels.values()) {
+    const tid = pixelTeam(val);
+    byTeam.set(tid, (byTeam.get(tid) || 0) + 1);
+  }
+  const list = teamsForMeta();
+  const rows = list.map((t) => {
+    const pix = byTeam.get(t.id) || 0;
+    const pct = landPixelsTotal > 0 ? (pix / landPixelsTotal) * 100 : 0;
+    const players = teamPlayerCounts.get(t.id) || 0;
+    return {
+      teamId: t.id,
+      emoji: t.emoji,
+      name: t.name,
+      color: t.color,
+      players,
+      pixels: pix,
+      percent: Math.round(pct * 1000) / 1000,
+    };
+  });
+  rows.sort((a, b) => {
+    if (b.percent !== a.percent) return b.percent - a.percent;
+    if (b.pixels !== a.pixels) return b.pixels - a.pixels;
+    return a.teamId - b.teamId;
+  });
+  rows.forEach((row, i) => {
+    row.rank = i + 1;
+  });
+  return {
+    type: "stats",
+    online: countOnlineClients(),
+    landTotal: landPixelsTotal,
+    rows,
+  };
+}
+
+let statsBroadcastTimer = null;
+function scheduleStatsBroadcast() {
+  if (statsBroadcastTimer != null) return;
+  statsBroadcastTimer = setTimeout(() => {
+    statsBroadcastTimer = null;
+    broadcast(buildStatsPayload());
+  }, 200);
+}
+
+function broadcastStatsImmediate() {
+  broadcast(buildStatsPayload());
+}
 
 wss.on("connection", (ws) => {
   ws.teamId = null;
@@ -220,6 +300,7 @@ wss.on("connection", (ws) => {
     })
   );
   ws.send(fullPayload());
+  broadcastStatsImmediate();
 
   ws.on("message", (data) => {
     let msg;
@@ -250,20 +331,124 @@ wss.on("connection", (ws) => {
         return;
       }
       const tid = ws.teamId;
-      const key = String(tid);
-      if (!teamCustom[key]) teamCustom[key] = {};
-      teamCustom[key].name = name;
-      teamCustom[key].emoji = emoji;
-      saveTeamCustom();
+      const dt = dynamicTeams.find((x) => x.id === tid);
+      if (!dt) {
+        ws.send(JSON.stringify({ type: "updateTeamError", reason: "no_team" }));
+        return;
+      }
+      if (dt.solo) {
+        ws.send(JSON.stringify({ type: "updateTeamError", reason: "solo" }));
+        return;
+      }
+      const sent = typeof msg.editToken === "string" ? msg.editToken.trim() : "";
+      if (dt.editToken) {
+        if (sent !== dt.editToken) {
+          ws.send(JSON.stringify({ type: "updateTeamError", reason: "not_owner" }));
+          return;
+        }
+      }
+      dt.name = name;
+      dt.emoji = emoji;
+      const newColor = sanitizeHexColor(msg.color);
+      if (newColor) dt.color = newColor;
+      saveDynamicTeams();
       lastTeamUpdate.set(ws, Date.now());
-      broadcast({ type: "teamDisplay", teamId: tid, name, emoji });
+      broadcast({
+        type: "teamDisplay",
+        teamId: tid,
+        name,
+        emoji,
+        color: dt.color,
+      });
+      broadcastStatsImmediate();
+      return;
+    }
+
+    if (msg.type === "createTeam") {
+      if (ws.teamId != null) {
+        ws.send(JSON.stringify({ type: "createTeamError", reason: "already" }));
+        return;
+      }
+      const name = sanitizeTeamName(msg.name);
+      const emoji = sanitizeTeamEmoji(msg.emoji);
+      const color = sanitizeHexColor(msg.color);
+      if (!name || !emoji || !color) {
+        ws.send(JSON.stringify({ type: "createTeamError", reason: "fields" }));
+        return;
+      }
+      if (nextTeamId > 255) {
+        ws.send(JSON.stringify({ type: "createTeamError", reason: "limit" }));
+        return;
+      }
+      const id = nextTeamId++;
+      const editToken = newTeamEditToken();
+      dynamicTeams.push({ id, name, emoji, color, editToken, solo: false });
+      saveDynamicTeams();
+      ws.teamId = id;
+      teamPlayerCounts.set(id, 1);
+      const team = { id, name, emoji, color, solo: false };
+      ws.send(
+        JSON.stringify({
+          type: "created",
+          teamId: id,
+          team,
+          editToken,
+          teams: teamsForMeta(),
+          teamCounts: Object.fromEntries(teamPlayerCounts),
+        })
+      );
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
+      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      broadcastStatsImmediate();
+      return;
+    }
+
+    if (msg.type === "soloPlay") {
+      if (ws.teamId != null) {
+        ws.send(JSON.stringify({ type: "soloError", reason: "already" }));
+        return;
+      }
+      const name = sanitizeTeamName(msg.name);
+      const color = sanitizeHexColor(msg.color);
+      if (!name || !color) {
+        ws.send(JSON.stringify({ type: "soloError", reason: "fields" }));
+        return;
+      }
+      if (nextTeamId > 255) {
+        ws.send(JSON.stringify({ type: "soloError", reason: "limit" }));
+        return;
+      }
+      const id = nextTeamId++;
+      const emoji = sanitizeTeamEmoji(msg.emoji) || "🙂";
+      dynamicTeams.push({ id, name, emoji, color, solo: true });
+      saveDynamicTeams();
+      ws.teamId = id;
+      teamPlayerCounts.set(id, 1);
+      const team = { id, name, emoji, color, solo: true };
+      ws.send(
+        JSON.stringify({
+          type: "soloJoined",
+          teamId: id,
+          team,
+          teams: teamsForMeta(),
+          teamCounts: Object.fromEntries(teamPlayerCounts),
+        })
+      );
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
+      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      broadcastStatsImmediate();
       return;
     }
 
     if (msg.type === "joinTeam") {
       const tid = Number(msg.teamId) | 0;
-      const valid = TEAMS.some((t) => t.id === tid);
+      const valid = validTeamId(tid);
       if (!valid) {
+        ws.send(JSON.stringify({ type: "joinError", reason: "team" }));
+        return;
+      }
+      const dtJoin = dynamicTeams.find((t) => t.id === tid);
+      if (!dtJoin || dtJoin.solo) {
         ws.send(JSON.stringify({ type: "joinError", reason: "team" }));
         return;
       }
@@ -280,12 +465,29 @@ wss.on("connection", (ws) => {
       teamPlayerCounts.set(tid, cur + 1);
       ws.send(JSON.stringify({ type: "joined", teamId: tid }));
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      broadcastStatsImmediate();
+      return;
+    }
+
+    if (msg.type === "leaveTeam") {
+      if (ws.teamId == null) {
+        ws.send(JSON.stringify({ type: "leaveError", reason: "no_team" }));
+        return;
+      }
+      const tid = ws.teamId;
+      const c = teamPlayerCounts.get(tid) ?? 0;
+      teamPlayerCounts.set(tid, Math.max(0, c - 1));
+      ws.teamId = null;
+      ws.send(JSON.stringify({ type: "left" }));
+      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      broadcastStatsImmediate();
       return;
     }
 
     if (msg.type === "clear") {
       pixels.clear();
       broadcast({ type: "full", pixels: [] });
+      broadcastStatsImmediate();
       return;
     }
 
@@ -304,14 +506,10 @@ wss.on("connection", (ws) => {
         ws.send(JSON.stringify({ type: "pixelReject", reason: "ocean" }));
         return;
       }
-      if (rule === "no_adj") {
-        ws.send(JSON.stringify({ type: "pixelReject", reason: "no_adj" }));
-        return;
-      }
 
       const now = Date.now();
       const last = lastPlace.get(ws) || 0;
-      if (now - last < COOLDOWN_MS) {
+      if (COOLDOWN_MS > 0 && now - last < COOLDOWN_MS) {
         ws.send(JSON.stringify({ type: "pixelReject", reason: "cooldown" }));
         return;
       }
@@ -320,6 +518,7 @@ wss.on("connection", (ws) => {
       const key = `${x},${y}`;
       pixels.set(key, teamId);
       broadcast({ type: "pixel", x, y, t: teamId });
+      scheduleStatsBroadcast();
       return;
     }
   });
@@ -331,6 +530,7 @@ wss.on("connection", (ws) => {
       teamPlayerCounts.set(tid, Math.max(0, c - 1));
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
     }
+    broadcastStatsImmediate();
   });
 });
 

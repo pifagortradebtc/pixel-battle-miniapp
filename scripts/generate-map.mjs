@@ -1,6 +1,7 @@
 /**
- * Процедурная «карта»: ~80% суши, ~15–20% океана (не география Земли).
- * Шум → порог по квантилю → Вороной по сушевым центрам для регионов.
+ * Карта ближе к «реальной»: органичные берега (шум + радиальный континент),
+ * океан в основном по периметру/низинам, не полосами сверху/снизу.
+ * Реки — отдельный тип клеток (узкие полосы из углов и с рёбер), непроходимы, как вода.
  * Запуск: npm run build-map
  */
 
@@ -14,10 +15,19 @@ const root = path.join(__dirname, "..");
 const W = 320;
 const H = 320;
 
-/** Доля клеток-океана (низкие значения шума) — середина диапазона 15–20% */
+/** Доля клеток «моря» (0 = океан) — середина ~15–20% */
 const OCEAN_FRACTION = 0.17;
 
-/** Число «стран» (регионов Вороного на суше), ≤ 255 */
+/** Доля клеток «реки» от всей карты (узкие русла) */
+const RIVER_FRACTION_TARGET = 0.045;
+
+/** Число русел (из углов и с рёбер к центру / внутрь) */
+const NUM_RIVERS = 11;
+
+/** Радиус «кисти» реки (1 = узко, 2 = чуть шире) */
+const RIVER_RADIUS = 2;
+
+/** Число регионов Вороного на сушe (без воды), ≤ 254 */
 const NUM_REGIONS = 100;
 
 function hash2(ix, iy) {
@@ -54,36 +64,46 @@ function fbm(x, y) {
   return sum / norm;
 }
 
+/** Высота «континента»: центр выше, углы ниже + искажение для естественных заливов */
+function continentHeight(x, y) {
+  const nx = (x + 0.5) / W - 0.5;
+  const ny = (y + 0.5) / H - 0.5;
+  const r = Math.sqrt(nx * nx + ny * ny);
+  const radial = Math.max(0, 1 - r * r * 1.55);
+
+  const wx = x + 42 * fbm(x * 0.018, y * 0.018);
+  const wy = y + 42 * fbm(x * 0.018 + 71, y * 0.018 + 33);
+
+  let h = 0.58 * fbm(wx * 0.0105, wy * 0.0105);
+  h += 0.26 * fbm(wx * 0.024, wy * 0.024);
+  h += 0.11 * fbm(wx * 0.048, wy * 0.048);
+  h += 0.05 * fbm(wx * 0.09, wy * 0.09);
+  h += radial * 0.44;
+  h -= 0.1;
+  return h;
+}
+
 const height = new Float32Array(W * H);
 for (let y = 0; y < H; y++) {
   for (let x = 0; x < W; x++) {
-    height[y * W + x] = fbm(x, y);
+    height[y * W + x] = continentHeight(x, y);
   }
 }
 
-/** Ровно floor(OCEAN_FRACTION * N) клеток с наименьшей «высотой» — океан (остальное — суша). */
 const cellIdx = Array.from({ length: W * H }, (_, i) => i);
 cellIdx.sort((a, b) => height[a] - height[b]);
 const oceanCount = Math.floor(OCEAN_FRACTION * W * H);
 const oceanSet = new Set(cellIdx.slice(0, oceanCount));
 
-const landMask = new Uint8Array(W * H);
-const landCoords = [];
-for (let y = 0; y < H; y++) {
-  for (let x = 0; x < W; x++) {
-    const i = y * W + x;
-    const isLand = !oceanSet.has(i);
-    landMask[i] = isLand ? 1 : 0;
-    if (isLand) landCoords.push({ x, y });
-  }
-}
-
+const initialLand = new Uint8Array(W * H);
 let oceanPct = 0;
-for (let i = 0; i < landMask.length; i++) {
-  if (!landMask[i]) oceanPct++;
+for (let i = 0; i < W * H; i++) {
+  const isOcean = oceanSet.has(i);
+  initialLand[i] = isOcean ? 0 : 1;
+  if (isOcean) oceanPct++;
 }
 oceanPct = (100 * oceanPct) / (W * H);
-console.log(`Океан: ~${oceanPct.toFixed(1)}% (цель ~${(OCEAN_FRACTION * 100).toFixed(0)}%), суша: ~${(100 - oceanPct).toFixed(1)}%`);
+console.log(`Океан: ~${oceanPct.toFixed(1)}% (цель ~${(OCEAN_FRACTION * 100).toFixed(0)}%)`);
 
 function mulberry32(seed) {
   return function () {
@@ -94,12 +114,151 @@ function mulberry32(seed) {
   };
 }
 
-const rng = mulberry32(0x9e3779b9);
+const rng = mulberry32(0x4b1d4e77);
+
+/** Стартовые точки: углы + середины сторон + несколько случайных на границе */
+function borderStarts() {
+  const s = [];
+  const m = 8;
+  s.push({ x: m, y: m });
+  s.push({ x: W - 1 - m, y: m });
+  s.push({ x: m, y: H - 1 - m });
+  s.push({ x: W - 1 - m, y: H - 1 - m });
+  s.push({ x: Math.floor(W / 2), y: m });
+  s.push({ x: Math.floor(W / 2), y: H - 1 - m });
+  s.push({ x: m, y: Math.floor(H / 2) });
+  s.push({ x: W - 1 - m, y: Math.floor(H / 2) });
+  for (let k = 0; k < 12; k++) {
+    const edge = (rng() * 4) | 0;
+    if (edge === 0) s.push({ x: (rng() * (W - 1)) | 0, y: 0 });
+    else if (edge === 1) s.push({ x: W - 1, y: (rng() * (H - 1)) | 0 });
+    else if (edge === 2) s.push({ x: (rng() * (W - 1)) | 0, y: H - 1 });
+    else s.push({ x: 0, y: (rng() * (H - 1)) | 0 });
+  }
+  return s;
+}
+
+const starts = borderStarts();
+shuffle(starts);
+
+/** Цель для русла: центр с разбросом или «противоположный» квадрант */
+function pickEnd(rng) {
+  const cx = W * (0.35 + rng() * 0.3);
+  const cy = H * (0.35 + rng() * 0.3);
+  return { x: cx, y: cy };
+}
 
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
+
+/** Меандрирующий путь по суше к цели */
+function traceRiver(sx, sy, ex, ey, landMask) {
+  let x = sx;
+  let y = sy;
+  const path = [];
+  const maxSteps = 900;
+  for (let step = 0; step < maxSteps; step++) {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    if (xi >= 0 && xi < W && yi >= 0 && yi < H && landMask[yi * W + xi]) {
+      path.push({ x: xi, y: yi });
+    }
+    const dx = ex - x;
+    const dy = ey - y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 6) break;
+    const base = Math.atan2(dy, dx);
+    const wander = Math.sin(step * 0.11 + rng() * 8) * 0.55 + (rng() - 0.5) * 0.65;
+    const ang = base + wander;
+    const stepLen = 1.15 + rng() * 0.55;
+    x += Math.cos(ang) * stepLen;
+    y += Math.sin(ang) * stepLen;
+    if (x < 0 || x >= W || y < 0 || y >= H) break;
+  }
+  return path;
+}
+
+/** Сдвиг старта на ближайшую сушу от угла */
+function snapToLand(px, py, landMask) {
+  let bx = Math.max(0, Math.min(W - 1, px | 0));
+  let by = Math.max(0, Math.min(H - 1, py | 0));
+  if (landMask[by * W + bx]) return { x: bx, y: by };
+  let best = null;
+  let bestD = Infinity;
+  for (let r = 1; r < 80; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        const nx = bx + dx;
+        const ny = by + dy;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        const i = ny * W + nx;
+        if (!landMask[i]) continue;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          best = { x: nx, y: ny };
+        }
+      }
+    }
+    if (best) return best;
+  }
+  return { x: W >> 1, y: H >> 1 };
+}
+
+const riverMask = new Uint8Array(W * H);
+
+for (let r = 0; r < NUM_RIVERS; r++) {
+  const st = starts[r % starts.length];
+  const end = pickEnd(rng);
+  const s0 = snapToLand(st.x, st.y, initialLand);
+  const path = traceRiver(s0.x, s0.y, end.x, end.y, initialLand);
+  for (const p of path) {
+    for (let dy = -RIVER_RADIUS; dy <= RIVER_RADIUS; dy++) {
+      for (let dx = -RIVER_RADIUS; dx <= RIVER_RADIUS; dx++) {
+        if (dx * dx + dy * dy > RIVER_RADIUS * RIVER_RADIUS + 0.5) continue;
+        const nx = p.x + dx;
+        const ny = p.y + dy;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        const i = ny * W + nx;
+        if (initialLand[i]) riverMask[i] = 1;
+      }
+    }
+  }
+}
+
+/** Ограничить долю рек: снять лишние с самых «коротких» участков — упрощённо: случайно убрать часть точек если перебор */
+let riverCells = 0;
+for (let i = 0; i < W * H; i++) {
+  if (riverMask[i]) riverCells++;
+}
+const maxRiver = Math.floor(RIVER_FRACTION_TARGET * W * H);
+if (riverCells > maxRiver) {
+  const indices = [];
+  for (let i = 0; i < W * H; i++) {
+    if (riverMask[i]) indices.push(i);
+  }
+  shuffle(indices);
+  for (let k = maxRiver; k < indices.length; k++) {
+    riverMask[indices[k]] = 0;
+  }
+  riverCells = maxRiver;
+}
+console.log(`Реки: ~${((100 * riverCells) / (W * H)).toFixed(2)}% клеток`);
+
+/** Суша для игры: была суша и не река. Код клетки: 0 океан, 1 река, 2.. — регион */
+const paintableLand = new Uint8Array(W * H);
+const landCoords = [];
+for (let y = 0; y < H; y++) {
+  for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    const ok = initialLand[i] && !riverMask[i];
+    paintableLand[i] = ok ? 1 : 0;
+    if (ok) landCoords.push({ x, y });
   }
 }
 
@@ -112,8 +271,12 @@ const cells = new Uint8Array(W * H);
 for (let y = 0; y < H; y++) {
   for (let x = 0; x < W; x++) {
     const i = y * W + x;
-    if (!landMask[i]) {
+    if (!initialLand[i]) {
       cells[i] = 0;
+      continue;
+    }
+    if (riverMask[i]) {
+      cells[i] = 1;
       continue;
     }
     let best = 0;
@@ -124,17 +287,19 @@ for (let y = 0; y < H; y++) {
       const d = dx * dx + dy * dy;
       if (d < bestD) {
         bestD = d;
-        best = s + 1;
+        best = s;
       }
     }
-    cells[i] = best > 255 ? 0 : best;
+    const rid = best + 2;
+    cells[i] = rid > 255 ? 2 : rid;
   }
 }
 
-const countryNames = new Array(seeds.length + 1).fill("");
-countryNames[0] = "";
-for (let i = 1; i <= seeds.length; i++) {
-  countryNames[i] = `Территория ${i}`;
+const countryNames = new Array(Math.min(256, seeds.length + 2)).fill("");
+countryNames[0] = "Океан";
+countryNames[1] = "Река";
+for (let i = 2; i <= seeds.length + 1; i++) {
+  countryNames[i] = `Территория ${i - 1}`;
 }
 
 const out = {

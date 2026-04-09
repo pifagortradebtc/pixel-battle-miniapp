@@ -1,3 +1,5 @@
 node_modules/
 .env
 *.log
+# Локальное состояние сервера (команды, счётчик id)
+data/dynamic-teams.json

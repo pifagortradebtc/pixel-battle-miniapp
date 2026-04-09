@@ -1,6 +1,6 @@
 /**
- * Pixel Battle — карта мира, команды (только из списка), WebSocket.
- * Локально (?nows / без сервера): палитра. Онлайн: цвет команды, выбор команды, лимит 200.
+ * Pixel Battle — карта мира, команды, WebSocket.
+ * Локально: палитра кисти. Онлайн: цвет задаётся командой (или соло при входе).
  */
 
 const GRID_W = 320;
@@ -8,11 +8,13 @@ const GRID_H = 320;
 const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
-const COOLDOWN_MS = 1200;
+const COOLDOWN_MS = 0;
 
 const STORAGE_KEY = "pixel-battle-v2";
 const LEGACY_STORAGE_KEY = "pixel-battle-v1";
 const SESSION_TEAM = "pixel-battle-team";
+/** JSON: { [teamId: string]: editToken } — у создателя публичной команды */
+const SESSION_TEAM_EDIT = "pixel-battle-team-edit-tokens";
 const WS_PATH = "/ws";
 
 /** Быстрый выбор эмодзи для команды */
@@ -36,17 +38,41 @@ const teamBadgeCount = document.getElementById("team-badge-count");
 const cooldownLabel = document.getElementById("cooldown-label");
 const connStatus = document.getElementById("conn-status");
 const btnReset = document.getElementById("btn-reset");
+const welcomeOverlay = document.getElementById("welcome-overlay");
+const welcomeNameInput = document.getElementById("welcome-name");
+const welcomePaletteEl = document.getElementById("welcome-palette");
+const btnWelcomeSolo = document.getElementById("btn-welcome-solo");
+const btnWelcomeCreate = document.getElementById("btn-welcome-create");
+const btnWelcomeJoin = document.getElementById("btn-welcome-join");
 const teamOverlay = document.getElementById("team-overlay");
+const btnTeamOverlayBack = document.getElementById("btn-team-overlay-back");
 const teamListEl = document.getElementById("team-list");
 const btnReferral = document.getElementById("btn-referral");
+const btnLeaveTeam = document.getElementById("btn-leave-team");
 const teamBadgeEmoji = document.getElementById("team-badge-emoji");
 const teamSettingsOverlay = document.getElementById("team-settings-overlay");
 const teamSettingsName = document.getElementById("team-settings-name");
 const teamSettingsEmojiInput = document.getElementById("team-settings-emoji");
 const teamSettingsEmojiPresets = document.getElementById("team-settings-emoji-presets");
+const teamSettingsColorPaletteEl = document.getElementById("team-settings-color-palette");
 const btnTeamSettings = document.getElementById("btn-team-settings");
 const btnTeamSettingsSave = document.getElementById("team-settings-save");
 const btnTeamSettingsCancel = document.getElementById("team-settings-cancel");
+const createTeamOverlay = document.getElementById("create-team-overlay");
+const createTeamNameInput = document.getElementById("create-team-name");
+const createTeamEmojiInput = document.getElementById("create-team-emoji");
+const createTeamEmojiPresets = document.getElementById("create-team-emoji-presets");
+const createTeamColorPaletteEl = document.getElementById("create-team-color-palette");
+const btnOpenCreateTeam = document.getElementById("btn-open-create-team");
+const btnCreateTeamCancel = document.getElementById("create-team-cancel");
+const btnCreateTeamSubmit = document.getElementById("create-team-submit");
+const referralSplashOverlay = document.getElementById("referral-splash-overlay");
+const referralSplashText = document.getElementById("referral-splash-text");
+const btnReferralSplashCopy = document.getElementById("referral-splash-copy");
+const btnReferralSplashOk = document.getElementById("referral-splash-ok");
+const leaderboardPanel = document.getElementById("leaderboard-panel");
+const onlineCountEl = document.getElementById("online-count");
+const leaderboardListEl = document.getElementById("leaderboard-list");
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -55,6 +81,12 @@ const pixels = new Map();
 let regionCells = null;
 
 let selectedColor = 5;
+/** Индекс в PALETTE для welcome / создания команды / настроек (онлайн) */
+let welcomeColorIdx = 5;
+let createTeamColorIdx = 5;
+let teamSettingsColorIdx = 5;
+/** Откуда открыли форму создания команды — «Назад» ведёт на welcome или список команд */
+let createTeamFromWelcome = false;
 let scale = 1;
 let offsetX = 0;
 let offsetY = 0;
@@ -110,14 +142,20 @@ async function loadRegions() {
 }
 
 function countryColor(regionId) {
-  if (!regionId) return "#0a1628";
-  const h = (regionId * 53) % 360;
-  return `hsl(${h} 38% 32%)`;
+  if (regionId === 0) return "#071018";
+  if (regionId === 1) return "#143d52";
+  const h = ((regionId - 2) * 53) % 360;
+  return `hsl(${h} 36% 30%)`;
 }
 
 function teamColor(teamId) {
   const t = teamsMeta?.find((x) => x.id === teamId);
   return t ? t.color : "#888888";
+}
+
+function paletteIndexForHex(hex) {
+  const i = PALETTE.indexOf(hex);
+  return i >= 0 ? i : 5;
 }
 
 function setConnState(state, text) {
@@ -126,13 +164,49 @@ function setConnState(state, text) {
   connStatus.title = text;
 }
 
+function getTeamEditToken(teamId) {
+  try {
+    const raw = sessionStorage.getItem(SESSION_TEAM_EDIT);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    const t = o[String(teamId)];
+    return typeof t === "string" && t.length > 0 ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+function setTeamEditToken(teamId, token) {
+  try {
+    const raw = sessionStorage.getItem(SESSION_TEAM_EDIT);
+    const o = raw ? JSON.parse(raw) : {};
+    o[String(teamId)] = token;
+    sessionStorage.setItem(SESSION_TEAM_EDIT, JSON.stringify(o));
+  } catch {
+    /* ignore */
+  }
+}
+
+function isCurrentTeamSolo() {
+  if (myTeamId == null || !teamsMeta) return false;
+  return !!teamsMeta.find((x) => x.id === myTeamId)?.solo;
+}
+
+/** Публичная команда: только создатель с токеном. Соло настраивается только при входе. */
+function canEditTeamSettings() {
+  if (myTeamId == null) return false;
+  if (isCurrentTeamSolo()) return false;
+  return !!getTeamEditToken(myTeamId);
+}
+
 function setFooterMode() {
   const online = wantOnline;
   const joined = myTeamId != null;
   paletteEl.hidden = online;
   teamBadge.hidden = !online || !joined;
-  if (btnReferral) btnReferral.hidden = !online || !joined;
-  if (btnTeamSettings) btnTeamSettings.hidden = !online || !joined;
+  if (btnReferral) btnReferral.hidden = !online || !joined || isCurrentTeamSolo();
+  if (btnTeamSettings) btnTeamSettings.hidden = !online || !joined || !canEditTeamSettings();
+  if (btnLeaveTeam) btnLeaveTeam.hidden = !online || !joined;
   if (online && joined) updateTeamBadge();
 }
 
@@ -142,17 +216,57 @@ function updateTeamBadge() {
   if (!t) return;
   if (teamBadgeEmoji) teamBadgeEmoji.textContent = t.emoji || "";
   teamBadgeName.textContent = t.name;
-  teamBadgeName.style.color = t.color;
+  teamBadgeName.style.removeProperty("color");
   const cnt = teamCounts[t.id] ?? 0;
   teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
 }
 
-function applyTeamDisplay(teamId, name, emoji) {
+function formatPercent(pct) {
+  const n = typeof pct === "number" ? pct : 0;
+  if (n >= 10) return n.toFixed(1);
+  if (n >= 1) return n.toFixed(1);
+  return n.toFixed(2);
+}
+
+function renderLeaderboard(msg) {
+  if (!onlineCountEl || !leaderboardListEl) return;
+  onlineCountEl.textContent = String(msg.online ?? 0);
+  leaderboardListEl.replaceChildren();
+  for (const row of msg.rows || []) {
+    const li = document.createElement("li");
+    li.className = "leaderboard__row";
+    if (myTeamId != null && row.teamId === myTeamId) li.classList.add("leaderboard__row--mine");
+    li.style.borderLeftColor = row.color || "#888";
+    const top = document.createElement("div");
+    top.className = "leaderboard__topline";
+    const rank = document.createElement("span");
+    rank.className = "leaderboard__rank";
+    rank.textContent = `#${row.rank}`;
+    const em = document.createElement("span");
+    em.className = "leaderboard__emoji";
+    em.textContent = row.emoji || "";
+    top.append(rank, em);
+    const name = document.createElement("div");
+    name.className = "leaderboard__name";
+    name.textContent = row.name || "";
+    const meta = document.createElement("div");
+    meta.className = "leaderboard__meta";
+    const pct = typeof row.percent === "number" ? row.percent : 0;
+    const players = typeof row.players === "number" ? row.players : 0;
+    meta.textContent = `${formatPercent(pct)}% территории · ${players} чел.`;
+    li.append(top, name, meta);
+    leaderboardListEl.appendChild(li);
+  }
+}
+
+function applyTeamDisplay(teamId, name, emoji, color) {
   if (!teamsMeta) return;
   const t = teamsMeta.find((x) => x.id === teamId);
   if (!t) return;
   t.name = name;
   t.emoji = emoji;
+  if (color && typeof color === "string") t.color = color;
+  draw();
 }
 
 function loadFromStorage() {
@@ -216,6 +330,7 @@ function rebuildTeamList() {
   teamListEl.innerHTML = "";
   if (!teamsMeta) return;
   for (const t of teamsMeta) {
+    if (t.solo) continue;
     const cnt = teamCounts[t.id] ?? 0;
     const full = cnt >= maxPerTeam;
     const btn = document.createElement("button");
@@ -302,11 +417,16 @@ function buildTelegramReferralUrl() {
   return `https://t.me/${cleanBot}/${cleanApp}?startapp=team_${myTeamId}`;
 }
 
-async function copyReferralLink() {
-  if (myTeamId == null) return;
+function getReferralLinkText() {
+  if (myTeamId == null) return "";
   const web = buildWebReferralUrl();
   const tgUrl = buildTelegramReferralUrl();
-  const text = tgUrl ? `${web}\n${tgUrl}` : web;
+  return tgUrl ? `${web}\n${tgUrl}` : web;
+}
+
+async function copyReferralLink() {
+  if (myTeamId == null) return;
+  const text = getReferralLinkText();
   const tg = window.Telegram?.WebApp;
   try {
     await navigator.clipboard.writeText(text);
@@ -327,6 +447,164 @@ function setupReferralButton() {
   if (!btnReferral) return;
   btnReferral.addEventListener("click", () => {
     copyReferralLink();
+  });
+}
+
+function showReferralSplash() {
+  if (referralSplashText) referralSplashText.value = getReferralLinkText();
+  if (referralSplashOverlay) referralSplashOverlay.hidden = false;
+}
+
+function hideReferralSplash() {
+  if (referralSplashOverlay) referralSplashOverlay.hidden = true;
+}
+
+function syncCreateEmojiPresetHighlight() {
+  if (!createTeamEmojiPresets || !createTeamEmojiInput) return;
+  const cur = createTeamEmojiInput.value.trim();
+  createTeamEmojiPresets.querySelectorAll(".emoji-presets__btn").forEach((btn) => {
+    btn.setAttribute("aria-pressed", btn.textContent === cur ? "true" : "false");
+  });
+}
+
+function buildCreateTeamEmojiPresets() {
+  if (!createTeamEmojiPresets) return;
+  createTeamEmojiPresets.innerHTML = "";
+  for (const e of EMOJI_PRESETS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "emoji-presets__btn";
+    b.textContent = e;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => {
+      if (createTeamEmojiInput) createTeamEmojiInput.value = e;
+      syncCreateEmojiPresetHighlight();
+    });
+    createTeamEmojiPresets.appendChild(b);
+  }
+  createTeamEmojiInput?.addEventListener("input", syncCreateEmojiPresetHighlight);
+}
+
+function buildSwatchPalette(container, selectedIdx, onPick) {
+  if (!container) return;
+  container.innerHTML = "";
+  PALETTE.forEach((hex, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "palette__swatch";
+    b.style.backgroundColor = hex;
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", i === selectedIdx ? "true" : "false");
+    b.dataset.index = String(i);
+    b.title = hex;
+    b.addEventListener("click", () => {
+      onPick(i);
+      container.querySelectorAll(".palette__swatch").forEach((el) => {
+        el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
+      });
+    });
+    container.appendChild(b);
+  });
+}
+
+function buildWelcomePalette() {
+  buildSwatchPalette(welcomePaletteEl, welcomeColorIdx, (i) => {
+    welcomeColorIdx = i;
+  });
+}
+
+function buildCreateTeamPalette() {
+  buildSwatchPalette(createTeamColorPaletteEl, createTeamColorIdx, (i) => {
+    createTeamColorIdx = i;
+  });
+}
+
+function buildTeamSettingsColorPalette() {
+  buildSwatchPalette(teamSettingsColorPaletteEl, teamSettingsColorIdx, (i) => {
+    teamSettingsColorIdx = i;
+  });
+}
+
+function openCreateTeamOverlay(fromWelcome) {
+  createTeamFromWelcome = !!fromWelcome;
+  if (createTeamNameInput) createTeamNameInput.value = "";
+  if (createTeamEmojiInput) createTeamEmojiInput.value = EMOJI_PRESETS[0] || "🔥";
+  syncCreateEmojiPresetHighlight();
+  createTeamColorIdx = fromWelcome ? welcomeColorIdx : 5;
+  buildCreateTeamPalette();
+  if (createTeamOverlay) createTeamOverlay.hidden = false;
+}
+
+function closeCreateTeamOverlay() {
+  if (createTeamOverlay) createTeamOverlay.hidden = true;
+}
+
+function submitCreateTeam() {
+  const name = createTeamNameInput?.value.trim() ?? "";
+  const emoji = createTeamEmojiInput?.value.trim() ?? "";
+  const color = PALETTE[createTeamColorIdx];
+  if (!name || !emoji || !color) {
+    const tg = window.Telegram?.WebApp;
+    const msg = "Укажите название, смайлик и цвет команды.";
+    if (typeof tg?.showAlert === "function") tg.showAlert(msg);
+    else alert(msg);
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "createTeam", name, emoji, color }));
+}
+
+function submitWelcomeSolo() {
+  const name = welcomeNameInput?.value.trim() ?? "";
+  if (!name) {
+    const tg = window.Telegram?.WebApp;
+    const msg = "Введите имя.";
+    if (typeof tg?.showAlert === "function") tg.showAlert(msg);
+    else alert(msg);
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "soloPlay", name, color: PALETTE[welcomeColorIdx] }));
+}
+
+function setupWelcomeUi() {
+  buildWelcomePalette();
+  btnWelcomeSolo?.addEventListener("click", submitWelcomeSolo);
+  btnWelcomeCreate?.addEventListener("click", () => {
+    if (welcomeOverlay) welcomeOverlay.hidden = true;
+    openCreateTeamOverlay(true);
+  });
+  btnWelcomeJoin?.addEventListener("click", () => {
+    if (welcomeOverlay) welcomeOverlay.hidden = true;
+    if (teamOverlay) teamOverlay.hidden = false;
+  });
+  btnTeamOverlayBack?.addEventListener("click", () => {
+    if (teamOverlay) teamOverlay.hidden = true;
+    if (welcomeOverlay) welcomeOverlay.hidden = false;
+  });
+}
+
+function setupCreateTeamUi() {
+  buildCreateTeamEmojiPresets();
+  btnOpenCreateTeam?.addEventListener("click", () => openCreateTeamOverlay(false));
+  btnCreateTeamCancel?.addEventListener("click", () => {
+    closeCreateTeamOverlay();
+    if (createTeamFromWelcome) {
+      if (welcomeOverlay) welcomeOverlay.hidden = false;
+    } else if (teamOverlay) {
+      teamOverlay.hidden = false;
+    }
+  });
+  btnCreateTeamSubmit?.addEventListener("click", submitCreateTeam);
+  createTeamOverlay?.addEventListener("click", (e) => {
+    if (e.target === createTeamOverlay) closeCreateTeamOverlay();
+  });
+  btnReferralSplashCopy?.addEventListener("click", () => {
+    copyReferralLink();
+  });
+  btnReferralSplashOk?.addEventListener("click", hideReferralSplash);
+  referralSplashOverlay?.addEventListener("click", (e) => {
+    if (e.target === referralSplashOverlay) hideReferralSplash();
   });
 }
 
@@ -358,11 +636,14 @@ function buildEmojiPresets() {
 
 function openTeamSettings() {
   if (!myTeamId || !teamsMeta || !teamSettingsOverlay) return;
+  if (!canEditTeamSettings()) return;
   const t = teamsMeta.find((x) => x.id === myTeamId);
   if (!t) return;
   if (teamSettingsName) teamSettingsName.value = t.name || "";
   if (teamSettingsEmojiInput) teamSettingsEmojiInput.value = t.emoji || "";
   syncEmojiPresetHighlight();
+  teamSettingsColorIdx = paletteIndexForHex(t.color);
+  buildTeamSettingsColorPalette();
   teamSettingsOverlay.hidden = false;
 }
 
@@ -375,7 +656,10 @@ function saveTeamSettings() {
   const name = teamSettingsName.value.trim();
   const emoji = teamSettingsEmojiInput.value.trim();
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "updateTeam", name, emoji }));
+  const tok = getTeamEditToken(myTeamId);
+  if (!tok) return;
+  const color = PALETTE[teamSettingsColorIdx];
+  ws.send(JSON.stringify({ type: "updateTeam", name, emoji, editToken: tok, color }));
   closeTeamSettings();
 }
 
@@ -389,6 +673,26 @@ function setupTeamSettingsUi() {
   });
 }
 
+function requestLeaveTeam() {
+  const tg = window.Telegram?.WebApp;
+  const run = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "leaveTeam" }));
+  };
+  const text = "Выйти из команды? Затем можно создать свою или вступить в другую.";
+  if (typeof tg?.showConfirm === "function") {
+    tg.showConfirm(text, (ok) => {
+      if (ok) run();
+    });
+  } else if (confirm(text)) {
+    run();
+  }
+}
+
+function setupLeaveTeamUi() {
+  btnLeaveTeam?.addEventListener("click", requestLeaveTeam);
+}
+
 function onMeta(msg) {
   teamsMeta = msg.teams || [];
   teamCounts = msg.teamCounts || {};
@@ -396,27 +700,29 @@ function onMeta(msg) {
   rebuildTeamList();
 
   const ref = getReferralTeamId();
-  const validRef = ref != null && teamsMeta.some((t) => t.id === ref);
+  const validRef = ref != null && teamsMeta.some((t) => t.id === ref && !t.solo);
 
   if (validRef) {
     sessionStorage.setItem(SESSION_TEAM, String(ref));
     trySessionJoin();
+    if (welcomeOverlay) welcomeOverlay.hidden = true;
     teamOverlay.hidden = true;
     return;
   }
 
   const saved = sessionStorage.getItem(SESSION_TEAM);
   if (saved) {
+    if (welcomeOverlay) welcomeOverlay.hidden = true;
     trySessionJoin();
   } else {
-    teamOverlay.hidden = false;
+    if (welcomeOverlay) welcomeOverlay.hidden = false;
+    teamOverlay.hidden = true;
   }
 }
 
 function notifyReject(reason) {
   const map = {
-    ocean: "Сюда нельзя (океан или вне карты).",
-    no_adj: "Сначала захватите соседнюю клетку своей командой.",
+    ocean: "Сюда нельзя (океан, река или вне карты).",
     cooldown: "Слишком часто.",
     no_team: "Сначала выберите команду.",
   };
@@ -437,6 +743,7 @@ function connectWs() {
   const url = getWsUrl();
   wantOnline = !!url;
   if (!url) {
+    if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("local", "локально");
     setFooterMode();
     return;
@@ -458,6 +765,7 @@ function connectWs() {
   ws.addEventListener("open", () => {
     setConnState("online", "онлайн");
     myTeamId = null;
+    if (leaderboardPanel) leaderboardPanel.hidden = false;
     setFooterMode();
   });
 
@@ -473,6 +781,10 @@ function connectWs() {
       onMeta(msg);
       return;
     }
+    if (msg.type === "stats") {
+      renderLeaderboard(msg);
+      return;
+    }
     if (msg.type === "counts") {
       teamCounts = msg.teamCounts || {};
       rebuildTeamList();
@@ -480,9 +792,72 @@ function connectWs() {
       return;
     }
     if (msg.type === "teamDisplay") {
-      applyTeamDisplay(msg.teamId, msg.name, msg.emoji);
+      applyTeamDisplay(msg.teamId, msg.name, msg.emoji, msg.color);
       rebuildTeamList();
       updateTeamBadge();
+      return;
+    }
+    if (msg.type === "teamsFull") {
+      teamsMeta = msg.teams || [];
+      rebuildTeamList();
+      updateTeamBadge();
+      return;
+    }
+    if (msg.type === "created") {
+      teamsMeta = msg.teams || [];
+      teamCounts = msg.teamCounts || {};
+      myTeamId = msg.teamId;
+      sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      if (typeof msg.editToken === "string" && msg.editToken.length > 0 && msg.teamId != null) {
+        setTeamEditToken(msg.teamId, msg.editToken);
+      }
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      teamOverlay.hidden = true;
+      closeCreateTeamOverlay();
+      stripTeamFromUrl();
+      rebuildTeamList();
+      setFooterMode();
+      schedulePersist();
+      showReferralSplash();
+      return;
+    }
+    if (msg.type === "soloError") {
+      const map = {
+        already: "Сначала выйдите из текущей команды.",
+        fields: "Введите имя и выберите цвет.",
+        limit: "Достигнут лимит команд на сервере.",
+      };
+      const text = map[msg.reason] || "Не удалось начать соло.";
+      const tg = window.Telegram?.WebApp;
+      if (typeof tg?.showAlert === "function") tg.showAlert(text);
+      else alert(text);
+      return;
+    }
+    if (msg.type === "soloJoined") {
+      teamsMeta = msg.teams || [];
+      teamCounts = msg.teamCounts || {};
+      myTeamId = msg.teamId;
+      sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      teamOverlay.hidden = true;
+      closeCreateTeamOverlay();
+      stripTeamFromUrl();
+      rebuildTeamList();
+      setFooterMode();
+      schedulePersist();
+      draw();
+      return;
+    }
+    if (msg.type === "createTeamError") {
+      const map = {
+        already: "Сначала выйдите из текущей команды (кнопка «Выйти из команды»).",
+        fields: "Укажите название, смайлик и цвет команды.",
+        limit: "Достигнут лимит команд на сервере.",
+      };
+      const text = map[msg.reason] || "Не удалось создать команду.";
+      const tg = window.Telegram?.WebApp;
+      if (typeof tg?.showAlert === "function") tg.showAlert(text);
+      else alert(text);
       return;
     }
     if (msg.type === "updateTeamError") {
@@ -491,6 +866,8 @@ function connectWs() {
         name: "Укажите название команды.",
         emoji: "Выберите смайлик (эмодзи).",
         no_team: "Сначала вступите в команду.",
+        not_owner: "Название и смайлик может менять только создатель этой команды.",
+        solo: "В соло-режиме имя и цвет задаются при входе. Выйдите и зайдите снова или вступите в команду.",
       };
       const text = map[msg.reason] || "Не удалось сохранить.";
       const tg = window.Telegram?.WebApp;
@@ -502,12 +879,13 @@ function connectWs() {
           cooldownLabel.hidden = true;
         }, 2200);
       }
-      if (msg.reason !== "rate") openTeamSettings();
+      if (msg.reason !== "rate" && msg.reason !== "not_owner") openTeamSettings();
       return;
     }
     if (msg.type === "joined") {
       myTeamId = msg.teamId;
       sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
       teamOverlay.hidden = true;
       stripTeamFromUrl();
       setFooterMode();
@@ -519,17 +897,34 @@ function connectWs() {
         sessionStorage.removeItem(SESSION_TEAM);
         stripTeamFromUrl();
       }
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
       teamOverlay.hidden = false;
       rebuildTeamList();
+      return;
+    }
+    if (msg.type === "left") {
+      myTeamId = null;
+      sessionStorage.removeItem(SESSION_TEAM);
+      stripTeamFromUrl();
+      if (welcomeOverlay) welcomeOverlay.hidden = false;
+      teamOverlay.hidden = true;
+      closeCreateTeamOverlay();
+      closeTeamSettings();
+      hideReferralSplash();
+      rebuildTeamList();
+      setFooterMode();
+      schedulePersist();
+      return;
+    }
+    if (msg.type === "leaveError") {
       return;
     }
     if (msg.type === "full") {
       pixels.clear();
       for (const p of msg.pixels || []) {
-        if (Array.isArray(p) && p.length === 3) {
-          const [x, y, t] = p;
-          pixels.set(`${x},${y}`, t);
-        }
+        if (!Array.isArray(p) || p.length < 3) continue;
+        const [x, y, t] = p;
+        pixels.set(`${x},${y}`, t);
       }
       draw();
       if (wantOnline) flushToStorage();
@@ -555,6 +950,7 @@ function connectWs() {
     ws = null;
     myTeamId = null;
     teamsMeta = null;
+    if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("error", "нет связи");
     reconnectTimer = setTimeout(connectWs, 3500);
     setFooterMode();
@@ -658,7 +1054,7 @@ function draw() {
   for (let gy = y0; gy <= y1; gy++) {
     for (let gx = x0; gx <= x1; gx++) {
       const key = `${gx},${gy}`;
-      const idx = regionCells ? regionCells[gy * GRID_W + gx] : 1;
+      const idx = regionCells ? regionCells[gy * GRID_W + gx] : 2;
       const base = countryColor(idx);
       const owner = pixels.get(key);
       const px = offsetX + gx * cell;
@@ -671,10 +1067,9 @@ function draw() {
 
       if (owner !== undefined) {
         if (online) {
-          ctx.fillStyle = teamColor(owner);
-          ctx.globalAlpha = 0.78;
+          const tid = typeof owner === "number" ? owner : owner.teamId;
+          ctx.fillStyle = teamColor(tid);
           ctx.fillRect(px, py, cw, ch);
-          ctx.globalAlpha = 1;
         } else {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
           ctx.fillRect(px, py, cw, ch);
@@ -706,17 +1101,26 @@ function draw() {
 function placePixel(gx, gy) {
   if (gx < 0 || gx >= GRID_W || gy < 0 || gy >= GRID_H) return;
 
+  if (regionCells) {
+    const idx = regionCells[gy * GRID_W + gx];
+    if (idx < 2) {
+      notifyReject("ocean");
+      return;
+    }
+  }
+
   const online = wantOnline && getWsUrl();
   if (online) {
     if (myTeamId == null) {
       notifyReject("no_team");
-      teamOverlay.hidden = false;
+      if (welcomeOverlay) welcomeOverlay.hidden = false;
+      if (teamOverlay) teamOverlay.hidden = true;
       return;
     }
   }
 
   const now = Date.now();
-  if (now - lastPlaceAt < COOLDOWN_MS) {
+  if (COOLDOWN_MS > 0 && now - lastPlaceAt < COOLDOWN_MS) {
     showCooldown(COOLDOWN_MS - (now - lastPlaceAt));
     return;
   }
@@ -726,11 +1130,13 @@ function placePixel(gx, gy) {
     sendPixelOnline(gx, gy);
   } else {
     pixels.set(`${gx},${gy}`, selectedColor);
-    cooldownLabel.hidden = false;
-    cooldownLabel.textContent = `Пауза ${(COOLDOWN_MS / 1000).toFixed(1)} с`;
-    setTimeout(() => {
-      cooldownLabel.hidden = true;
-    }, 400);
+    if (COOLDOWN_MS > 0) {
+      cooldownLabel.hidden = false;
+      cooldownLabel.textContent = `Пауза ${(COOLDOWN_MS / 1000).toFixed(1)} с`;
+      setTimeout(() => {
+        cooldownLabel.hidden = true;
+      }, 400);
+    }
     schedulePersist();
     draw();
   }
@@ -833,7 +1239,8 @@ function setupGestures() {
         const t = e.touches[0];
         const dx = t.clientX - oneFinger.x;
         const dy = t.clientY - oneFinger.y;
-        if (Math.hypot(dx, dy) > 10) oneFinger.panning = true;
+        // Порог выше, иначе лёгкая дрожь пальца считается «панорамой» и тап не ставит пиксель
+        if (Math.hypot(dx, dy) > 28) oneFinger.panning = true;
         if (oneFinger.panning) {
           offsetX = oneFinger.ox + dx;
           offsetY = oneFinger.oy + dy;
@@ -851,15 +1258,19 @@ function setupGestures() {
       if (e.touches.length < 2) pinchStartDist = 0;
       if (e.touches.length === 0 && oneFinger) {
         const t = e.changedTouches[0];
-        const dx = t.clientX - oneFinger.x;
-        const dy = t.clientY - oneFinger.y;
-        const dt = Date.now() - oneFinger.t;
-        if (!oneFinger.panning && Math.hypot(dx, dy) < 16 && dt < 400) {
-          const rect = canvas.getBoundingClientRect();
-          const sx = t.clientX - rect.left;
-          const sy = t.clientY - rect.top;
-          const { gx, gy } = screenToGrid(sx, sy);
-          placePixel(gx, gy);
+        if (t) {
+          const dx = t.clientX - oneFinger.x;
+          const dy = t.clientY - oneFinger.y;
+          const dt = Date.now() - oneFinger.t;
+          const move = Math.hypot(dx, dy);
+          // Тап: небольшое смещение и время — не опираемся на panning (иначе дрожь ломает клик)
+          if (move < 32 && dt < 750) {
+            const rect = canvas.getBoundingClientRect();
+            const sx = t.clientX - rect.left;
+            const sy = t.clientY - rect.top;
+            const { gx, gy } = screenToGrid(sx, sy);
+            placePixel(gx, gy);
+          }
         }
         oneFinger = null;
       }
@@ -910,12 +1321,13 @@ async function bootstrap() {
   await loadRegions();
   loadFromStorage();
   wantOnline = !!getWsUrl();
-  if (!wantOnline) {
-    buildPalette();
-  }
+  buildPalette();
   setFooterMode();
   setupReferralButton();
+  setupWelcomeUi();
   setupTeamSettingsUi();
+  setupLeaveTeamUi();
+  setupCreateTeamUi();
   setupReset();
   setupGestures();
 
