@@ -162,3 +162,112 @@ body {
   outline: 2px solid var(--tg-button);
   outline-offset: 2px;
 }
+
+.palette[hidden],
+.team-badge[hidden] {
+  display: none !important;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  padding-top: calc(16px + var(--safe-top));
+  padding-bottom: calc(16px + var(--safe-bottom));
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.overlay[hidden] {
+  display: none;
+}
+
+.overlay__card {
+  width: 100%;
+  max-width: 400px;
+  max-height: min(90dvh, 560px);
+  overflow: auto;
+  padding: 18px 16px;
+  border-radius: 14px;
+  background: var(--tg-bg);
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 30%, transparent);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.overlay__title {
+  margin: 0 0 8px;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.overlay__hint {
+  margin: 0 0 14px;
+  font-size: 0.8rem;
+  color: var(--tg-hint);
+  line-height: 1.4;
+}
+
+.team-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.team-list__btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 2px solid color-mix(in srgb, var(--tg-hint) 35%, transparent);
+  background: color-mix(in srgb, var(--tg-bg) 95%, #fff);
+  color: var(--tg-text);
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+}
+
+.team-list__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.team-list__btn:not(:disabled):active {
+  opacity: 0.88;
+}
+
+.team-list__meta {
+  font-size: 0.75rem;
+  color: var(--tg-hint);
+  white-space: nowrap;
+}
+
+.team-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+}
+
+.team-badge__label {
+  color: var(--tg-hint);
+}
+
+.team-badge__name {
+  font-weight: 600;
+}
+
+.team-badge__count {
+  font-size: 0.78rem;
+  color: var(--tg-hint);
+}

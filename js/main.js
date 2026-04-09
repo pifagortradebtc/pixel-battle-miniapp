@@ -1,6 +1,6 @@
 /**
- * Pixel Battle — Telegram Mini App
- * Локальное сохранение, сброс, WebSocket к server.js (тот же хост, путь /ws).
+ * Pixel Battle — карта мира, команды (только из списка), WebSocket.
+ * Локально (?nows / без сервера): палитра. Онлайн: цвет команды, выбор команды, лимит 200.
  */
 
 const GRID_W = 320;
@@ -10,7 +10,9 @@ const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
 const COOLDOWN_MS = 1200;
 
-const STORAGE_KEY = "pixel-battle-v1";
+const STORAGE_KEY = "pixel-battle-v2";
+const LEGACY_STORAGE_KEY = "pixel-battle-v1";
+const SESSION_TEAM = "pixel-battle-team";
 const WS_PATH = "/ws";
 
 const PALETTE = [
@@ -22,12 +24,20 @@ const PALETTE = [
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d", { alpha: false });
 const paletteEl = document.getElementById("palette");
+const teamBadge = document.getElementById("team-badge");
+const teamBadgeName = document.getElementById("team-badge-name");
+const teamBadgeCount = document.getElementById("team-badge-count");
 const cooldownLabel = document.getElementById("cooldown-label");
 const connStatus = document.getElementById("conn-status");
 const btnReset = document.getElementById("btn-reset");
+const teamOverlay = document.getElementById("team-overlay");
+const teamListEl = document.getElementById("team-list");
 
-/** @type {Map<string, number>} key "x,y" -> palette index */
+/** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
+
+/** @type {Uint8Array | null} id страны на клетку, 0 = океан */
+let regionCells = null;
 
 let selectedColor = 5;
 let scale = 1;
@@ -38,6 +48,15 @@ let lastPlaceAt = 0;
 let persistTimer = null;
 let ws = null;
 let reconnectTimer = null;
+
+/** Онлайн-режим: есть URL WebSocket */
+let wantOnline = false;
+/** Успешно выбрана команда (онлайн) */
+let myTeamId = null;
+/** Мета с сервера */
+let teamsMeta = null;
+let teamCounts = {};
+let maxPerTeam = 200;
 
 function parseQuery() {
   const q = new URLSearchParams(location.search);
@@ -56,24 +75,75 @@ function getWsUrl() {
   return `${proto}//${location.host}${WS_PATH}`;
 }
 
+function b64ToUint8(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function loadRegions() {
+  try {
+    const r = await fetch("/data/regions-320.json");
+    if (!r.ok) throw new Error("no regions");
+    const j = await r.json();
+    regionCells = b64ToUint8(j.cellsBase64);
+    if (regionCells.length !== GRID_W * GRID_H) regionCells = null;
+  } catch {
+    regionCells = null;
+  }
+}
+
+function countryColor(regionId) {
+  if (!regionId) return "#0a1628";
+  const h = (regionId * 53) % 360;
+  return `hsl(${h} 38% 32%)`;
+}
+
+function teamColor(teamId) {
+  const t = teamsMeta?.find((x) => x.id === teamId);
+  return t ? t.color : "#888888";
+}
+
 function setConnState(state, text) {
   connStatus.dataset.state = state;
   connStatus.textContent = text;
   connStatus.title = text;
 }
 
+function setFooterMode() {
+  const online = wantOnline;
+  const joined = myTeamId != null;
+  paletteEl.hidden = online;
+  teamBadge.hidden = !online || !joined;
+  if (online && joined) updateTeamBadge();
+}
+
+function updateTeamBadge() {
+  if (!myTeamId || !teamsMeta) return;
+  const t = teamsMeta.find((x) => x.id === myTeamId);
+  if (!t) return;
+  teamBadgeName.textContent = t.name;
+  teamBadgeName.style.color = t.color;
+  const cnt = teamCounts[t.id] ?? 0;
+  teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
+}
+
 function loadFromStorage() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+    let raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (!raw) return;
+    }
     const data = JSON.parse(raw);
-    if (data.version !== 1) return;
+    if (data.version !== 1 && data.version !== 2) return;
     pixels.clear();
     if (Array.isArray(data.pixels)) {
       for (const item of data.pixels) {
         if (Array.isArray(item) && item.length === 3) {
-          const [x, y, c] = item;
-          pixels.set(`${x},${y}`, c);
+          const [x, y, v] = item;
+          pixels.set(`${x},${y}`, v);
         }
       }
     }
@@ -90,15 +160,19 @@ function loadFromStorage() {
 }
 
 function flushToStorage() {
+  const wantSavePixels = !wantOnline;
   const list = [];
-  for (const [key, c] of pixels) {
-    const [x, y] = key.split(",").map(Number);
-    list.push([x, y, c]);
+  if (wantSavePixels) {
+    for (const [key, v] of pixels) {
+      const [x, y] = key.split(",").map(Number);
+      list.push([x, y, v]);
+    }
   }
   const payload = {
-    version: 1,
-    pixels: list,
+    version: 2,
+    pixels: wantSavePixels ? list : [],
     view: { scale, offsetX, offsetY, color: selectedColor },
+    teamId: myTeamId,
   };
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -112,11 +186,83 @@ function schedulePersist() {
   persistTimer = setTimeout(flushToStorage, 420);
 }
 
+function rebuildTeamList() {
+  teamListEl.innerHTML = "";
+  if (!teamsMeta) return;
+  for (const t of teamsMeta) {
+    const cnt = teamCounts[t.id] ?? 0;
+    const full = cnt >= maxPerTeam;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "team-list__btn";
+    btn.disabled = full;
+    btn.setAttribute("role", "option");
+    const dot = document.createElement("span");
+    dot.textContent = "● ";
+    dot.style.color = t.color;
+    const name = document.createElement("span");
+    name.textContent = t.name;
+    const left = document.createElement("span");
+    left.appendChild(dot);
+    left.appendChild(name);
+    const meta = document.createElement("span");
+    meta.className = "team-list__meta";
+    meta.textContent = `${cnt} / ${maxPerTeam}`;
+    btn.appendChild(left);
+    btn.appendChild(meta);
+    btn.addEventListener("click", () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "joinTeam", teamId: t.id }));
+    });
+    teamListEl.appendChild(btn);
+  }
+}
+
+function trySessionJoin() {
+  const saved = sessionStorage.getItem(SESSION_TEAM);
+  if (!saved || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "joinTeam", teamId: Number(saved) }));
+}
+
+function onMeta(msg) {
+  teamsMeta = msg.teams || [];
+  teamCounts = msg.teamCounts || {};
+  maxPerTeam = msg.maxPerTeam ?? 200;
+  rebuildTeamList();
+  const saved = sessionStorage.getItem(SESSION_TEAM);
+  if (saved) {
+    trySessionJoin();
+  } else {
+    teamOverlay.hidden = false;
+  }
+}
+
+function notifyReject(reason) {
+  const map = {
+    ocean: "Сюда нельзя (океан или вне карты).",
+    no_adj: "Сначала захватите соседнюю клетку своей командой.",
+    cooldown: "Слишком часто.",
+    no_team: "Сначала выберите команду.",
+  };
+  const text = map[reason] || reason;
+  const tg = window.Telegram?.WebApp;
+  if (typeof tg?.showAlert === "function") tg.showAlert(text);
+  else {
+    cooldownLabel.hidden = false;
+    cooldownLabel.textContent = text;
+    setTimeout(() => {
+      cooldownLabel.hidden = true;
+    }, 1600);
+  }
+}
+
 function connectWs() {
   clearTimeout(reconnectTimer);
   const url = getWsUrl();
+  wantOnline = !!url;
   if (!url) {
     setConnState("local", "локально");
+    setFooterMode();
     return;
   }
 
@@ -135,6 +281,8 @@ function connectWs() {
 
   ws.addEventListener("open", () => {
     setConnState("online", "онлайн");
+    myTeamId = null;
+    setFooterMode();
   });
 
   ws.addEventListener("message", (ev) => {
@@ -144,27 +292,68 @@ function connectWs() {
     } catch {
       return;
     }
+
+    if (msg.type === "meta") {
+      onMeta(msg);
+      return;
+    }
+    if (msg.type === "counts") {
+      teamCounts = msg.teamCounts || {};
+      rebuildTeamList();
+      updateTeamBadge();
+      return;
+    }
+    if (msg.type === "joined") {
+      myTeamId = msg.teamId;
+      sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      teamOverlay.hidden = true;
+      setFooterMode();
+      schedulePersist();
+      return;
+    }
+    if (msg.type === "joinError") {
+      if (msg.reason === "full") {
+        sessionStorage.removeItem(SESSION_TEAM);
+      }
+      teamOverlay.hidden = false;
+      rebuildTeamList();
+      return;
+    }
     if (msg.type === "full") {
       pixels.clear();
       for (const p of msg.pixels || []) {
         if (Array.isArray(p) && p.length === 3) {
-          const [x, y, c] = p;
-          pixels.set(`${x},${y}`, c);
+          const [x, y, t] = p;
+          pixels.set(`${x},${y}`, t);
         }
       }
       draw();
-      flushToStorage();
-    } else if (msg.type === "pixel") {
-      pixels.set(`${msg.x},${msg.y}`, msg.c);
+      if (wantOnline) flushToStorage();
+      else schedulePersist();
+      return;
+    }
+    if (msg.type === "pixel") {
+      pixels.set(`${msg.x},${msg.y}`, msg.t);
       draw();
       schedulePersist();
+      return;
+    }
+    if (msg.type === "pixelReject") {
+      if (msg.reason !== "cooldown") {
+        lastPlaceAt = 0;
+      }
+      notifyReject(msg.reason || "");
+      return;
     }
   });
 
   ws.addEventListener("close", () => {
     ws = null;
+    myTeamId = null;
+    teamsMeta = null;
     setConnState("error", "нет связи");
     reconnectTimer = setTimeout(connectWs, 3500);
+    setFooterMode();
   });
 
   ws.addEventListener("error", () => {
@@ -172,9 +361,9 @@ function connectWs() {
   });
 }
 
-function sendPixel(gx, gy, c) {
+function sendPixelOnline(gx, gy) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "pixel", x: gx, y: gy, c }));
+    ws.send(JSON.stringify({ type: "pixel", x: gx, y: gy }));
   }
 }
 
@@ -252,7 +441,7 @@ function draw() {
   const h = canvas.clientHeight;
   const cell = BASE_CELL * scale;
 
-  ctx.fillStyle = "#0d1117";
+  ctx.fillStyle = "#050810";
   ctx.fillRect(0, 0, w, h);
 
   const x0 = Math.max(0, Math.floor((0 - offsetX) / cell));
@@ -260,19 +449,38 @@ function draw() {
   const x1 = Math.min(GRID_W - 1, Math.ceil((w - offsetX) / cell));
   const y1 = Math.min(GRID_H - 1, Math.ceil((h - offsetY) / cell));
 
+  const online = wantOnline && getWsUrl();
+
   for (let gy = y0; gy <= y1; gy++) {
     for (let gx = x0; gx <= x1; gx++) {
       const key = `${gx},${gy}`;
-      const idx = pixels.get(key);
+      const idx = regionCells ? regionCells[gy * GRID_W + gx] : 1;
+      const base = countryColor(idx);
+      const owner = pixels.get(key);
       const px = offsetX + gx * cell;
       const py = offsetY + gy * cell;
-      ctx.fillStyle = idx !== undefined ? PALETTE[idx] : "#1e2630";
-      ctx.fillRect(px, py, Math.ceil(cell), Math.ceil(cell));
+      const cw = Math.ceil(cell);
+      const ch = Math.ceil(cell);
+
+      ctx.fillStyle = base;
+      ctx.fillRect(px, py, cw, ch);
+
+      if (owner !== undefined) {
+        if (online) {
+          ctx.fillStyle = teamColor(owner);
+          ctx.globalAlpha = 0.78;
+          ctx.fillRect(px, py, cw, ch);
+          ctx.globalAlpha = 1;
+        } else {
+          ctx.fillStyle = PALETTE[owner] ?? "#888";
+          ctx.fillRect(px, py, cw, ch);
+        }
+      }
     }
   }
 
   if (cell >= 6) {
-    ctx.strokeStyle = "rgba(255,255,255,0.04)";
+    ctx.strokeStyle = "rgba(255,255,255,0.035)";
     ctx.lineWidth = 1;
     for (let gx = x0; gx <= x1 + 1; gx++) {
       const x = offsetX + gx * cell;
@@ -293,21 +501,35 @@ function draw() {
 
 function placePixel(gx, gy) {
   if (gx < 0 || gx >= GRID_W || gy < 0 || gy >= GRID_H) return;
+
+  const online = wantOnline && getWsUrl();
+  if (online) {
+    if (myTeamId == null) {
+      notifyReject("no_team");
+      teamOverlay.hidden = false;
+      return;
+    }
+  }
+
   const now = Date.now();
   if (now - lastPlaceAt < COOLDOWN_MS) {
     showCooldown(COOLDOWN_MS - (now - lastPlaceAt));
     return;
   }
   lastPlaceAt = now;
-  pixels.set(`${gx},${gy}`, selectedColor);
-  sendPixel(gx, gy, selectedColor);
-  cooldownLabel.hidden = false;
-  cooldownLabel.textContent = `Пауза ${(COOLDOWN_MS / 1000).toFixed(1)} с`;
-  setTimeout(() => {
-    cooldownLabel.hidden = true;
-  }, 400);
-  schedulePersist();
-  draw();
+
+  if (online) {
+    sendPixelOnline(gx, gy);
+  } else {
+    pixels.set(`${gx},${gy}`, selectedColor);
+    cooldownLabel.hidden = false;
+    cooldownLabel.textContent = `Пауза ${(COOLDOWN_MS / 1000).toFixed(1)} с`;
+    setTimeout(() => {
+      cooldownLabel.hidden = true;
+    }, 400);
+    schedulePersist();
+    draw();
+  }
 }
 
 function showCooldown(ms) {
@@ -329,6 +551,7 @@ function setupReset() {
       offsetY = 0;
       try {
         localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
       } catch {
         /* ignore */
       }
@@ -339,7 +562,7 @@ function setupReset() {
 
     const tg = window.Telegram?.WebApp;
     if (typeof tg?.showConfirm === "function") {
-      tg.showConfirm("Очистить поле? (для всех, если есть связь с сервером)", (ok) => {
+      tg.showConfirm("Очистить захваченные клетки для всех?", (ok) => {
         if (ok) run();
       });
     } else if (confirm("Очистить поле?")) {
@@ -478,17 +701,25 @@ function setupGestures() {
   );
 }
 
-initTelegram();
-loadFromStorage();
-buildPalette();
-setupReset();
-setupGestures();
+async function bootstrap() {
+  initTelegram();
+  await loadRegions();
+  loadFromStorage();
+  wantOnline = !!getWsUrl();
+  if (!wantOnline) {
+    buildPalette();
+  }
+  setFooterMode();
+  setupReset();
+  setupGestures();
 
-window.addEventListener("resize", resizeCanvas);
-window.addEventListener("pagehide", () => {
-  flushToStorage();
-});
-if (document.fonts?.ready) document.fonts.ready.then(resizeCanvas);
-else resizeCanvas();
+  window.addEventListener("resize", resizeCanvas);
+  window.addEventListener("pagehide", () => {
+    flushToStorage();
+  });
+  if (document.fonts?.ready) await document.fonts.ready;
+  resizeCanvas();
+  connectWs();
+}
 
-connectWs();
+bootstrap();

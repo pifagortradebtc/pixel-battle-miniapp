@@ -9,6 +9,14 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
+  <div id="team-overlay" class="overlay" hidden>
+    <div class="overlay__card">
+      <h2 class="overlay__title">Выберите команду</h2>
+      <p class="overlay__hint">Доступны только команды из списка. Создать свою нельзя. До 200 игроков в команде.</p>
+      <div id="team-list" class="team-list" role="listbox" aria-label="Команды"></div>
+    </div>
+  </div>
+
   <div id="app" class="app">
     <header class="toolbar">
       <div class="toolbar__title">Pixel Battle</div>
@@ -20,11 +28,16 @@
     </header>
 
     <main class="stage-wrap">
-      <canvas id="board" class="board" aria-label="Игровое поле"></canvas>
-      <div id="hint" class="hint">Два пальца — масштаб и сдвиг. Один тап — пиксель.</div>
+      <canvas id="board" class="board" aria-label="Карта мира"></canvas>
+      <div id="hint" class="hint">Два пальца — масштаб и сдвиг. Тап — пиксель своей команды. Первый ход — на суше; дальше — рядом со своей территорией. Океан нельзя.</div>
     </main>
 
     <footer class="palette-bar">
+      <div id="team-badge" class="team-badge" hidden>
+        <span class="team-badge__label">Команда:</span>
+        <span id="team-badge-name" class="team-badge__name"></span>
+        <span id="team-badge-count" class="team-badge__count"></span>
+      </div>
       <div id="palette" class="palette" role="listbox" aria-label="Палитра"></div>
     </footer>
   </div>
