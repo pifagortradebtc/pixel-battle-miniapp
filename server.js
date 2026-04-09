@@ -19,17 +19,73 @@ const GRID_H = 320;
 const COOLDOWN_MS = 1200;
 const MAX_PER_TEAM = 200;
 
-/** Фиксированные команды — свою создать нельзя */
+/** Слоты команд (id и цвет фиксированы). Название и эмодзи настраивают участники. */
 const TEAMS = [
-  { id: 1, name: "Альфа", color: "#e94560" },
-  { id: 2, name: "Бета", color: "#00cec9" },
-  { id: 3, name: "Гамма", color: "#fdcb6e" },
-  { id: 4, name: "Дельта", color: "#6c5ce7" },
-  { id: 5, name: "Эпсилон", color: "#e17055" },
-  { id: 6, name: "Дзета", color: "#0984e3" },
-  { id: 7, name: "Эта", color: "#00b894" },
-  { id: 8, name: "Тета", color: "#fab1a0" },
+  { id: 1, name: "Альфа", color: "#e94560", emoji: "🔴" },
+  { id: 2, name: "Бета", color: "#00cec9", emoji: "🔵" },
+  { id: 3, name: "Гамма", color: "#fdcb6e", emoji: "🟡" },
+  { id: 4, name: "Дельта", color: "#6c5ce7", emoji: "🟣" },
+  { id: 5, name: "Эпсилон", color: "#e17055", emoji: "🟠" },
+  { id: 6, name: "Дзета", color: "#0984e3", emoji: "💙" },
+  { id: 7, name: "Эта", color: "#00b894", emoji: "💚" },
+  { id: 8, name: "Тета", color: "#fab1a0", emoji: "🩷" },
 ];
+
+const TEAM_CUSTOM_PATH = path.join(ROOT, "data", "team-custom.json");
+
+/** @type {Record<string, { name?: string, emoji?: string }>} */
+let teamCustom = {};
+
+function loadTeamCustom() {
+  try {
+    if (fs.existsSync(TEAM_CUSTOM_PATH)) {
+      teamCustom = JSON.parse(fs.readFileSync(TEAM_CUSTOM_PATH, "utf8"));
+      if (!teamCustom || typeof teamCustom !== "object") teamCustom = {};
+    }
+  } catch (e) {
+    console.warn("team-custom load:", e.message);
+    teamCustom = {};
+  }
+}
+
+function saveTeamCustom() {
+  try {
+    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    fs.writeFileSync(TEAM_CUSTOM_PATH, JSON.stringify(teamCustom), "utf8");
+  } catch (e) {
+    console.warn("team-custom save:", e.message);
+  }
+}
+
+function sanitizeTeamName(s) {
+  return String(s ?? "")
+    .replace(/[\u0000-\u001F<>]/g, "")
+    .trim()
+    .slice(0, 40);
+}
+
+function sanitizeTeamEmoji(s) {
+  const t = String(s ?? "").trim().slice(0, 8);
+  return t;
+}
+
+function getMergedTeam(teamId) {
+  const base = TEAMS.find((t) => t.id === teamId);
+  if (!base) return null;
+  const c = teamCustom[String(teamId)] || {};
+  const name = typeof c.name === "string" && c.name.trim() ? sanitizeTeamName(c.name) : base.name;
+  const emoji = typeof c.emoji === "string" && c.emoji.trim() ? sanitizeTeamEmoji(c.emoji) : base.emoji;
+  return { id: teamId, color: base.color, name, emoji };
+}
+
+function teamsForMeta() {
+  return TEAMS.map((t) => getMergedTeam(t.id));
+}
+
+loadTeamCustom();
+
+/** @type {WeakMap<object, number>} */
+const lastTeamUpdate = new WeakMap();
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -157,7 +213,7 @@ wss.on("connection", (ws) => {
   ws.send(
     JSON.stringify({
       type: "meta",
-      teams: TEAMS,
+      teams: teamsForMeta(),
       teamCounts: teamCountsObj,
       maxPerTeam: MAX_PER_TEAM,
       grid: { w: GRID_W, h: GRID_H },
@@ -170,6 +226,37 @@ wss.on("connection", (ws) => {
     try {
       msg = JSON.parse(String(data));
     } catch {
+      return;
+    }
+
+    if (msg.type === "updateTeam") {
+      if (ws.teamId == null) {
+        ws.send(JSON.stringify({ type: "updateTeamError", reason: "no_team" }));
+        return;
+      }
+      const prev = lastTeamUpdate.get(ws) || 0;
+      if (Date.now() - prev < 5000) {
+        ws.send(JSON.stringify({ type: "updateTeamError", reason: "rate" }));
+        return;
+      }
+      const name = sanitizeTeamName(msg.name);
+      const emoji = sanitizeTeamEmoji(msg.emoji);
+      if (!name) {
+        ws.send(JSON.stringify({ type: "updateTeamError", reason: "name" }));
+        return;
+      }
+      if (!emoji) {
+        ws.send(JSON.stringify({ type: "updateTeamError", reason: "emoji" }));
+        return;
+      }
+      const tid = ws.teamId;
+      const key = String(tid);
+      if (!teamCustom[key]) teamCustom[key] = {};
+      teamCustom[key].name = name;
+      teamCustom[key].emoji = emoji;
+      saveTeamCustom();
+      lastTeamUpdate.set(ws, Date.now());
+      broadcast({ type: "teamDisplay", teamId: tid, name, emoji });
       return;
     }
 

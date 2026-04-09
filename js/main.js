@@ -15,6 +15,12 @@ const LEGACY_STORAGE_KEY = "pixel-battle-v1";
 const SESSION_TEAM = "pixel-battle-team";
 const WS_PATH = "/ws";
 
+/** Быстрый выбор эмодзи для команды */
+const EMOJI_PRESETS = [
+  "🔥", "🦁", "🐉", "🦅", "🐻", "🐋", "⚡", "🌟", "💎", "🎯", "🚀", "🛡️", "⚔️", "🌊", "🌸", "❄️",
+  "🦊", "🐙", "🦄", "☀️", "🌙", "💀", "👑", "🏴",
+];
+
 const PALETTE = [
   "#1a1a2e", "#16213e", "#0f3460", "#533483", "#e94560",
   "#ff6b6b", "#feca57", "#48dbfb", "#1dd1a1", "#ffffff",
@@ -33,6 +39,14 @@ const btnReset = document.getElementById("btn-reset");
 const teamOverlay = document.getElementById("team-overlay");
 const teamListEl = document.getElementById("team-list");
 const btnReferral = document.getElementById("btn-referral");
+const teamBadgeEmoji = document.getElementById("team-badge-emoji");
+const teamSettingsOverlay = document.getElementById("team-settings-overlay");
+const teamSettingsName = document.getElementById("team-settings-name");
+const teamSettingsEmojiInput = document.getElementById("team-settings-emoji");
+const teamSettingsEmojiPresets = document.getElementById("team-settings-emoji-presets");
+const btnTeamSettings = document.getElementById("btn-team-settings");
+const btnTeamSettingsSave = document.getElementById("team-settings-save");
+const btnTeamSettingsCancel = document.getElementById("team-settings-cancel");
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -118,6 +132,7 @@ function setFooterMode() {
   paletteEl.hidden = online;
   teamBadge.hidden = !online || !joined;
   if (btnReferral) btnReferral.hidden = !online || !joined;
+  if (btnTeamSettings) btnTeamSettings.hidden = !online || !joined;
   if (online && joined) updateTeamBadge();
 }
 
@@ -125,10 +140,19 @@ function updateTeamBadge() {
   if (!myTeamId || !teamsMeta) return;
   const t = teamsMeta.find((x) => x.id === myTeamId);
   if (!t) return;
+  if (teamBadgeEmoji) teamBadgeEmoji.textContent = t.emoji || "";
   teamBadgeName.textContent = t.name;
   teamBadgeName.style.color = t.color;
   const cnt = teamCounts[t.id] ?? 0;
   teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
+}
+
+function applyTeamDisplay(teamId, name, emoji) {
+  if (!teamsMeta) return;
+  const t = teamsMeta.find((x) => x.id === teamId);
+  if (!t) return;
+  t.name = name;
+  t.emoji = emoji;
 }
 
 function loadFromStorage() {
@@ -199,13 +223,15 @@ function rebuildTeamList() {
     btn.className = "team-list__btn";
     btn.disabled = full;
     btn.setAttribute("role", "option");
-    const dot = document.createElement("span");
-    dot.textContent = "● ";
-    dot.style.color = t.color;
+    const em = document.createElement("span");
+    em.className = "team-list__emoji";
+    em.textContent = t.emoji || "●";
     const name = document.createElement("span");
     name.textContent = t.name;
     const left = document.createElement("span");
-    left.appendChild(dot);
+    left.style.display = "flex";
+    left.style.alignItems = "center";
+    left.appendChild(em);
     left.appendChild(name);
     const meta = document.createElement("span");
     meta.className = "team-list__meta";
@@ -304,6 +330,65 @@ function setupReferralButton() {
   });
 }
 
+function syncEmojiPresetHighlight() {
+  if (!teamSettingsEmojiPresets || !teamSettingsEmojiInput) return;
+  const cur = teamSettingsEmojiInput.value.trim();
+  teamSettingsEmojiPresets.querySelectorAll(".emoji-presets__btn").forEach((btn) => {
+    btn.setAttribute("aria-pressed", btn.textContent === cur ? "true" : "false");
+  });
+}
+
+function buildEmojiPresets() {
+  if (!teamSettingsEmojiPresets) return;
+  teamSettingsEmojiPresets.innerHTML = "";
+  for (const e of EMOJI_PRESETS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "emoji-presets__btn";
+    b.textContent = e;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => {
+      teamSettingsEmojiInput.value = e;
+      syncEmojiPresetHighlight();
+    });
+    teamSettingsEmojiPresets.appendChild(b);
+  }
+  teamSettingsEmojiInput?.addEventListener("input", syncEmojiPresetHighlight);
+}
+
+function openTeamSettings() {
+  if (!myTeamId || !teamsMeta || !teamSettingsOverlay) return;
+  const t = teamsMeta.find((x) => x.id === myTeamId);
+  if (!t) return;
+  if (teamSettingsName) teamSettingsName.value = t.name || "";
+  if (teamSettingsEmojiInput) teamSettingsEmojiInput.value = t.emoji || "";
+  syncEmojiPresetHighlight();
+  teamSettingsOverlay.hidden = false;
+}
+
+function closeTeamSettings() {
+  teamSettingsOverlay.hidden = true;
+}
+
+function saveTeamSettings() {
+  if (!teamSettingsName || !teamSettingsEmojiInput) return;
+  const name = teamSettingsName.value.trim();
+  const emoji = teamSettingsEmojiInput.value.trim();
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "updateTeam", name, emoji }));
+  closeTeamSettings();
+}
+
+function setupTeamSettingsUi() {
+  buildEmojiPresets();
+  btnTeamSettings?.addEventListener("click", openTeamSettings);
+  btnTeamSettingsCancel?.addEventListener("click", closeTeamSettings);
+  btnTeamSettingsSave?.addEventListener("click", saveTeamSettings);
+  teamSettingsOverlay?.addEventListener("click", (e) => {
+    if (e.target === teamSettingsOverlay) closeTeamSettings();
+  });
+}
+
 function onMeta(msg) {
   teamsMeta = msg.teams || [];
   teamCounts = msg.teamCounts || {};
@@ -392,6 +477,32 @@ function connectWs() {
       teamCounts = msg.teamCounts || {};
       rebuildTeamList();
       updateTeamBadge();
+      return;
+    }
+    if (msg.type === "teamDisplay") {
+      applyTeamDisplay(msg.teamId, msg.name, msg.emoji);
+      rebuildTeamList();
+      updateTeamBadge();
+      return;
+    }
+    if (msg.type === "updateTeamError") {
+      const map = {
+        rate: "Подождите несколько секунд перед следующим изменением.",
+        name: "Укажите название команды.",
+        emoji: "Выберите смайлик (эмодзи).",
+        no_team: "Сначала вступите в команду.",
+      };
+      const text = map[msg.reason] || "Не удалось сохранить.";
+      const tg = window.Telegram?.WebApp;
+      if (typeof tg?.showAlert === "function") tg.showAlert(text);
+      else {
+        cooldownLabel.hidden = false;
+        cooldownLabel.textContent = text;
+        setTimeout(() => {
+          cooldownLabel.hidden = true;
+        }, 2200);
+      }
+      if (msg.reason !== "rate") openTeamSettings();
       return;
     }
     if (msg.type === "joined") {
@@ -804,6 +915,7 @@ async function bootstrap() {
   }
   setFooterMode();
   setupReferralButton();
+  setupTeamSettingsUi();
   setupReset();
   setupGestures();
 

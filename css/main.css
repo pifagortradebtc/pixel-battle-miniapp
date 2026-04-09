@@ -217,6 +217,11 @@ body {
   gap: 8px;
 }
 
+.team-list__emoji {
+  font-size: 1.2rem;
+  margin-right: 6px;
+}
+
 .team-list__btn {
   display: flex;
   align-items: center;
@@ -272,10 +277,16 @@ body {
   color: var(--tg-hint);
 }
 
-.team-badge__invite {
+.team-badge__emoji {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.team-badge__invite,
+.team-badge__settings {
   appearance: none;
-  border: 1px solid color-mix(in srgb, var(--tg-button) 55%, transparent);
-  background: color-mix(in srgb, var(--tg-button) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 40%, transparent);
+  background: color-mix(in srgb, var(--tg-bg) 88%, #fff);
   color: var(--tg-text);
   font-size: 0.78rem;
   font-weight: 600;
@@ -284,6 +295,88 @@ body {
   cursor: pointer;
 }
 
-.team-badge__invite:active {
+.team-badge__invite {
+  border-color: color-mix(in srgb, var(--tg-button) 55%, transparent);
+  background: color-mix(in srgb, var(--tg-button) 18%, transparent);
+}
+
+.team-badge__invite:active,
+.team-badge__settings:active {
   opacity: 0.88;
+}
+
+.overlay__card--settings {
+  max-width: 420px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.field__label {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--tg-hint);
+  margin-bottom: 4px;
+}
+
+.field__input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 35%, transparent);
+  background: color-mix(in srgb, var(--tg-bg) 96%, #fff);
+  color: var(--tg-text);
+  font-size: 1rem;
+}
+
+.emoji-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.emoji-presets__btn {
+  width: 42px;
+  height: 42px;
+  font-size: 1.35rem;
+  line-height: 1;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 35%, transparent);
+  background: color-mix(in srgb, var(--tg-bg) 94%, #fff);
+  cursor: pointer;
+  padding: 0;
+}
+
+.emoji-presets__btn[aria-pressed="true"] {
+  border-color: var(--tg-button);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--tg-button) 45%, transparent);
+}
+
+.overlay__actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
+
+.overlay__btn {
+  appearance: none;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--tg-button) 50%, transparent);
+  background: color-mix(in srgb, var(--tg-button) 28%, transparent);
+  color: var(--tg-text);
+}
+
+.overlay__btn--secondary {
+  border-color: color-mix(in srgb, var(--tg-hint) 40%, transparent);
+  background: color-mix(in srgb, var(--tg-bg) 92%, #fff);
 }

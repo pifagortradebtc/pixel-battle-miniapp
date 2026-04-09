@@ -12,6 +12,27 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
+  <div id="team-settings-overlay" class="overlay" hidden>
+    <div class="overlay__card overlay__card--settings">
+      <h2 class="overlay__title">Название и смайлик команды</h2>
+      <p class="overlay__hint">Видят все игроки. Любой участник команды может изменить (не чаще раза в 5 секунд).</p>
+      <label class="field">
+        <span class="field__label">Название</span>
+        <input type="text" id="team-settings-name" class="field__input" maxlength="40" autocomplete="off" />
+      </label>
+      <p class="field__label">Быстрый выбор</p>
+      <div id="team-settings-emoji-presets" class="emoji-presets" role="list"></div>
+      <label class="field">
+        <span class="field__label">Свой эмодзи</span>
+        <input type="text" id="team-settings-emoji" class="field__input" maxlength="8" inputmode="text" autocomplete="off" placeholder="например 🦁" />
+      </label>
+      <div class="overlay__actions">
+        <button type="button" id="team-settings-cancel" class="overlay__btn overlay__btn--secondary">Отмена</button>
+        <button type="button" id="team-settings-save" class="overlay__btn">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
   <div id="team-overlay" class="overlay" hidden>
     <div class="overlay__card">
       <h2 class="overlay__title">Выберите команду</h2>
@@ -38,8 +59,10 @@
     <footer class="palette-bar">
       <div id="team-badge" class="team-badge" hidden>
         <span class="team-badge__label">Команда:</span>
+        <span id="team-badge-emoji" class="team-badge__emoji" aria-hidden="true"></span>
         <span id="team-badge-name" class="team-badge__name"></span>
         <span id="team-badge-count" class="team-badge__count"></span>
+        <button type="button" id="btn-team-settings" class="team-badge__settings" hidden>Название и смайлик</button>
         <button type="button" id="btn-referral" class="team-badge__invite" hidden>Пригласить</button>
       </div>
       <div id="palette" class="palette" role="listbox" aria-label="Палитра"></div>
