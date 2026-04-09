@@ -54,7 +54,7 @@ function teamsForMeta() {
 
 const DYNAMIC_TEAMS_PATH = path.join(ROOT, "data", "dynamic-teams.json");
 
-/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean }[]} */
+/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string }[]} */
 let dynamicTeams = [];
 let nextTeamId = 1;
 
@@ -112,6 +112,8 @@ loadDynamicTeams();
 
 /** @type {WeakMap<object, number>} */
 const lastTeamUpdate = new WeakMap();
+/** Троттлинг смены только цвета (палитра внизу) */
+const lastColorOnlySet = new WeakMap();
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -364,6 +366,78 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (msg.type === "setTeamColor") {
+      if (ws.teamId == null) {
+        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "no_team" }));
+        return;
+      }
+      const prevC = lastColorOnlySet.get(ws) || 0;
+      if (Date.now() - prevC < 320) return;
+      const tid = ws.teamId;
+      const dt = dynamicTeams.find((x) => x.id === tid);
+      if (!dt || dt.solo) {
+        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "solo" }));
+        return;
+      }
+      const sent = typeof msg.editToken === "string" ? msg.editToken.trim() : "";
+      if (dt.editToken && sent !== dt.editToken) {
+        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "not_owner" }));
+        return;
+      }
+      const color = sanitizeHexColor(msg.color);
+      if (!color) {
+        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "color" }));
+        return;
+      }
+      dt.color = color;
+      saveDynamicTeams();
+      lastColorOnlySet.set(ws, Date.now());
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
+      broadcast({
+        type: "teamDisplay",
+        teamId: tid,
+        name: dt.name,
+        emoji: dt.emoji,
+        color: dt.color,
+      });
+      broadcastStatsImmediate();
+      return;
+    }
+
+    if (msg.type === "soloSetColor") {
+      if (ws.teamId == null) {
+        ws.send(JSON.stringify({ type: "soloColorError", reason: "no_team" }));
+        return;
+      }
+      const prevC = lastColorOnlySet.get(ws) || 0;
+      if (Date.now() - prevC < 320) return;
+      const tid = ws.teamId;
+      const dt = dynamicTeams.find((x) => x.id === tid);
+      const sent = typeof msg.resumeToken === "string" ? msg.resumeToken.trim() : "";
+      if (!dt || !dt.solo || !dt.soloResumeToken || sent !== dt.soloResumeToken) {
+        ws.send(JSON.stringify({ type: "soloColorError", reason: "invalid" }));
+        return;
+      }
+      const color = sanitizeHexColor(msg.color);
+      if (!color) {
+        ws.send(JSON.stringify({ type: "soloColorError", reason: "color" }));
+        return;
+      }
+      dt.color = color;
+      saveDynamicTeams();
+      lastColorOnlySet.set(ws, Date.now());
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
+      broadcast({
+        type: "teamDisplay",
+        teamId: tid,
+        name: dt.name,
+        emoji: dt.emoji,
+        color: dt.color,
+      });
+      broadcastStatsImmediate();
+      return;
+    }
+
     if (msg.type === "createTeam") {
       if (ws.teamId != null) {
         ws.send(JSON.stringify({ type: "createTeamError", reason: "already" }));
@@ -420,7 +494,8 @@ wss.on("connection", (ws) => {
       }
       const id = nextTeamId++;
       const emoji = sanitizeTeamEmoji(msg.emoji) || "🙂";
-      dynamicTeams.push({ id, name, emoji, color, solo: true });
+      const soloResumeToken = newTeamEditToken();
+      dynamicTeams.push({ id, name, emoji, color, solo: true, soloResumeToken });
       saveDynamicTeams();
       ws.teamId = id;
       teamPlayerCounts.set(id, 1);
@@ -430,6 +505,49 @@ wss.on("connection", (ws) => {
           type: "soloJoined",
           teamId: id,
           team,
+          resumeToken: soloResumeToken,
+          teams: teamsForMeta(),
+          teamCounts: Object.fromEntries(teamPlayerCounts),
+        })
+      );
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
+      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      broadcastStatsImmediate();
+      return;
+    }
+
+    if (msg.type === "soloResume") {
+      if (ws.teamId != null) {
+        ws.send(JSON.stringify({ type: "soloResumeError", reason: "already" }));
+        return;
+      }
+      const tid = Number(msg.teamId) | 0;
+      const sent = typeof msg.resumeToken === "string" ? msg.resumeToken.trim() : "";
+      const dt = dynamicTeams.find((t) => t.id === tid);
+      if (!dt || !dt.solo || !dt.soloResumeToken || sent !== dt.soloResumeToken) {
+        ws.send(JSON.stringify({ type: "soloResumeError", reason: "invalid" }));
+        return;
+      }
+      const cur = teamPlayerCounts.get(tid) || 0;
+      if (cur >= MAX_PER_TEAM) {
+        ws.send(JSON.stringify({ type: "soloResumeError", reason: "full" }));
+        return;
+      }
+      ws.teamId = tid;
+      teamPlayerCounts.set(tid, cur + 1);
+      const team = {
+        id: tid,
+        name: dt.name,
+        emoji: dt.emoji,
+        color: dt.color,
+        solo: true,
+      };
+      ws.send(
+        JSON.stringify({
+          type: "soloJoined",
+          teamId: tid,
+          team,
+          resumeToken: dt.soloResumeToken,
           teams: teamsForMeta(),
           teamCounts: Object.fromEntries(teamPlayerCounts),
         })
@@ -480,13 +598,6 @@ wss.on("connection", (ws) => {
       ws.teamId = null;
       ws.send(JSON.stringify({ type: "left" }));
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
-      broadcastStatsImmediate();
-      return;
-    }
-
-    if (msg.type === "clear") {
-      pixels.clear();
-      broadcast({ type: "full", pixels: [] });
       broadcastStatsImmediate();
       return;
     }

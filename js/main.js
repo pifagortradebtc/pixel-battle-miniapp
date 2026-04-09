@@ -1,6 +1,7 @@
 /**
  * Pixel Battle — карта мира, команды, WebSocket.
- * Локально: палитра кисти. Онлайн: цвет задаётся командой (или соло при входе).
+ * Локально: палитра кисти. Онлайн: соло и создатель команды меняют цвет снизу;
+ * остальные в команде рисуют цветом команды (задаёт создатель).
  */
 
 const GRID_W = 320;
@@ -15,6 +16,8 @@ const LEGACY_STORAGE_KEY = "pixel-battle-v1";
 const SESSION_TEAM = "pixel-battle-team";
 /** JSON: { [teamId: string]: editToken } — у создателя публичной команды */
 const SESSION_TEAM_EDIT = "pixel-battle-team-edit-tokens";
+/** Сохраняется в localStorage: команда, соло-токен, имя, цвет — переживает закрытие Mini App */
+const ONLINE_SESSION_KEY = "pixel-battle-online-session";
 const WS_PATH = "/ws";
 
 /** Быстрый выбор эмодзи для команды */
@@ -37,7 +40,7 @@ const teamBadgeName = document.getElementById("team-badge-name");
 const teamBadgeCount = document.getElementById("team-badge-count");
 const cooldownLabel = document.getElementById("cooldown-label");
 const connStatus = document.getElementById("conn-status");
-const btnReset = document.getElementById("btn-reset");
+const btnToolbarSession = document.getElementById("btn-toolbar-session");
 const welcomeOverlay = document.getElementById("welcome-overlay");
 const welcomeNameInput = document.getElementById("welcome-name");
 const welcomePaletteEl = document.getElementById("welcome-palette");
@@ -104,6 +107,8 @@ let myTeamId = null;
 let teamsMeta = null;
 let teamCounts = {};
 let maxPerTeam = 200;
+/** После выхода из соло открыть список команд, а не приветственный экран */
+let pendingLeaveToTeamList = false;
 
 function parseQuery() {
   const q = new URLSearchParams(location.search);
@@ -164,9 +169,88 @@ function setConnState(state, text) {
   connStatus.title = text;
 }
 
+function migrateLegacySessionStorage() {
+  try {
+    const oldTeam = sessionStorage.getItem(SESSION_TEAM);
+    if (oldTeam != null && oldTeam !== "" && !localStorage.getItem(ONLINE_SESSION_KEY)) {
+      const n = Number(oldTeam);
+      if (Number.isFinite(n)) {
+        saveOnlineSessionRaw({ teamId: n });
+        sessionStorage.removeItem(SESSION_TEAM);
+      }
+    }
+    const oldEdit = sessionStorage.getItem(SESSION_TEAM_EDIT);
+    if (oldEdit && !localStorage.getItem(SESSION_TEAM_EDIT)) {
+      localStorage.setItem(SESSION_TEAM_EDIT, oldEdit);
+      sessionStorage.removeItem(SESSION_TEAM_EDIT);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadOnlineSession() {
+  try {
+    const raw = localStorage.getItem(ONLINE_SESSION_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (o && typeof o.teamId === "number") return o;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function saveOnlineSessionRaw(obj) {
+  try {
+    localStorage.setItem(ONLINE_SESSION_KEY, JSON.stringify(obj));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** @param {Record<string, unknown>} patch */
+function saveOnlineSession(patch) {
+  try {
+    const cur = loadOnlineSession() || {};
+    const next = { ...cur, ...patch };
+    if (patch.solo === false) {
+      delete next.soloResumeToken;
+      next.solo = false;
+    }
+    localStorage.setItem(ONLINE_SESSION_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Сбросить команду, оставить имя и цвет для экрана входа (после выхода или ошибки вступления). */
+function clearTeamIdentityFromSession() {
+  try {
+    const s = loadOnlineSession();
+    if (!s) return;
+    saveOnlineSessionRaw({
+      playerName: s.playerName,
+      welcomeColorIdx: s.welcomeColorIdx,
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+function cacheTeamDisplayInSession() {
+  if (myTeamId == null) return;
+  const t = teamsMeta?.find((x) => x.id === myTeamId);
+  if (!t) return;
+  saveOnlineSession({
+    cachedTeamName: t.name,
+    cachedEmoji: t.emoji,
+  });
+}
+
 function getTeamEditToken(teamId) {
   try {
-    const raw = sessionStorage.getItem(SESSION_TEAM_EDIT);
+    const raw = localStorage.getItem(SESSION_TEAM_EDIT) || sessionStorage.getItem(SESSION_TEAM_EDIT);
     if (!raw) return null;
     const o = JSON.parse(raw);
     const t = o[String(teamId)];
@@ -178,18 +262,19 @@ function getTeamEditToken(teamId) {
 
 function setTeamEditToken(teamId, token) {
   try {
-    const raw = sessionStorage.getItem(SESSION_TEAM_EDIT);
+    const raw = localStorage.getItem(SESSION_TEAM_EDIT) || sessionStorage.getItem(SESSION_TEAM_EDIT);
     const o = raw ? JSON.parse(raw) : {};
     o[String(teamId)] = token;
-    sessionStorage.setItem(SESSION_TEAM_EDIT, JSON.stringify(o));
+    localStorage.setItem(SESSION_TEAM_EDIT, JSON.stringify(o));
   } catch {
     /* ignore */
   }
 }
 
 function isCurrentTeamSolo() {
-  if (myTeamId == null || !teamsMeta) return false;
-  return !!teamsMeta.find((x) => x.id === myTeamId)?.solo;
+  if (myTeamId == null) return false;
+  if (teamsMeta) return !!teamsMeta.find((x) => x.id === myTeamId)?.solo;
+  return !!loadOnlineSession()?.solo;
 }
 
 /** Публичная команда: только создатель с токеном. Соло настраивается только при входе. */
@@ -199,26 +284,105 @@ function canEditTeamSettings() {
   return !!getTeamEditToken(myTeamId);
 }
 
+/** Онлайн: цвет кисти выбирают только соло или создатель команды; остальные рисуют цветом команды. */
+function canPickOnlineDrawColor() {
+  if (myTeamId == null) return false;
+  return isCurrentTeamSolo() || canEditTeamSettings();
+}
+
+/** Подсветить нижнюю палитру по текущему цвету команды в мета. */
+function syncPaletteSelectionFromTeam() {
+  if (!myTeamId || !teamsMeta || !paletteEl.querySelector(".palette__swatch")) return;
+  const t = teamsMeta.find((x) => x.id === myTeamId);
+  if (!t?.color) return;
+  const idx = paletteIndexForHex(t.color);
+  selectedColor = idx;
+  paletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
+    el.setAttribute("aria-selected", el.dataset.index === String(idx) ? "true" : "false");
+  });
+}
+
+function sendOnlineColorChoice(hex) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (isCurrentTeamSolo()) {
+    const sess = loadOnlineSession();
+    const tok = sess?.soloResumeToken;
+    if (!tok) return;
+    ws.send(JSON.stringify({ type: "soloSetColor", color: hex, resumeToken: tok }));
+    return;
+  }
+  if (canEditTeamSettings()) {
+    const tok = getTeamEditToken(myTeamId);
+    if (!tok) return;
+    ws.send(JSON.stringify({ type: "setTeamColor", color: hex, editToken: tok }));
+  }
+}
+
 function setFooterMode() {
   const online = wantOnline;
   const joined = myTeamId != null;
-  paletteEl.hidden = online;
+  const localMode = !online;
+  const showPalette =
+    localMode || (online && joined && canPickOnlineDrawColor());
+  paletteEl.hidden = !showPalette;
   teamBadge.hidden = !online || !joined;
   if (btnReferral) btnReferral.hidden = !online || !joined || isCurrentTeamSolo();
   if (btnTeamSettings) btnTeamSettings.hidden = !online || !joined || !canEditTeamSettings();
-  if (btnLeaveTeam) btnLeaveTeam.hidden = !online || !joined;
+  if (btnLeaveTeam) {
+    btnLeaveTeam.hidden = !online || !joined;
+    if (online && joined) {
+      btnLeaveTeam.textContent = isCurrentTeamSolo() ? "Войти в команду" : "Выйти из команды";
+    }
+  }
   if (online && joined) updateTeamBadge();
+  if (showPalette && online && joined) syncPaletteSelectionFromTeam();
+  refreshToolbarSessionButton();
+}
+
+/** Подпись кнопки в шапке: не глобальная очистка карты, а сессия / локальный сброс. */
+function refreshToolbarSessionButton() {
+  if (!btnToolbarSession) return;
+  const online = wantOnline && getWsUrl();
+  if (online) {
+    if (myTeamId != null) {
+      if (isCurrentTeamSolo()) {
+        btnToolbarSession.textContent = "Войти в команду";
+        btnToolbarSession.title =
+          "Выйти из соло и открыть список команд — вступить или создать команду (карта на сервере сохраняется)";
+      } else {
+        btnToolbarSession.textContent = "Сменить команду";
+        btnToolbarSession.title =
+          "Выйти из текущей команды и снова выбрать соло или другую команду (карта для всех не сбрасывается)";
+      }
+    } else {
+      btnToolbarSession.textContent = "Войти";
+      btnToolbarSession.title = "Открыть экран входа: имя, соло или команда";
+    }
+  } else {
+    btnToolbarSession.textContent = "Очистить локально";
+    btnToolbarSession.title =
+      "Стереть только вашу локальную картинку на этом устройстве (на общую карту не влияет)";
+  }
 }
 
 function updateTeamBadge() {
-  if (!myTeamId || !teamsMeta) return;
-  const t = teamsMeta.find((x) => x.id === myTeamId);
-  if (!t) return;
-  if (teamBadgeEmoji) teamBadgeEmoji.textContent = t.emoji || "";
-  teamBadgeName.textContent = t.name;
-  teamBadgeName.style.removeProperty("color");
-  const cnt = teamCounts[t.id] ?? 0;
-  teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
+  if (!myTeamId) return;
+  const t = teamsMeta?.find((x) => x.id === myTeamId);
+  const s = loadOnlineSession();
+  if (t) {
+    if (teamBadgeEmoji) teamBadgeEmoji.textContent = t.emoji || "";
+    teamBadgeName.textContent = t.name;
+    teamBadgeName.style.removeProperty("color");
+    const cnt = teamCounts[t.id] ?? 0;
+    teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
+    return;
+  }
+  if (s && s.teamId === myTeamId && s.cachedTeamName) {
+    if (teamBadgeEmoji) teamBadgeEmoji.textContent = s.cachedEmoji || "";
+    teamBadgeName.textContent = s.cachedTeamName;
+    const cnt = teamCounts[myTeamId] ?? 0;
+    teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
+  }
 }
 
 function formatPercent(pct) {
@@ -361,10 +525,20 @@ function rebuildTeamList() {
   }
 }
 
-function trySessionJoin() {
-  const saved = sessionStorage.getItem(SESSION_TEAM);
-  if (!saved || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "joinTeam", teamId: Number(saved) }));
+function tryRestoreSession() {
+  const sess = loadOnlineSession();
+  if (!sess || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (sess.solo && sess.soloResumeToken) {
+    ws.send(
+      JSON.stringify({
+        type: "soloResume",
+        teamId: sess.teamId,
+        resumeToken: sess.soloResumeToken,
+      })
+    );
+  } else {
+    ws.send(JSON.stringify({ type: "joinTeam", teamId: sess.teamId }));
+  }
 }
 
 /**
@@ -510,6 +684,7 @@ function buildSwatchPalette(container, selectedIdx, onPick) {
 function buildWelcomePalette() {
   buildSwatchPalette(welcomePaletteEl, welcomeColorIdx, (i) => {
     welcomeColorIdx = i;
+    saveOnlineSession({ welcomeColorIdx: i });
   });
 }
 
@@ -564,11 +739,16 @@ function submitWelcomeSolo() {
     return;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  saveOnlineSession({ playerName: name, welcomeColorIdx });
   ws.send(JSON.stringify({ type: "soloPlay", name, color: PALETTE[welcomeColorIdx] }));
 }
 
 function setupWelcomeUi() {
   buildWelcomePalette();
+  welcomeNameInput?.addEventListener("input", () => {
+    const v = welcomeNameInput.value.trim();
+    if (v) saveOnlineSession({ playerName: v });
+  });
   btnWelcomeSolo?.addEventListener("click", submitWelcomeSolo);
   btnWelcomeCreate?.addEventListener("click", () => {
     if (welcomeOverlay) welcomeOverlay.hidden = true;
@@ -675,11 +855,15 @@ function setupTeamSettingsUi() {
 
 function requestLeaveTeam() {
   const tg = window.Telegram?.WebApp;
+  const solo = isCurrentTeamSolo();
   const run = () => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (solo) pendingLeaveToTeamList = true;
     ws.send(JSON.stringify({ type: "leaveTeam" }));
   };
-  const text = "Выйти из команды? Затем можно создать свою или вступить в другую.";
+  const text = solo
+    ? "Чтобы вступить в команду, вы выходите из соло. Ваши пиксели на карте остаются. Продолжить?"
+    : "Выйти из команды? Затем можно создать свою или вступить в другую.";
   if (typeof tg?.showConfirm === "function") {
     tg.showConfirm(text, (ok) => {
       if (ok) run();
@@ -703,21 +887,24 @@ function onMeta(msg) {
   const validRef = ref != null && teamsMeta.some((t) => t.id === ref && !t.solo);
 
   if (validRef) {
-    sessionStorage.setItem(SESSION_TEAM, String(ref));
-    trySessionJoin();
+    saveOnlineSession({ teamId: ref, solo: false });
+    tryRestoreSession();
     if (welcomeOverlay) welcomeOverlay.hidden = true;
     teamOverlay.hidden = true;
+    setFooterMode();
     return;
   }
 
-  const saved = sessionStorage.getItem(SESSION_TEAM);
-  if (saved) {
+  const sess = loadOnlineSession();
+  const savedTeamId = sess?.teamId;
+  if (savedTeamId != null) {
     if (welcomeOverlay) welcomeOverlay.hidden = true;
-    trySessionJoin();
+    tryRestoreSession();
   } else {
     if (welcomeOverlay) welcomeOverlay.hidden = false;
     teamOverlay.hidden = true;
   }
+  setFooterMode();
 }
 
 function notifyReject(reason) {
@@ -764,7 +951,8 @@ function connectWs() {
 
   ws.addEventListener("open", () => {
     setConnState("online", "онлайн");
-    myTeamId = null;
+    const sess = loadOnlineSession();
+    myTeamId = sess?.teamId ?? null;
     if (leaderboardPanel) leaderboardPanel.hidden = false;
     setFooterMode();
   });
@@ -789,25 +977,35 @@ function connectWs() {
       teamCounts = msg.teamCounts || {};
       rebuildTeamList();
       updateTeamBadge();
+      cacheTeamDisplayInSession();
       return;
     }
     if (msg.type === "teamDisplay") {
       applyTeamDisplay(msg.teamId, msg.name, msg.emoji, msg.color);
       rebuildTeamList();
       updateTeamBadge();
+      cacheTeamDisplayInSession();
+      syncPaletteSelectionFromTeam();
       return;
     }
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
       rebuildTeamList();
       updateTeamBadge();
+      cacheTeamDisplayInSession();
+      syncPaletteSelectionFromTeam();
       return;
     }
     if (msg.type === "created") {
       teamsMeta = msg.teams || [];
       teamCounts = msg.teamCounts || {};
       myTeamId = msg.teamId;
-      sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      saveOnlineSession({
+        teamId: msg.teamId,
+        solo: false,
+        cachedTeamName: msg.team?.name,
+        cachedEmoji: msg.team?.emoji,
+      });
       if (typeof msg.editToken === "string" && msg.editToken.length > 0 && msg.teamId != null) {
         setTeamEditToken(msg.teamId, msg.editToken);
       }
@@ -819,6 +1017,9 @@ function connectWs() {
       setFooterMode();
       schedulePersist();
       showReferralSplash();
+      return;
+    }
+    if (msg.type === "setTeamColorError" || msg.type === "soloColorError") {
       return;
     }
     if (msg.type === "soloError") {
@@ -837,7 +1038,18 @@ function connectWs() {
       teamsMeta = msg.teams || [];
       teamCounts = msg.teamCounts || {};
       myTeamId = msg.teamId;
-      sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      {
+        const patch = {
+          teamId: msg.teamId,
+          solo: true,
+          cachedTeamName: msg.team?.name,
+          cachedEmoji: msg.team?.emoji,
+        };
+        if (typeof msg.resumeToken === "string" && msg.resumeToken.length > 0) {
+          patch.soloResumeToken = msg.resumeToken;
+        }
+        saveOnlineSession(patch);
+      }
       if (welcomeOverlay) welcomeOverlay.hidden = true;
       teamOverlay.hidden = true;
       closeCreateTeamOverlay();
@@ -884,7 +1096,8 @@ function connectWs() {
     }
     if (msg.type === "joined") {
       myTeamId = msg.teamId;
-      sessionStorage.setItem(SESSION_TEAM, String(msg.teamId));
+      saveOnlineSession({ teamId: msg.teamId, solo: false });
+      cacheTeamDisplayInSession();
       if (welcomeOverlay) welcomeOverlay.hidden = true;
       teamOverlay.hidden = true;
       stripTeamFromUrl();
@@ -892,22 +1105,43 @@ function connectWs() {
       schedulePersist();
       return;
     }
+    if (msg.type === "soloResumeError") {
+      if (msg.reason === "invalid" || msg.reason === "full") {
+        clearTeamIdentityFromSession();
+        stripTeamFromUrl();
+        myTeamId = null;
+      }
+      if (welcomeOverlay) welcomeOverlay.hidden = false;
+      teamOverlay.hidden = true;
+      rebuildTeamList();
+      setFooterMode();
+      return;
+    }
     if (msg.type === "joinError") {
       if (msg.reason === "full" || msg.reason === "team") {
-        sessionStorage.removeItem(SESSION_TEAM);
+        clearTeamIdentityFromSession();
         stripTeamFromUrl();
+        myTeamId = null;
       }
       if (welcomeOverlay) welcomeOverlay.hidden = true;
       teamOverlay.hidden = false;
       rebuildTeamList();
+      setFooterMode();
       return;
     }
     if (msg.type === "left") {
       myTeamId = null;
-      sessionStorage.removeItem(SESSION_TEAM);
+      clearTeamIdentityFromSession();
       stripTeamFromUrl();
-      if (welcomeOverlay) welcomeOverlay.hidden = false;
-      teamOverlay.hidden = true;
+      const openTeamList = pendingLeaveToTeamList;
+      pendingLeaveToTeamList = false;
+      if (openTeamList) {
+        if (welcomeOverlay) welcomeOverlay.hidden = true;
+        teamOverlay.hidden = false;
+      } else {
+        if (welcomeOverlay) welcomeOverlay.hidden = false;
+        teamOverlay.hidden = true;
+      }
       closeCreateTeamOverlay();
       closeTeamSettings();
       hideReferralSplash();
@@ -917,6 +1151,7 @@ function connectWs() {
       return;
     }
     if (msg.type === "leaveError") {
+      pendingLeaveToTeamList = false;
       return;
     }
     if (msg.type === "full") {
@@ -948,7 +1183,8 @@ function connectWs() {
 
   ws.addEventListener("close", () => {
     ws = null;
-    myTeamId = null;
+    const sess = loadOnlineSession();
+    myTeamId = sess?.teamId ?? null;
     teamsMeta = null;
     if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("error", "нет связи");
@@ -964,12 +1200,6 @@ function connectWs() {
 function sendPixelOnline(gx, gy) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "pixel", x: gx, y: gy }));
-  }
-}
-
-function sendClearToServer() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "clear" }));
   }
 }
 
@@ -1001,6 +1231,9 @@ function buildPalette() {
       paletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
         el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
       });
+      if (wantOnline && getWsUrl() && canPickOnlineDrawColor()) {
+        sendOnlineColorChoice(hex);
+      }
       schedulePersist();
     });
     paletteEl.appendChild(b);
@@ -1151,9 +1384,20 @@ function showCooldown(ms) {
   }, 800);
 }
 
-function setupReset() {
-  btnReset.addEventListener("click", () => {
-    const run = () => {
+function setupToolbarSession() {
+  if (!btnToolbarSession) return;
+  btnToolbarSession.addEventListener("click", () => {
+    const online = wantOnline && getWsUrl();
+    if (online) {
+      if (myTeamId != null) {
+        requestLeaveTeam();
+      } else {
+        if (welcomeOverlay) welcomeOverlay.hidden = false;
+        if (teamOverlay) teamOverlay.hidden = true;
+      }
+      return;
+    }
+    const runLocalClear = () => {
       pixels.clear();
       lastPlaceAt = 0;
       scale = 1;
@@ -1165,18 +1409,17 @@ function setupReset() {
       } catch {
         /* ignore */
       }
-      sendClearToServer();
       draw();
       resizeCanvas();
     };
-
     const tg = window.Telegram?.WebApp;
+    const q = "Очистить только локальную картинку на этом устройстве? Общая онлайн-карта не меняется.";
     if (typeof tg?.showConfirm === "function") {
-      tg.showConfirm("Очистить захваченные клетки для всех?", (ok) => {
-        if (ok) run();
+      tg.showConfirm(q, (ok) => {
+        if (ok) runLocalClear();
       });
-    } else if (confirm("Очистить поле?")) {
-      run();
+    } else if (confirm(q)) {
+      runLocalClear();
     }
   });
 }
@@ -1320,6 +1563,16 @@ async function bootstrap() {
   initTelegram();
   await loadRegions();
   loadFromStorage();
+  migrateLegacySessionStorage();
+  const os = loadOnlineSession();
+  if (os?.playerName && welcomeNameInput) welcomeNameInput.value = os.playerName;
+  if (
+    typeof os?.welcomeColorIdx === "number" &&
+    os.welcomeColorIdx >= 0 &&
+    os.welcomeColorIdx < PALETTE.length
+  ) {
+    welcomeColorIdx = os.welcomeColorIdx;
+  }
   wantOnline = !!getWsUrl();
   buildPalette();
   setFooterMode();
@@ -1328,7 +1581,7 @@ async function bootstrap() {
   setupTeamSettingsUi();
   setupLeaveTeamUi();
   setupCreateTeamUi();
-  setupReset();
+  setupToolbarSession();
   setupGestures();
 
   window.addEventListener("resize", resizeCanvas);
