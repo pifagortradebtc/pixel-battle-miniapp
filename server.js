@@ -130,6 +130,12 @@ const MAX_PER_TEAM_FIRST = 200;
 const MAX_PER_TEAM_NEXT = 10;
 /** Финальный раунд (команды по 2 человека) */
 const MAX_PER_TEAM_FINAL = 2;
+/**
+ * После полуфинала (конец раунда с индексом 1, на карте 64×64, в команде до 10 чел.)
+ * в следующий раунд (21×21, в команде до 2 чел.) проходят только первые N игроков победившей команды.
+ * Порядок — порядок добавления ключей в Set участников команды на сервере.
+ */
+const MAX_PLAYERS_ADVANCING_FROM_SEMI = 10;
 
 const ROUND_STATE_PATH = path.join(ROOT, "data", "round-state.json");
 
@@ -1506,14 +1512,15 @@ function maybeEndRound() {
     const winnerTeamId = rows[0].teamId;
     const winningTeamName = rows[0].name || "";
 
-    setEligibleKeysFromWinnerTeam(winnerTeamId);
+    /** Конец раунда 1 (полуфинал) → в раунд 2 только MAX_PLAYERS_ADVANCING_FROM_SEMI человек; конец раунда 0 → все победители. */
+    const eligibleCap = roundIndex === 1 ? MAX_PLAYERS_ADVANCING_FROM_SEMI : undefined;
+    setEligibleKeysFromWinnerTeam(winnerTeamId, eligibleCap);
 
     eligibleTokenSet = new Set();
     winnerTokensByPlayerKey = {};
     /** @type {Map<string, string>} */
     const tokenByPlayerKey = new Map();
-    const winnerKeys = teamMemberKeys.get(winnerTeamId) || new Set();
-    for (const pk of winnerKeys) {
+    for (const pk of eligiblePlayerKeys) {
       const tok = crypto.randomBytes(18).toString("hex");
       eligibleTokenSet.add(tok);
       winnerTokensByPlayerKey[pk] = tok;
@@ -1525,17 +1532,9 @@ function maybeEndRound() {
 
     for (const client of wss.clients) {
       if (client.readyState !== 1) continue;
-      if (client.teamId === winnerTeamId) {
-        const pk = client.playerKey ? sanitizePlayerKey(client.playerKey) : "";
-        let tok = pk ? tokenByPlayerKey.get(pk) : null;
-        if (!tok) {
-          tok = crypto.randomBytes(18).toString("hex");
-          eligibleTokenSet.add(tok);
-          if (pk) {
-            winnerTokensByPlayerKey[pk] = tok;
-            tokenByPlayerKey.set(pk, tok);
-          }
-        }
+      const pk = client.playerKey ? sanitizePlayerKey(client.playerKey) : "";
+      const tok = pk && tokenByPlayerKey.has(pk) ? tokenByPlayerKey.get(pk) : null;
+      if (tok) {
         winnerTokenByClient.set(client, tok);
         client.eligible = true;
         client.eliminated = false;
@@ -1543,10 +1542,6 @@ function maybeEndRound() {
         client.eligible = false;
         client.eliminated = true;
       }
-    }
-
-    for (const client of wss.clients) {
-      if (client.readyState !== 1) continue;
       client.teamId = null;
     }
 
