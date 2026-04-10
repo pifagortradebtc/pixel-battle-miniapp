@@ -275,6 +275,23 @@ function removeTeamMemberKey(teamId, playerKey) {
   if (teamMemberKeys.get(teamId).size === 0) teamMemberKeys.delete(teamId);
 }
 
+/** Сбрасывает ws.teamId, если команда удалена или этот playerKey не в составе (после смены раунда / рассинхрона). */
+function reconcileWsTeamMembership(ws) {
+  if (ws.teamId == null) return;
+  const tid = ws.teamId;
+  const dt = dynamicTeams.find((t) => t.id === tid);
+  if (!dt) {
+    ws.teamId = null;
+    return;
+  }
+  const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
+  if (!pk) return;
+  const set = teamMemberKeys.get(tid);
+  if (!set || !set.has(pk)) {
+    ws.teamId = null;
+  }
+}
+
 /** Цвет команды #RRGGBB */
 function sanitizeHexColor(s) {
   const t = String(s ?? "")
@@ -1538,6 +1555,7 @@ wss.on("connection", (ws, req) => {
     if (msg.type === "createTeam") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
+      reconcileWsTeamMembership(ws);
       if (roundIndex === 3) {
         safeSend(ws, { type: "createTeamError", reason: "duel" });
         return;
@@ -1582,6 +1600,7 @@ wss.on("connection", (ws, req) => {
     if (msg.type === "soloPlay") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
+      reconcileWsTeamMembership(ws);
       if (roundIndex === 2) {
         safeSend(ws,{ type: "soloError", reason: "round" });
         return;
@@ -1630,6 +1649,7 @@ wss.on("connection", (ws, req) => {
     if (msg.type === "soloResume") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
+      reconcileWsTeamMembership(ws);
       if (roundIndex === 2) {
         safeSend(ws,{ type: "soloResumeError", reason: "round" });
         return;
@@ -1677,6 +1697,7 @@ wss.on("connection", (ws, req) => {
     if (msg.type === "joinTeam") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
+      reconcileWsTeamMembership(ws);
       if (roundIndex === 3) {
         safeSend(ws, { type: "joinError", reason: "duel" });
         return;
