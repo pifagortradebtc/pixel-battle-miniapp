@@ -188,6 +188,23 @@ function getTelegramMiniAppLaunchUrl() {
   return "";
 }
 
+/** Публичная ссылка на чат/канал обсуждения игры (например `https://t.me/yourgroup`). Пусто — не показывать в клиенте. */
+const TELEGRAM_DISCUSSION_CHAT_URL = (process.env.TELEGRAM_DISCUSSION_CHAT_URL || "").trim();
+
+function getDiscussionChatUrlForClient() {
+  const raw = TELEGRAM_DISCUSSION_CHAT_URL;
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:") return "";
+    const host = u.hostname.toLowerCase();
+    if (host !== "t.me" && host !== "telegram.me") return "";
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
 /** Параметр после /start (реферал и т.д.) → добавляем в ссылку как ?startapp= */
 function parseStartPayload(text) {
   const m = /^\/start(?:@[\w]+)?\s*(.*)$/i.exec(String(text || "").trim());
@@ -1338,6 +1355,7 @@ function sendConnectionMeta(ws) {
     eligible: !!ws.eligible,
     gameFinished: !!gameFinished,
     tournamentStage: tournamentStage(roundIndex, gameFinished),
+    discussionChatUrl: getDiscussionChatUrlForClient(),
   });
   safeSend(ws, buildWalletPayload(ws));
 }

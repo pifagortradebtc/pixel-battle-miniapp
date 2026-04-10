@@ -120,6 +120,9 @@ const btnToolbarSession = document.getElementById("btn-toolbar-session");
 const welcomeOverlay = document.getElementById("welcome-overlay");
 const btnWelcomeCreate = document.getElementById("btn-welcome-create");
 const btnWelcomeJoin = document.getElementById("btn-welcome-join");
+const welcomeDiscussionWrap = document.getElementById("welcome-discussion-wrap");
+const welcomeDiscussionLink = document.getElementById("welcome-discussion-link");
+const toolbarDiscussionLink = document.getElementById("toolbar-discussion-link");
 /** Макс. длина названия команды в боковой панели и в списке (графемы Unicode). */
 const TEAM_NAME_DISPLAY_MAX = 6;
 const teamOverlay = document.getElementById("team-overlay");
@@ -1102,6 +1105,8 @@ function setupWelcomeUi() {
     if (teamOverlay) teamOverlay.hidden = true;
     showWelcomeOverlay();
   });
+  welcomeDiscussionLink?.addEventListener("click", openDiscussionChatLink);
+  toolbarDiscussionLink?.addEventListener("click", openDiscussionChatLink);
 }
 
 function setupCreateTeamUi() {
@@ -1242,7 +1247,34 @@ function leaveTeamToSwitch() {
   ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
 }
 
+/** Ссылка на чат обсуждения из `meta.discussionChatUrl` (сервер: TELEGRAM_DISCUSSION_CHAT_URL). */
+let discussionChatUrl = "";
+
+function openDiscussionChatLink(ev) {
+  if (ev) ev.preventDefault();
+  const url = discussionChatUrl;
+  if (!url) return;
+  const tg = window.Telegram?.WebApp;
+  if (typeof tg?.openLink === "function") tg.openLink(url, { try_instant_view: false });
+  else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function syncDiscussionChatLinks() {
+  const url = discussionChatUrl;
+  const show = Boolean(url);
+  if (welcomeDiscussionWrap) welcomeDiscussionWrap.hidden = !show;
+  if (toolbarDiscussionLink) toolbarDiscussionLink.hidden = !show;
+  if (welcomeDiscussionLink) welcomeDiscussionLink.href = url || "#";
+  if (toolbarDiscussionLink) toolbarDiscussionLink.href = url || "#";
+}
+
 function onMeta(msg) {
+  discussionChatUrl =
+    typeof msg.discussionChatUrl === "string" && msg.discussionChatUrl.trim()
+      ? msg.discussionChatUrl.trim()
+      : "";
+  syncDiscussionChatLinks();
+
   teamsMeta = msg.teams || [];
   teamCounts = msg.teamCounts || {};
   maxPerTeam = msg.maxPerTeam ?? 200;

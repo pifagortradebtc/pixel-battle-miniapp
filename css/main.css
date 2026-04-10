@@ -317,6 +317,34 @@ body {
   font-weight: 600;
 }
 
+.toolbar__discussion {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  line-height: 1;
+  text-decoration: none;
+  color: var(--tg-text);
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 30%, transparent);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: transform 0.15s ease, filter 0.2s ease;
+}
+
+.toolbar__discussion:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.toolbar__discussion:active {
+  opacity: 0.88;
+}
+
 .quick-buy-rail {
   position: absolute;
   z-index: 7;
@@ -782,6 +810,27 @@ body {
   line-height: 1.4;
   color: var(--tg-hint);
   text-align: center;
+}
+
+.welcome-panel__community {
+  margin: 0;
+  text-align: center;
+  font-size: 0.78rem;
+}
+
+.welcome-link {
+  color: var(--tg-link, #6ab7ff);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.welcome-link:hover {
+  filter: brightness(1.08);
+}
+
+.welcome-link:active {
+  opacity: 0.9;
 }
 
 .welcome-game-strip {
