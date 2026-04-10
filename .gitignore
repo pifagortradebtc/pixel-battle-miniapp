@@ -3,3 +3,4 @@ node_modules/
 *.log
 # Локальное состояние сервера (команды, счётчик id)
 data/dynamic-teams.json
+data/round-state.json

@@ -224,6 +224,21 @@ body {
   color: var(--tg-hint);
 }
 
+.toolbar__round {
+  font-size: 0.62rem;
+  color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
+  white-space: nowrap;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar__spectator {
+  font-size: 0.62rem;
+  color: #e94560;
+  font-weight: 600;
+}
+
 .stage-wrap {
   position: absolute;
   inset: 0;

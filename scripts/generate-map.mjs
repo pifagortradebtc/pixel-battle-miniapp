@@ -295,6 +295,56 @@ for (let y = 0; y < H; y++) {
   }
 }
 
+/** Раунд 1: основная суша — только внутри круга; в левом нижнем углу — отдельный остров в форме знака ₿. */
+const CIRCLE_R = 0.46 * Math.min(W, H);
+const CX = W * 0.5;
+const CY = H * 0.5;
+
+/** Нормализованные координаты внутри прямоугольника острова (левый нижний угол карты). */
+function inBitcoinSymbol(tx, ty) {
+  if (tx < 0 || tx > 1 || ty < 0 || ty > 1) return false;
+  if (tx >= 0.05 && tx <= 0.16 && ty >= 0.14 && ty <= 0.86) return true;
+  if (tx >= 0.17 && tx <= 0.27 && ty >= 0.14 && ty <= 0.86) return true;
+  if (tx < 0.28) return false;
+  const eTop =
+    (tx - 0.58) ** 2 / 0.34 ** 2 + (ty - 0.3) ** 2 / 0.2 ** 2 <= 1 && ty <= 0.52;
+  const eBot =
+    (tx - 0.58) ** 2 / 0.34 ** 2 + (ty - 0.7) ** 2 / 0.2 ** 2 <= 1 && ty >= 0.48;
+  return eTop || eBot;
+}
+
+function cellInBitcoinIsland(x, y) {
+  const bx0 = 4;
+  const bx1 = 96;
+  const by0 = H - 96;
+  const by1 = H - 4;
+  if (x < bx0 || x >= bx1 || y < by0 || y >= by1) return false;
+  const tx = (x - bx0) / (bx1 - bx0);
+  const ty = (y - by0) / (by1 - by0);
+  return inBitcoinSymbol(tx, ty);
+}
+
+function inMainCircle(x, y) {
+  const dx = x + 0.5 - CX;
+  const dy = y + 0.5 - CY;
+  return dx * dx + dy * dy <= CIRCLE_R * CIRCLE_R;
+}
+
+for (let y = 0; y < H; y++) {
+  for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    const btc = cellInBitcoinIsland(x, y);
+    const circ = inMainCircle(x, y);
+    if (btc) {
+      if (cells[i] === 0 || cells[i] === 1) {
+        cells[i] = 2 + ((x * 13 + y * 7) % 94);
+      }
+    } else if (!circ) {
+      cells[i] = 0;
+    }
+  }
+}
+
 const countryNames = new Array(Math.min(256, seeds.length + 2)).fill("");
 countryNames[0] = "Океан";
 countryNames[1] = "Река";

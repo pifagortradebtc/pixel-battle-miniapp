@@ -4,8 +4,8 @@
  * остальные в команде рисуют цветом команды (задаёт создатель).
  */
 
-const GRID_W = 320;
-const GRID_H = 320;
+let gridW = 320;
+let gridH = 320;
 const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
@@ -18,7 +18,55 @@ const SESSION_TEAM = "pixel-battle-team";
 const SESSION_TEAM_EDIT = "pixel-battle-team-edit-tokens";
 /** Сохраняется в localStorage: команда, соло-токен, имя, цвет — переживает закрытие Mini App */
 const ONLINE_SESSION_KEY = "pixel-battle-online-session";
+/** Токен победителя для участия в раундах после первого (claim при переподключении) */
+const ROUND_ELIGIBLE_KEY = "pixel-battle-round-eligible";
+/** Стабильный id игрока на устройстве (или tg_<id> в Telegram) — сервер выдаёт токен победителя по ключу */
+const PLAYER_KEY_STORAGE = "pixel-battle-player-key";
 const WS_PATH = "/ws";
+
+/** Если localStorage недоступен — один стабильный ключ на сессию страницы */
+let cachedAnonPlayerKey = null;
+
+function getOrCreatePlayerKey() {
+  try {
+    const u = window.Telegram?.WebApp?.initDataUnsafe?.user;
+    if (u && u.id != null) return `tg_${u.id}`;
+  } catch {
+    /* ignore */
+  }
+  try {
+    let k = localStorage.getItem(PLAYER_KEY_STORAGE);
+    if (!k) {
+      k =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `p_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+      localStorage.setItem(PLAYER_KEY_STORAGE, k);
+    }
+    return k;
+  } catch {
+    if (!cachedAnonPlayerKey) {
+      cachedAnonPlayerKey =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `anon_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+    }
+    return cachedAnonPlayerKey;
+  }
+}
+
+/** Для сервера: id и @username из Mini App (финальное уведомление победителям). */
+function getTelegramUserForServer() {
+  try {
+    const u = window.Telegram?.WebApp?.initDataUnsafe?.user;
+    if (u && u.id != null) {
+      return { id: u.id, username: typeof u.username === "string" ? u.username : "" };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
 
 /** Быстрый выбор эмодзи для команды */
 const EMOJI_PRESETS = [
@@ -76,6 +124,8 @@ const btnReferralSplashOk = document.getElementById("referral-splash-ok");
 const leaderboardPanel = document.getElementById("leaderboard-panel");
 const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
+const roundTimerEl = document.getElementById("round-timer");
+const spectatorBadgeEl = document.getElementById("spectator-badge");
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -107,6 +157,13 @@ let myTeamId = null;
 let teamsMeta = null;
 let teamCounts = {};
 let maxPerTeam = 200;
+/** Сервер: false — только просмотр, без пикселей и команд */
+let spectatorMode = false;
+/** Время окончания текущего раунда (мс, Date.now()); null — ожидание старта 1-го раунда по «go» */
+let roundEndsAtMs = null;
+let roundIndexMeta = 0;
+/** С сервера: игра полностью завершена (финал) */
+let gameFinishedMeta = false;
 /** После выхода из соло открыть список команд, а не приветственный экран */
 let pendingLeaveToTeamList = false;
 
@@ -135,15 +192,37 @@ function b64ToUint8(b64) {
 }
 
 async function loadRegions() {
+  const w = gridW;
+  const h = gridH;
   try {
-    const r = await fetch("/data/regions-320.json");
+    const r = await fetch(`/data/regions-${w}.json`);
     if (!r.ok) throw new Error("no regions");
     const j = await r.json();
     regionCells = b64ToUint8(j.cellsBase64);
-    if (regionCells.length !== GRID_W * GRID_H) regionCells = null;
+    if (regionCells.length !== w * h) regionCells = null;
   } catch {
     regionCells = null;
   }
+}
+
+/** Смена размера сетки с сервера (новый раунд / мета). */
+async function applyGridFromServer(w, h) {
+  const nw = Math.max(1, w | 0);
+  const nh = Math.max(1, h | 0);
+  if (nw === gridW && nh === gridH && regionCells !== null) return;
+  gridW = nw;
+  gridH = nh;
+  offsetX = 0;
+  offsetY = 0;
+  scale = 1;
+  await loadRegions();
+  resizeCanvas();
+  draw();
+}
+
+function syncWelcomeForRound() {
+  const hideSolo = wantOnline && roundIndexMeta >= 2;
+  if (btnWelcomeSolo) btnWelcomeSolo.hidden = hideSolo;
 }
 
 function countryColor(regionId) {
@@ -238,6 +317,59 @@ function clearTeamIdentityFromSession() {
   }
 }
 
+let lastClaimEligibilityAt = 0;
+
+function tryClaimEligibility() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!wantOnline) return;
+  const tok = localStorage.getItem(ROUND_ELIGIBLE_KEY) || "";
+  const pk = getOrCreatePlayerKey();
+  const now = Date.now();
+  if (!tok && lastClaimEligibilityAt > 0 && now - lastClaimEligibilityAt < 2500) return;
+  lastClaimEligibilityAt = now;
+  ws.send(
+    JSON.stringify({
+      type: "claimEligibility",
+      token: tok,
+      playerKey: pk,
+      telegramUser: getTelegramUserForServer(),
+    })
+  );
+}
+
+function updateRoundTimer() {
+  if (!roundTimerEl) return;
+  const online = wantOnline && getWsUrl();
+  if (!online) {
+    roundTimerEl.hidden = true;
+    return;
+  }
+  if (gameFinishedMeta) {
+    roundTimerEl.hidden = true;
+    return;
+  }
+  if (roundEndsAtMs == null && roundIndexMeta === 0) {
+    roundTimerEl.hidden = false;
+    roundTimerEl.textContent = "Ожидание старта (отправьте боту «go»)";
+    return;
+  }
+  if (roundEndsAtMs == null) {
+    roundTimerEl.hidden = true;
+    return;
+  }
+  roundTimerEl.hidden = false;
+  const ms = roundEndsAtMs - Date.now();
+  if (ms <= 0) {
+    roundTimerEl.textContent = "Конец раунда…";
+    return;
+  }
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  roundTimerEl.textContent = h > 0 ? `${h}ч ${m}м` : m > 0 ? `${m}м ${sec}с` : `${sec}с`;
+}
+
 function cacheTeamDisplayInSession() {
   if (myTeamId == null) return;
   const t = teamsMeta?.find((x) => x.id === myTeamId);
@@ -303,6 +435,7 @@ function syncPaletteSelectionFromTeam() {
 }
 
 function sendOnlineColorChoice(hex) {
+  if (spectatorMode) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (isCurrentTeamSolo()) {
     const sess = loadOnlineSession();
@@ -323,9 +456,12 @@ function setFooterMode() {
   const joined = myTeamId != null;
   const localMode = !online;
   const showPalette =
-    localMode || (online && joined && canPickOnlineDrawColor());
+    localMode || (online && joined && canPickOnlineDrawColor() && !spectatorMode);
   paletteEl.hidden = !showPalette;
   teamBadge.hidden = !online || !joined;
+  if (spectatorBadgeEl) {
+    spectatorBadgeEl.hidden = !online || !spectatorMode;
+  }
   if (btnReferral) btnReferral.hidden = !online || !joined || isCurrentTeamSolo();
   if (btnTeamSettings) btnTeamSettings.hidden = !online || !joined || !canEditTeamSettings();
   if (btnLeaveTeam) {
@@ -343,6 +479,11 @@ function setFooterMode() {
 function refreshToolbarSessionButton() {
   if (!btnToolbarSession) return;
   const online = wantOnline && getWsUrl();
+  if (online && spectatorMode) {
+    btnToolbarSession.hidden = true;
+    return;
+  }
+  btnToolbarSession.hidden = false;
   if (online) {
     if (myTeamId != null) {
       if (isCurrentTeamSolo()) {
@@ -519,7 +660,9 @@ function rebuildTeamList() {
     btn.appendChild(meta);
     btn.addEventListener("click", () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify({ type: "joinTeam", teamId: t.id }));
+      ws.send(
+        JSON.stringify({ type: "joinTeam", teamId: t.id, playerKey: getOrCreatePlayerKey() })
+      );
     });
     teamListEl.appendChild(btn);
   }
@@ -534,10 +677,13 @@ function tryRestoreSession() {
         type: "soloResume",
         teamId: sess.teamId,
         resumeToken: sess.soloResumeToken,
+        playerKey: getOrCreatePlayerKey(),
       })
     );
   } else {
-    ws.send(JSON.stringify({ type: "joinTeam", teamId: sess.teamId }));
+    ws.send(
+      JSON.stringify({ type: "joinTeam", teamId: sess.teamId, playerKey: getOrCreatePlayerKey() })
+    );
   }
 }
 
@@ -726,7 +872,9 @@ function submitCreateTeam() {
     return;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "createTeam", name, emoji, color }));
+  ws.send(
+    JSON.stringify({ type: "createTeam", name, emoji, color, playerKey: getOrCreatePlayerKey() })
+  );
 }
 
 function submitWelcomeSolo() {
@@ -740,7 +888,14 @@ function submitWelcomeSolo() {
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   saveOnlineSession({ playerName: name, welcomeColorIdx });
-  ws.send(JSON.stringify({ type: "soloPlay", name, color: PALETTE[welcomeColorIdx] }));
+  ws.send(
+    JSON.stringify({
+      type: "soloPlay",
+      name,
+      color: PALETTE[welcomeColorIdx],
+      playerKey: getOrCreatePlayerKey(),
+    })
+  );
 }
 
 function setupWelcomeUi() {
@@ -859,7 +1014,7 @@ function requestLeaveTeam() {
   const run = () => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (solo) pendingLeaveToTeamList = true;
-    ws.send(JSON.stringify({ type: "leaveTeam" }));
+    ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
   };
   const text = solo
     ? "Чтобы вступить в команду, вы выходите из соло. Ваши пиксели на карте остаются. Продолжить?"
@@ -881,30 +1036,57 @@ function onMeta(msg) {
   teamsMeta = msg.teams || [];
   teamCounts = msg.teamCounts || {};
   maxPerTeam = msg.maxPerTeam ?? 200;
-  rebuildTeamList();
+  gameFinishedMeta = !!msg.gameFinished;
+  roundEndsAtMs =
+    typeof msg.roundEndsAt === "number" && !Number.isNaN(msg.roundEndsAt) ? msg.roundEndsAt : null;
+  roundIndexMeta = typeof msg.roundIndex === "number" ? msg.roundIndex : 0;
+  spectatorMode = msg.eligible === false || msg.gameFinished === true;
 
-  const ref = getReferralTeamId();
-  const validRef = ref != null && teamsMeta.some((t) => t.id === ref && !t.solo);
+  if (msg.eligible === false && !msg.gameFinished) {
+    tryClaimEligibility();
+  }
 
-  if (validRef) {
-    saveOnlineSession({ teamId: ref, solo: false });
-    tryRestoreSession();
-    if (welcomeOverlay) welcomeOverlay.hidden = true;
-    teamOverlay.hidden = true;
+  const gw = typeof msg.grid?.w === "number" ? msg.grid.w : gridW;
+  const gh = typeof msg.grid?.h === "number" ? msg.grid.h : gridH;
+
+  applyGridFromServer(gw, gh).then(() => {
+    rebuildTeamList();
+    updateRoundTimer();
+    syncWelcomeForRound();
+
+    if (spectatorMode) {
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      teamOverlay.hidden = true;
+      createTeamOverlay.hidden = true;
+      teamSettingsOverlay.hidden = true;
+      hideReferralSplash();
+      setFooterMode();
+      return;
+    }
+
+    const ref = getReferralTeamId();
+    const validRef = ref != null && teamsMeta.some((t) => t.id === ref && !t.solo);
+
+    if (validRef) {
+      saveOnlineSession({ teamId: ref, solo: false });
+      tryRestoreSession();
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      teamOverlay.hidden = true;
+      setFooterMode();
+      return;
+    }
+
+    const sess = loadOnlineSession();
+    const savedTeamId = sess?.teamId;
+    if (savedTeamId != null) {
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      tryRestoreSession();
+    } else {
+      if (welcomeOverlay) welcomeOverlay.hidden = false;
+      teamOverlay.hidden = true;
+    }
     setFooterMode();
-    return;
-  }
-
-  const sess = loadOnlineSession();
-  const savedTeamId = sess?.teamId;
-  if (savedTeamId != null) {
-    if (welcomeOverlay) welcomeOverlay.hidden = true;
-    tryRestoreSession();
-  } else {
-    if (welcomeOverlay) welcomeOverlay.hidden = false;
-    teamOverlay.hidden = true;
-  }
-  setFooterMode();
+  });
 }
 
 function notifyReject(reason) {
@@ -912,6 +1094,7 @@ function notifyReject(reason) {
     ocean: "Сюда нельзя (океан, река или вне карты).",
     cooldown: "Слишком часто.",
     no_team: "Сначала выберите команду.",
+    spectator: "Режим наблюдения: пиксели ставить нельзя.",
   };
   const text = map[reason] || reason;
   const tg = window.Telegram?.WebApp;
@@ -950,11 +1133,26 @@ function connectWs() {
   }
 
   ws.addEventListener("open", () => {
+    lastClaimEligibilityAt = 0;
     setConnState("online", "онлайн");
     const sess = loadOnlineSession();
     myTeamId = sess?.teamId ?? null;
     if (leaderboardPanel) leaderboardPanel.hidden = false;
     setFooterMode();
+    updateRoundTimer();
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: "clientProfile",
+            playerKey: getOrCreatePlayerKey(),
+            telegramUser: getTelegramUserForServer(),
+          })
+        );
+      }
+    } catch {
+      /* ignore */
+    }
   });
 
   ws.addEventListener("message", (ev) => {
@@ -962,6 +1160,90 @@ function connectWs() {
     try {
       msg = JSON.parse(ev.data);
     } catch {
+      return;
+    }
+
+    if (msg.type === "gameEnded") {
+      try {
+        localStorage.removeItem(SESSION_TEAM_EDIT);
+      } catch {
+        /* ignore */
+      }
+      clearTeamIdentityFromSession();
+      myTeamId = null;
+      stripTeamFromUrl();
+      hideReferralSplash();
+      closeTeamSettings();
+      closeCreateTeamOverlay();
+      pendingLeaveToTeamList = false;
+      spectatorMode = true;
+      gameFinishedMeta = true;
+      const gw = typeof msg.grid?.w === "number" ? msg.grid.w : 21;
+      const gh = typeof msg.grid?.h === "number" ? msg.grid.h : 21;
+      applyGridFromServer(gw, gh).then(() => {
+        const tg = window.Telegram?.WebApp;
+        const p = typeof msg.percent === "number" ? formatPercent(msg.percent) : "—";
+        const text = `Финал завершён. Победитель: «${msg.winnerName || "—"}» (${p}% территории).`;
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else if (typeof window.alert === "function") window.alert(text);
+        setFooterMode();
+        schedulePersist();
+      });
+      return;
+    }
+    if (msg.type === "roundEnded") {
+      try {
+        localStorage.removeItem(SESSION_TEAM_EDIT);
+      } catch {
+        /* ignore */
+      }
+      clearTeamIdentityFromSession();
+      myTeamId = null;
+      stripTeamFromUrl();
+      hideReferralSplash();
+      closeTeamSettings();
+      closeCreateTeamOverlay();
+      pendingLeaveToTeamList = false;
+      const gw = typeof msg.grid?.w === "number" ? msg.grid.w : gridW;
+      const gh = typeof msg.grid?.h === "number" ? msg.grid.h : gridH;
+      applyGridFromServer(gw, gh).then(() => {
+        const tg = window.Telegram?.WebApp;
+        const cap = typeof msg.maxPerTeam === "number" ? msg.maxPerTeam : maxPerTeam;
+        const text = `Раунд завершён. Победитель: «${msg.winnerName || "—"}». Новая карта; в команде до ${cap} чел.`;
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else if (typeof window.alert === "function") window.alert(text);
+        setFooterMode();
+        schedulePersist();
+      });
+      return;
+    }
+    if (msg.type === "roundWinnerPass") {
+      spectatorMode = false;
+      if (typeof msg.token === "string" && msg.token.length > 0) {
+        try {
+          localStorage.setItem(ROUND_ELIGIBLE_KEY, msg.token);
+        } catch {
+          /* ignore */
+        }
+      }
+      setFooterMode();
+      return;
+    }
+    if (msg.type === "claimedOk") {
+      return;
+    }
+    if (msg.type === "claimError") {
+      try {
+        localStorage.removeItem(ROUND_ELIGIBLE_KEY);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    if (msg.type === "playRejected") {
+      if (msg.reason === "spectator") spectatorMode = true;
+      notifyReject(msg.reason === "spectator" ? "spectator" : msg.reason || "");
+      setFooterMode();
       return;
     }
 
@@ -1027,6 +1309,7 @@ function connectWs() {
         already: "Сначала выйдите из текущей команды.",
         fields: "Введите имя и выберите цвет.",
         limit: "Достигнут лимит команд на сервере.",
+        round: "В третьем раунде доступны только команды до 2 человек (соло недоступно).",
       };
       const text = map[msg.reason] || "Не удалось начать соло.";
       const tg = window.Telegram?.WebApp;
@@ -1106,6 +1389,17 @@ function connectWs() {
       return;
     }
     if (msg.type === "soloResumeError") {
+      if (msg.reason === "round") {
+        const tg = window.Telegram?.WebApp;
+        const text =
+          "В третьем раунде соло недоступно — создайте команду из двух человек или вступите в существующую.";
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        if (welcomeOverlay) welcomeOverlay.hidden = false;
+        teamOverlay.hidden = true;
+        rebuildTeamList();
+        setFooterMode();
+        return;
+      }
       if (msg.reason === "invalid" || msg.reason === "full") {
         clearTeamIdentityFromSession();
         stripTeamFromUrl();
@@ -1257,8 +1551,8 @@ function resizeCanvas() {
 function centerIfNeeded(w, h) {
   if (offsetX === 0 && offsetY === 0 && scale === 1) {
     const cell = BASE_CELL * scale;
-    offsetX = (w - GRID_W * cell) / 2;
-    offsetY = (h - GRID_H * cell) / 2;
+    offsetX = (w - gridW * cell) / 2;
+    offsetY = (h - gridH * cell) / 2;
   }
 }
 
@@ -1279,15 +1573,15 @@ function draw() {
 
   const x0 = Math.max(0, Math.floor((0 - offsetX) / cell));
   const y0 = Math.max(0, Math.floor((0 - offsetY) / cell));
-  const x1 = Math.min(GRID_W - 1, Math.ceil((w - offsetX) / cell));
-  const y1 = Math.min(GRID_H - 1, Math.ceil((h - offsetY) / cell));
+  const x1 = Math.min(gridW - 1, Math.ceil((w - offsetX) / cell));
+  const y1 = Math.min(gridH - 1, Math.ceil((h - offsetY) / cell));
 
   const online = wantOnline && getWsUrl();
 
   for (let gy = y0; gy <= y1; gy++) {
     for (let gx = x0; gx <= x1; gx++) {
       const key = `${gx},${gy}`;
-      const idx = regionCells ? regionCells[gy * GRID_W + gx] : 2;
+      const idx = regionCells ? regionCells[gy * gridW + gx] : 2;
       const base = countryColor(idx);
       const owner = pixels.get(key);
       const px = offsetX + gx * cell;
@@ -1332,10 +1626,10 @@ function draw() {
 }
 
 function placePixel(gx, gy) {
-  if (gx < 0 || gx >= GRID_W || gy < 0 || gy >= GRID_H) return;
+  if (gx < 0 || gx >= gridW || gy < 0 || gy >= gridH) return;
 
   if (regionCells) {
-    const idx = regionCells[gy * GRID_W + gx];
+    const idx = regionCells[gy * gridW + gx];
     if (idx < 2) {
       notifyReject("ocean");
       return;
@@ -1343,6 +1637,10 @@ function placePixel(gx, gy) {
   }
 
   const online = wantOnline && getWsUrl();
+  if (online && spectatorMode) {
+    notifyReject("spectator");
+    return;
+  }
   if (online) {
     if (myTeamId == null) {
       notifyReject("no_team");
@@ -1583,6 +1881,8 @@ async function bootstrap() {
   setupCreateTeamUi();
   setupToolbarSession();
   setupGestures();
+
+  setInterval(updateRoundTimer, 1000);
 
   window.addEventListener("resize", resizeCanvas);
   window.addEventListener("pagehide", () => {

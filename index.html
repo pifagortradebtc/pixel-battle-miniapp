@@ -34,7 +34,7 @@
   <div id="team-overlay" class="overlay" hidden>
     <div class="overlay__card">
       <h2 class="overlay__title">Команда</h2>
-      <p class="overlay__hint">Пока никто не создал команду, список пуст. Создайте свою или дождитесь других. Вступите в команду из списка (до 200 человек). По ссылке с номером команды друзья сразу попадут к вам.</p>
+      <p class="overlay__hint">Пока никто не создал команду, список пуст. Создайте свою или дождитесь других. Вступите в команду из списка (лимит участников показан у каждой команды). По ссылке с номером команды друзья сразу попадут к вам.</p>
       <button type="button" id="btn-open-create-team" class="team-create-btn">Создать команду</button>
       <button type="button" id="btn-team-overlay-back" class="overlay__btn overlay__btn--secondary team-back-btn">Назад</button>
       <p class="overlay__sub" id="team-list-label">Или вступите в уже существующую:</p>
@@ -115,6 +115,8 @@
         <div class="toolbar__title">Pixel Battle</div>
         <div class="toolbar__actions">
           <span id="conn-status" class="toolbar__conn" title="Состояние сети" data-state="local">локально</span>
+          <span id="round-timer" class="toolbar__round" hidden title="Время до конца текущего раунда"></span>
+          <span id="spectator-badge" class="toolbar__spectator" hidden>Наблюдение</span>
           <button type="button" id="btn-toolbar-session" class="toolbar__btn" title="">Сменить команду</button>
           <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
         </div>

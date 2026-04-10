@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "build-map": "node scripts/generate-map.mjs"
+    "build-map": "node scripts/generate-map.mjs",
+    "downsample-regions": "node scripts/downsample-regions.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

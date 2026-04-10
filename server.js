@@ -16,10 +16,55 @@ const ROOT = __dirname;
 const PORT = Number(process.env.PORT) || 3847;
 const WS_PATH = "/ws";
 
-const GRID_W = 320;
-const GRID_H = 320;
+const BASE_GRID = 320;
+/** После 1-го раунда сетка ÷5, после 2-го ещё ÷3 (итого 320→64→21). */
+const ROUND2_DIV = 5;
+const ROUND3_DIV = 3;
+let gridW = BASE_GRID;
+let gridH = BASE_GRID;
 const COOLDOWN_MS = 0;
-const MAX_PER_TEAM = 200;
+/** Длительность раунда: 100 часов */
+const ROUND_MS = 100 * 60 * 60 * 1000;
+const MAX_PER_TEAM_FIRST = 200;
+const MAX_PER_TEAM_NEXT = 10;
+/** Финальный раунд (команды по 2 человека) */
+const MAX_PER_TEAM_FINAL = 2;
+
+const ROUND_STATE_PATH = path.join(ROOT, "data", "round-state.json");
+
+/** Токен бота и список user id админов (через запятую), которые могут отправить «go» для старта 1-го раунда */
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const TELEGRAM_ADMIN_IDS = new Set(
+  (process.env.TELEGRAM_ADMIN_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => Number(s))
+    .filter((n) => Number.isFinite(n))
+);
+/** Первый раунд ждёт «go» в Telegram, только если задан бот и хотя бы один admin id */
+const WAIT_FOR_TELEGRAM_GO = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size > 0);
+
+/** @type {number} 0 = первый раунд (200 чел.), 1 = второй (10), 2 = третий (2), 3 = игра завершена */
+let roundIndex = 0;
+/** @type {number} */
+let roundStartMs = Date.now();
+/** Первый раунд: таймер 100 ч не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO) */
+let roundTimerStarted = true;
+/** @type {Set<string>} токены победителей прошлого раунда — для claim при переподключении */
+let eligibleTokenSet = new Set();
+/**
+ * Ключ игрока (Telegram id или UUID в localStorage) → токен для текущего этапа допуска.
+ * Сохраняется на диск: победитель может вернуться без токена в браузере, подставив ключ.
+ */
+let winnerTokensByPlayerKey = {};
+/** Участники команд по раунду: teamId → Set(playerKey) — для выдачи токенов всем победителям, не только онлайн. */
+const teamMemberKeys = new Map();
+/** playerKey → { id, username } — данные из Mini App для уведомления о финальных победителях */
+const playerTelegramMeta = new Map();
+let roundEnding = false;
+/** После третьего раунда — только просмотр, новых игроков нет */
+let gameFinished = false;
 
 function sanitizeTeamName(s) {
   return String(s ?? "")
@@ -31,6 +76,45 @@ function sanitizeTeamName(s) {
 function sanitizeTeamEmoji(s) {
   const t = String(s ?? "").trim().slice(0, 8);
   return t;
+}
+
+function sanitizePlayerKey(s) {
+  const t = String(s ?? "").trim().slice(0, 128);
+  return t;
+}
+
+function attachPlayerKey(ws, msg) {
+  const pk = sanitizePlayerKey(msg?.playerKey);
+  if (pk) ws.playerKey = pk;
+}
+
+/** Сохраняет Telegram id/username для финального отчёта (до 2 человек в команде-победителе). */
+function rememberPlayerProfile(ws, msg) {
+  attachPlayerKey(ws, msg);
+  const tu = msg?.telegramUser;
+  if (!tu || typeof tu.id !== "number") return;
+  const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
+  if (!pk) return;
+  const username = typeof tu.username === "string" ? tu.username.trim().slice(0, 64) : "";
+  const prev = playerTelegramMeta.get(pk);
+  playerTelegramMeta.set(pk, {
+    id: tu.id | 0,
+    username: username || prev?.username || "",
+  });
+}
+
+function addTeamMemberKey(teamId, playerKey) {
+  const pk = sanitizePlayerKey(playerKey);
+  if (!pk) return;
+  if (!teamMemberKeys.has(teamId)) teamMemberKeys.set(teamId, new Set());
+  teamMemberKeys.get(teamId).add(pk);
+}
+
+function removeTeamMemberKey(teamId, playerKey) {
+  const pk = sanitizePlayerKey(playerKey);
+  if (!pk || !teamMemberKeys.has(teamId)) return;
+  teamMemberKeys.get(teamId).delete(pk);
+  if (teamMemberKeys.get(teamId).size === 0) teamMemberKeys.delete(teamId);
 }
 
 /** Цвет команды #RRGGBB */
@@ -108,7 +192,80 @@ function validTeamId(teamId) {
   return dynamicTeams.some((t) => t.id === teamId);
 }
 
-loadDynamicTeams();
+function getMaxPerTeam() {
+  if (gameFinished) return 0;
+  if (roundIndex === 0) return MAX_PER_TEAM_FIRST;
+  if (roundIndex === 1) return MAX_PER_TEAM_NEXT;
+  return MAX_PER_TEAM_FINAL;
+}
+
+function saveRoundState() {
+  try {
+    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    fs.writeFileSync(
+      ROUND_STATE_PATH,
+      JSON.stringify({
+        roundIndex,
+        roundStartMs,
+        roundTimerStarted,
+        eligibleTokens: [...eligibleTokenSet],
+        gameFinished,
+        winnerTokensByPlayerKey,
+      }),
+      "utf8"
+    );
+  } catch (e) {
+    console.warn("round-state save:", e.message);
+  }
+}
+
+function loadRoundState() {
+  try {
+    if (fs.existsSync(ROUND_STATE_PATH)) {
+      const j = JSON.parse(fs.readFileSync(ROUND_STATE_PATH, "utf8"));
+      if (typeof j.roundIndex === "number") roundIndex = j.roundIndex;
+      if (typeof j.roundStartMs === "number") roundStartMs = j.roundStartMs;
+      if (typeof j.roundTimerStarted === "boolean") {
+        roundTimerStarted = j.roundTimerStarted;
+      } else {
+        roundTimerStarted = true;
+      }
+      eligibleTokenSet = new Set(Array.isArray(j.eligibleTokens) ? j.eligibleTokens : []);
+      if (typeof j.gameFinished === "boolean") gameFinished = j.gameFinished;
+      if (roundIndex >= 3) gameFinished = true;
+      if (j.winnerTokensByPlayerKey && typeof j.winnerTokensByPlayerKey === "object" && !Array.isArray(j.winnerTokensByPlayerKey)) {
+        winnerTokensByPlayerKey = {};
+        for (const [k, v] of Object.entries(j.winnerTokensByPlayerKey)) {
+          const key = sanitizePlayerKey(k);
+          if (!key || typeof v !== "string") continue;
+          const tok = v.trim();
+          if (!tok) continue;
+          winnerTokensByPlayerKey[key] = tok;
+          eligibleTokenSet.add(tok);
+        }
+      } else {
+        winnerTokensByPlayerKey = {};
+      }
+      if (roundIndex >= 1 || gameFinished) roundTimerStarted = true;
+    } else {
+      roundIndex = 0;
+      roundStartMs = Date.now();
+      eligibleTokenSet = new Set();
+      gameFinished = false;
+      winnerTokensByPlayerKey = {};
+      roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
+      saveRoundState();
+    }
+  } catch (e) {
+    console.warn("round-state load:", e.message);
+    roundIndex = 0;
+    roundStartMs = Date.now();
+    eligibleTokenSet = new Set();
+    gameFinished = false;
+    winnerTokensByPlayerKey = {};
+    roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
+  }
+}
 
 /** @type {WeakMap<object, number>} */
 const lastTeamUpdate = new WeakMap();
@@ -126,35 +283,97 @@ const MIME = {
   ".webp": "image/webp",
 };
 
-/** @type {Uint8Array} регион: 0 океан, 1 река (не захватывается), ≥2 суша (регион Вороного) */
-let landGrid = null;
+/** @type {Uint8Array | null} исходный регион 320×320 (для даунсэмплинга под раунд) */
+let baseRegion320 = null;
 try {
   const raw = fs.readFileSync(path.join(ROOT, "data", "regions-320.json"), "utf8");
   const j = JSON.parse(raw);
-  landGrid = Uint8Array.from(Buffer.from(j.cellsBase64, "base64"));
-  if (landGrid.length !== GRID_W * GRID_H) {
+  baseRegion320 = Uint8Array.from(Buffer.from(j.cellsBase64, "base64"));
+  if (baseRegion320.length !== BASE_GRID * BASE_GRID) {
     console.warn("regions-320.json: неверный размер сетки");
-    landGrid = null;
+    baseRegion320 = null;
   }
 } catch (e) {
   console.warn("Нет data/regions-320.json — npm run build-map", e.message);
 }
 
-/** Все клетки суши — знаменатель для «% территории» (100% = вся суша). */
-let landPixelsTotal = GRID_W * GRID_H;
-if (landGrid) {
+/** @type {Uint8Array | null} регион: 0 океан, 1 река, ≥2 суша */
+let landGrid = null;
+/** Все клетки суши — знаменатель для «% территории». */
+let landPixelsTotal = BASE_GRID * BASE_GRID;
+
+/** Размер стороны сетки по индексу раунда (0: 320, 1: 64, 2: 21). */
+function gridSizeForRoundIndex(ri) {
+  if (ri <= 0) return BASE_GRID;
+  if (ri === 1) return Math.max(1, Math.floor(BASE_GRID / ROUND2_DIV));
+  return Math.max(1, Math.floor(BASE_GRID / ROUND2_DIV / ROUND3_DIV));
+}
+
+/** @param {number} ri — 0: 320×320, 1: 64×64, 2: 21×21 */
+function rebuildLandFromRound(ri) {
+  const w = gridSizeForRoundIndex(ri);
+  const h = w;
+  gridW = w;
+  gridH = h;
+
+  if (!baseRegion320 || baseRegion320.length !== BASE_GRID * BASE_GRID) {
+    landGrid = null;
+    landPixelsTotal = gridW * gridH;
+    return;
+  }
+
+  landGrid = new Uint8Array(gridW * gridH);
+  for (let y = 0; y < gridH; y++) {
+    for (let x = 0; x < gridW; x++) {
+      const bx = Math.min(BASE_GRID - 1, Math.floor(((x + 0.5) / gridW) * BASE_GRID));
+      const by = Math.min(BASE_GRID - 1, Math.floor(((y + 0.5) / gridH) * BASE_GRID));
+      landGrid[y * gridW + x] = baseRegion320[by * BASE_GRID + bx];
+    }
+  }
+  applyRoundShapeMask(ri, landGrid, gridW, gridH);
   let n = 0;
   for (let i = 0; i < landGrid.length; i++) {
     if (landGrid[i] >= 2) n++;
   }
-  landPixelsTotal = n;
+  landPixelsTotal = n > 0 ? n : gridW * gridH;
+}
+
+/**
+ * Раунд 1 — форма зашита в regions-320 (круг + остров ₿).
+ * Раунд 2 — квадрат с отступом (другая «форма» карты).
+ * Раунд 3 — ромб (манхэттен от центра) — снова другая форма.
+ */
+function applyRoundShapeMask(ri, buf, w, h) {
+  if (ri === 0) return;
+  if (ri === 1) {
+    const m = Math.max(1, Math.floor(w * 0.08));
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (x < m || x >= w - m || y < m || y >= h - m) {
+          buf[y * w + x] = 0;
+        }
+      }
+    }
+    return;
+  }
+  if (ri === 2) {
+    const cx = (w - 1) / 2;
+    const cy = (h - 1) / 2;
+    const R = Math.floor((Math.min(w, h) - 1) / 2);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const d = Math.abs(x - cx) + Math.abs(y - cy);
+        if (d > R + 1e-6) buf[y * w + x] = 0;
+      }
+    }
+  }
 }
 
 /** 0 — океан, 1 — река, ≥2 — суша (регион). Рисовать можно только на суше. */
 function isLand(x, y) {
   if (!landGrid) return true;
-  if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return false;
-  return landGrid[y * GRID_W + x] >= 2;
+  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
+  return landGrid[y * gridW + x] >= 2;
 }
 
 /** @type {Map<string, number>} key "x,y" → teamId */
@@ -173,6 +392,14 @@ const teamPlayerCounts = new Map();
 function canPlace(_teamId, x, y) {
   if (!isLand(x, y)) return "ocean";
   return "ok";
+}
+
+loadDynamicTeams();
+loadRoundState();
+if (gameFinished) {
+  rebuildLandFromRound(2);
+} else {
+  rebuildLandFromRound(roundIndex);
 }
 
 function safePath(urlPath) {
@@ -223,7 +450,7 @@ function broadcast(obj) {
 
 const server = http.createServer(serveStatic);
 
-const wss = new WebSocketServer({ server, path: WS_PATH });
+const wss = new WebSocketServer({ server, path: WS_PATH, maxPayload: 262144 });
 
 function countOnlineClients() {
   let n = 0;
@@ -284,35 +511,272 @@ function broadcastStatsImmediate() {
   broadcast(buildStatsPayload());
 }
 
-wss.on("connection", (ws) => {
-  ws.teamId = null;
+function assertCanPlay(ws) {
+  if (gameFinished) {
+    ws.send(JSON.stringify({ type: "playRejected", reason: "spectator" }));
+    return false;
+  }
+  if (!ws.eligible) {
+    ws.send(JSON.stringify({ type: "playRejected", reason: "spectator" }));
+    return false;
+  }
+  return true;
+}
 
+/** null — первый раунд ещё не запущен командой «go» в Telegram */
+function roundEndsAtForMeta() {
+  if (gameFinished) return roundStartMs + ROUND_MS;
+  if (roundIndex === 0 && !roundTimerStarted) return null;
+  return roundStartMs + ROUND_MS;
+}
+
+function sendConnectionMeta(ws) {
   const teamCountsObj = {};
   for (const [id, c] of teamPlayerCounts) {
     teamCountsObj[id] = c;
   }
-
   ws.send(
     JSON.stringify({
       type: "meta",
       teams: teamsForMeta(),
       teamCounts: teamCountsObj,
-      maxPerTeam: MAX_PER_TEAM,
-      grid: { w: GRID_W, h: GRID_H },
+      maxPerTeam: getMaxPerTeam(),
+      grid: { w: gridW, h: gridH },
+      roundIndex,
+      roundEndsAt: roundEndsAtForMeta(),
+      eligible: !!ws.eligible,
+      gameFinished: !!gameFinished,
     })
   );
+}
+
+function finalizeThirdRound(winnerRow) {
+  roundEnding = true;
+  try {
+    const winnerTeamId = winnerRow.teamId;
+    const winningTeamName = winnerRow.name || "";
+    const pct = winnerRow.percent;
+    const winnerKeysSnapshot = teamMemberKeys.has(winnerTeamId)
+      ? new Set(teamMemberKeys.get(winnerTeamId))
+      : new Set();
+
+    eligibleTokenSet = new Set();
+    winnerTokensByPlayerKey = {};
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      client.eligible = false;
+      client.eliminated = true;
+      client.teamId = null;
+    }
+
+    teamMemberKeys.clear();
+    teamPlayerCounts.clear();
+    pixels.clear();
+    dynamicTeams = [];
+    nextTeamId = 1;
+    saveDynamicTeams();
+
+    gameFinished = true;
+    roundIndex = 3;
+    roundStartMs = Date.now();
+    saveRoundState();
+
+    void notifyFinalWinnersTelegram(winnerKeysSnapshot, winningTeamName, pct);
+
+    broadcast({
+      type: "gameEnded",
+      winnerTeamId,
+      winnerName: winningTeamName,
+      percent: pct,
+      roundIndex: 3,
+      grid: { w: gridW, h: gridH },
+    });
+
+    broadcast({ type: "full", pixels: [] });
+    broadcast({ type: "teamsFull", teams: teamsForMeta() });
+    broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+    broadcastStatsImmediate();
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      sendConnectionMeta(client);
+    }
+  } finally {
+    roundEnding = false;
+  }
+}
+
+function maybeEndRound() {
+  if (roundEnding) return;
+  if (gameFinished) return;
+  if (roundIndex === 0 && !roundTimerStarted) return;
+  if (Date.now() < roundStartMs + ROUND_MS) return;
+  const stats = buildStatsPayload();
+  const rows = stats.rows || [];
+  if (rows.length === 0) {
+    roundStartMs = Date.now();
+    saveRoundState();
+    return;
+  }
+
+  if (roundIndex >= 2) {
+    finalizeThirdRound(rows[0]);
+    return;
+  }
+
+  roundEnding = true;
+  try {
+    const winnerTeamId = rows[0].teamId;
+    const winningTeamName = rows[0].name || "";
+
+    eligibleTokenSet = new Set();
+    winnerTokensByPlayerKey = {};
+    /** @type {Map<string, string>} */
+    const tokenByPlayerKey = new Map();
+    const winnerKeys = teamMemberKeys.get(winnerTeamId) || new Set();
+    for (const pk of winnerKeys) {
+      const tok = crypto.randomBytes(18).toString("hex");
+      eligibleTokenSet.add(tok);
+      winnerTokensByPlayerKey[pk] = tok;
+      tokenByPlayerKey.set(pk, tok);
+    }
+
+    /** @type {Map<object, string>} */
+    const winnerTokenByClient = new Map();
+
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      if (client.teamId === winnerTeamId) {
+        const pk = client.playerKey ? sanitizePlayerKey(client.playerKey) : "";
+        let tok = pk ? tokenByPlayerKey.get(pk) : null;
+        if (!tok) {
+          tok = crypto.randomBytes(18).toString("hex");
+          eligibleTokenSet.add(tok);
+          if (pk) {
+            winnerTokensByPlayerKey[pk] = tok;
+            tokenByPlayerKey.set(pk, tok);
+          }
+        }
+        winnerTokenByClient.set(client, tok);
+        client.eligible = true;
+        client.eliminated = false;
+      } else {
+        client.eligible = false;
+        client.eliminated = true;
+      }
+    }
+
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      client.teamId = null;
+    }
+
+    teamMemberKeys.clear();
+    teamPlayerCounts.clear();
+    pixels.clear();
+    dynamicTeams = [];
+    nextTeamId = 1;
+    saveDynamicTeams();
+
+    roundIndex++;
+    roundTimerStarted = true;
+    roundStartMs = Date.now();
+    rebuildLandFromRound(roundIndex);
+    saveRoundState();
+
+    broadcast({
+      type: "roundEnded",
+      roundIndex,
+      winnerTeamId,
+      winnerName: winningTeamName,
+      roundEndsAt: roundStartMs + ROUND_MS,
+      maxPerTeam: getMaxPerTeam(),
+      grid: { w: gridW, h: gridH },
+    });
+
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      const tok = winnerTokenByClient.get(client);
+      if (tok) {
+        client.send(
+          JSON.stringify({
+            type: "roundWinnerPass",
+            token: tok,
+            roundIndex,
+          })
+        );
+      }
+    }
+
+    broadcast({ type: "full", pixels: [] });
+    broadcast({ type: "teamsFull", teams: teamsForMeta() });
+    broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+    broadcastStatsImmediate();
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      sendConnectionMeta(client);
+    }
+  } finally {
+    roundEnding = false;
+  }
+}
+
+setInterval(() => maybeEndRound(), 30000);
+
+wss.on("connection", (ws) => {
+  ws.teamId = null;
+  ws.eligible = !gameFinished && roundIndex === 0;
+  ws.eliminated = gameFinished || roundIndex !== 0;
+
+  sendConnectionMeta(ws);
   ws.send(fullPayload());
   broadcastStatsImmediate();
 
   ws.on("message", (data) => {
+    const raw = String(data);
+    if (raw.length > 262144) return;
     let msg;
     try {
-      msg = JSON.parse(String(data));
+      msg = JSON.parse(raw);
     } catch {
       return;
     }
 
+    maybeEndRound();
+
+    if (msg.type === "clientProfile") {
+      rememberPlayerProfile(ws, msg);
+      return;
+    }
+
+    if (msg.type === "claimEligibility") {
+      if (gameFinished) {
+        ws.send(JSON.stringify({ type: "claimError", reason: "invalid" }));
+        return;
+      }
+      rememberPlayerProfile(ws, msg);
+      const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
+      let t = typeof msg.token === "string" ? msg.token.trim() : "";
+      const explicitToken = t.length > 0;
+      const serverTok = pk ? winnerTokensByPlayerKey[pk] : "";
+      if (serverTok && eligibleTokenSet.has(serverTok)) {
+        t = serverTok;
+      } else if (t && !eligibleTokenSet.has(t)) {
+        t = "";
+      }
+      if (t && eligibleTokenSet.has(t)) {
+        ws.eligible = true;
+        ws.eliminated = false;
+        ws.send(JSON.stringify({ type: "claimedOk" }));
+        ws.send(JSON.stringify({ type: "roundWinnerPass", token: t, roundIndex }));
+        sendConnectionMeta(ws);
+      } else if (explicitToken) {
+        ws.send(JSON.stringify({ type: "claimError", reason: "invalid" }));
+      }
+      return;
+    }
+
     if (msg.type === "updateTeam") {
+      if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
         ws.send(JSON.stringify({ type: "updateTeamError", reason: "no_team" }));
         return;
@@ -367,6 +831,7 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "setTeamColor") {
+      if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
         ws.send(JSON.stringify({ type: "setTeamColorError", reason: "no_team" }));
         return;
@@ -405,6 +870,7 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "soloSetColor") {
+      if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
         ws.send(JSON.stringify({ type: "soloColorError", reason: "no_team" }));
         return;
@@ -439,6 +905,8 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "createTeam") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
       if (ws.teamId != null) {
         ws.send(JSON.stringify({ type: "createTeamError", reason: "already" }));
         return;
@@ -460,6 +928,7 @@ wss.on("connection", (ws) => {
       saveDynamicTeams();
       ws.teamId = id;
       teamPlayerCounts.set(id, 1);
+      if (ws.playerKey) addTeamMemberKey(id, ws.playerKey);
       const team = { id, name, emoji, color, solo: false };
       ws.send(
         JSON.stringify({
@@ -478,6 +947,12 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "soloPlay") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (roundIndex >= 2) {
+        ws.send(JSON.stringify({ type: "soloError", reason: "round" }));
+        return;
+      }
       if (ws.teamId != null) {
         ws.send(JSON.stringify({ type: "soloError", reason: "already" }));
         return;
@@ -499,6 +974,7 @@ wss.on("connection", (ws) => {
       saveDynamicTeams();
       ws.teamId = id;
       teamPlayerCounts.set(id, 1);
+      if (ws.playerKey) addTeamMemberKey(id, ws.playerKey);
       const team = { id, name, emoji, color, solo: true };
       ws.send(
         JSON.stringify({
@@ -517,6 +993,12 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "soloResume") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (roundIndex >= 2) {
+        ws.send(JSON.stringify({ type: "soloResumeError", reason: "round" }));
+        return;
+      }
       if (ws.teamId != null) {
         ws.send(JSON.stringify({ type: "soloResumeError", reason: "already" }));
         return;
@@ -529,12 +1011,13 @@ wss.on("connection", (ws) => {
         return;
       }
       const cur = teamPlayerCounts.get(tid) || 0;
-      if (cur >= MAX_PER_TEAM) {
+      if (cur >= getMaxPerTeam()) {
         ws.send(JSON.stringify({ type: "soloResumeError", reason: "full" }));
         return;
       }
       ws.teamId = tid;
       teamPlayerCounts.set(tid, cur + 1);
+      if (ws.playerKey) addTeamMemberKey(tid, ws.playerKey);
       const team = {
         id: tid,
         name: dt.name,
@@ -559,6 +1042,8 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "joinTeam") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
       const tid = Number(msg.teamId) | 0;
       const valid = validTeamId(tid);
       if (!valid) {
@@ -575,12 +1060,13 @@ wss.on("connection", (ws) => {
         return;
       }
       const cur = teamPlayerCounts.get(tid) || 0;
-      if (cur >= MAX_PER_TEAM) {
+      if (cur >= getMaxPerTeam()) {
         ws.send(JSON.stringify({ type: "joinError", reason: "full" }));
         return;
       }
       ws.teamId = tid;
       teamPlayerCounts.set(tid, cur + 1);
+      if (ws.playerKey) addTeamMemberKey(tid, ws.playerKey);
       ws.send(JSON.stringify({ type: "joined", teamId: tid }));
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
@@ -588,11 +1074,13 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "leaveTeam") {
+      attachPlayerKey(ws, msg);
       if (ws.teamId == null) {
         ws.send(JSON.stringify({ type: "leaveError", reason: "no_team" }));
         return;
       }
       const tid = ws.teamId;
+      if (ws.playerKey) removeTeamMemberKey(tid, ws.playerKey);
       const c = teamPlayerCounts.get(tid) ?? 0;
       teamPlayerCounts.set(tid, Math.max(0, c - 1));
       ws.teamId = null;
@@ -603,6 +1091,7 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "pixel") {
+      if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
         ws.send(JSON.stringify({ type: "pixelReject", reason: "no_team" }));
         return;
@@ -610,7 +1099,7 @@ wss.on("connection", (ws) => {
       const x = msg.x | 0;
       const y = msg.y | 0;
       const teamId = ws.teamId;
-      if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return;
+      if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
 
       const rule = canPlace(teamId, x, y);
       if (rule === "ocean") {
@@ -645,6 +1134,147 @@ wss.on("connection", (ws) => {
   });
 });
 
+async function telegramFetchChatUsername(userId) {
+  if (!TELEGRAM_BOT_TOKEN) return "";
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getChat?chat_id=${encodeURIComponent(String(userId))}`
+    );
+    const data = await res.json();
+    if (data.ok && data.result?.username) return String(data.result.username).slice(0, 64);
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+
+/**
+ * Уведомляет админов (TELEGRAM_ADMIN_IDS) о финалистах: username и Telegram ID участников победившей команды (до 2).
+ */
+async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, pct) {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+  const lines = [];
+  let n = 0;
+  for (const pk of winnerPlayerKeys) {
+    const meta = playerTelegramMeta.get(pk);
+    const m = /^tg_(\d+)$/.exec(pk);
+    const tgId = meta?.id ?? (m ? Number(m[1]) : null);
+    let username = meta?.username?.trim() || "";
+    if (tgId != null && !username) {
+      username = await telegramFetchChatUsername(tgId);
+    }
+    n += 1;
+    if (tgId != null) {
+      const un = username ? `@${username}` : "(username не указан или скрыт)";
+      lines.push(`${n}. ${un}\n   Telegram ID: ${tgId}`);
+    } else {
+      lines.push(`${n}. не из Telegram Mini App (playerKey: ${pk.slice(0, 32)}…)`);
+    }
+  }
+  const pctStr = typeof pct === "number" && Number.isFinite(pct) ? pct.toFixed(3) : String(pct ?? "—");
+  const body =
+    `Финал Pixel Battle\n` +
+    `Победители: «${teamName}» — ${pctStr}% территории\n` +
+    `Участники победившей команды (${winnerPlayerKeys.size} чел.):\n\n` +
+    (lines.length ? lines.join("\n\n") : "(нет записанных участников — возможно, снимок был пуст)");
+  const text = body.slice(0, 4000);
+  for (const adminId of TELEGRAM_ADMIN_IDS) {
+    try {
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: adminId, text }),
+      });
+    } catch (e) {
+      console.warn("notifyFinalWinnersTelegram:", e.message || e);
+    }
+  }
+}
+
+function startRoundOneTimer() {
+  if (gameFinished) return { ok: false, reason: "game_finished" };
+  if (roundIndex !== 0) return { ok: false, reason: "not_round_first" };
+  if (roundTimerStarted) return { ok: false, reason: "already_started" };
+  roundTimerStarted = true;
+  roundStartMs = Date.now();
+  saveRoundState();
+  for (const client of wss.clients) {
+    if (client.readyState !== 1) continue;
+    sendConnectionMeta(client);
+  }
+  broadcastStatsImmediate();
+  return { ok: true };
+}
+
+async function telegramSendMessage(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text }),
+  });
+}
+
+async function telegramPollLoop() {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+  let offset = 0;
+  for (;;) {
+    try {
+      const res = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}`
+      );
+      const data = await res.json();
+      if (!data.ok) {
+        console.warn("Telegram getUpdates:", data.description || JSON.stringify(data));
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      for (const u of data.result || []) {
+        offset = u.update_id + 1;
+        const msg = u.message || u.edited_message;
+        if (!msg || typeof msg.text !== "string") continue;
+        const uid = msg.from?.id;
+        if (uid == null || !TELEGRAM_ADMIN_IDS.has(uid)) continue;
+        const text = String(msg.text).trim().toLowerCase();
+        if (text !== "go") continue;
+        const chatId = msg.chat.id;
+        const result = startRoundOneTimer();
+        let reply;
+        if (result.ok) {
+          reply = `Первый раунд: таймер 100 ч запущен. Начало отсчёта: ${new Date(roundStartMs).toISOString()}`;
+        } else if (result.reason === "already_started") {
+          reply = "Таймер первого раунда уже идёт.";
+        } else if (result.reason === "game_finished") {
+          reply = "Игра уже завершена.";
+        } else {
+          reply = "Команда «go» действует только до перехода ко 2-му раунду (сейчас не раунд 1).";
+        }
+        await telegramSendMessage(chatId, reply);
+      }
+    } catch (e) {
+      console.warn("Telegram poll:", e.message || e);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
+  if (WAIT_FOR_TELEGRAM_GO) {
+    console.log(
+      "Первый раунд: отправьте боту в личку сообщение «go» (латиницей, слитно), чтобы запустить таймер 100 ч."
+    );
+    fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`).catch(
+      () => {}
+    );
+    telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
+  } else if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size === 0) {
+    console.warn(
+      "[Pixel Battle] Задан TELEGRAM_BOT_TOKEN, но пуст TELEGRAM_ADMIN_IDS — polling не запущен; без «go» используйте только локальную разработку или добавьте ID через запятую."
+    );
+  }
+  if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size > 0) {
+    console.log(
+      "После финала (3-й раунд) бот отправит каждому id из TELEGRAM_ADMIN_IDS username и Telegram ID участников победившей команды (до 2 чел.)."
+    );
+  }
 });
