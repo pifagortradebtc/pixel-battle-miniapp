@@ -20,7 +20,7 @@ const COOLDOWN_MS = 0;
 /** Длительность баффов «личное/командное восстановление» — как на сервере (tournament-economy). */
 const RECOVERY_BUFF_DURATION_MS = 2 * 60 * 1000;
 
-/** Последние покупки для боковой панели «Снова» */
+/** Последние покупки для боковой панели «Повторить» */
 const QUICK_BUY_HISTORY_KEY = "pixel-battle-quick-buy-v1";
 const MAX_QUICK_BUY_ITEMS = 5;
 
@@ -125,10 +125,24 @@ const EMOJI_PRESETS = [
   "🦊", "🐙", "🦄", "☀️", "🌙", "💀", "👑", "🏴",
 ];
 
+/** 16 ярких, хорошо различимых цветов (на тёмном фоне UI и на карте) */
 const PALETTE = [
-  "#1a1a2e", "#16213e", "#0f3460", "#533483", "#e94560",
-  "#ff6b6b", "#feca57", "#48dbfb", "#1dd1a1", "#ffffff",
-  "#c8d6e5", "#576574", "#8395a7", "#222f3e", "#b8e994", "#686de0",
+  "#FF1744",
+  "#FF6D00",
+  "#FFC400",
+  "#FFEB3B",
+  "#C6FF00",
+  "#00E676",
+  "#00BFA5",
+  "#00E5FF",
+  "#2979FF",
+  "#651FFF",
+  "#D500F9",
+  "#E91E63",
+  "#FF5722",
+  "#1DE9B6",
+  "#8E24AA",
+  "#FFFFFF",
 ];
 
 const canvas = document.getElementById("board");
@@ -146,6 +160,7 @@ const btnToolbarSession = document.getElementById("btn-toolbar-session");
 const welcomeOverlay = document.getElementById("welcome-overlay");
 const btnWelcomeCreate = document.getElementById("btn-welcome-create");
 const btnWelcomeJoin = document.getElementById("btn-welcome-join");
+const btnWelcomeClose = document.getElementById("btn-welcome-close");
 const welcomeDiscussionWrap = document.getElementById("welcome-discussion-wrap");
 const welcomeDiscussionLink = document.getElementById("welcome-discussion-link");
 const toolbarDiscussionLink = document.getElementById("toolbar-discussion-link");
@@ -185,9 +200,6 @@ const toolbarBuffsEl = document.getElementById("toolbar-buffs");
 const toolbarBuffPersonalEl = document.getElementById("toolbar-buff-personal");
 const toolbarBuffPersonalLabelEl = document.getElementById("toolbar-buff-personal-label");
 const toolbarBuffPersonalFillEl = document.getElementById("toolbar-buff-personal-fill");
-const toolbarBuffTeamEl = document.getElementById("toolbar-buff-team");
-const toolbarBuffTeamLabelEl = document.getElementById("toolbar-buff-team-label");
-const toolbarBuffTeamFillEl = document.getElementById("toolbar-buff-team-fill");
 const eventBannerEl = document.getElementById("event-banner");
 const crisisOverlayEl = document.getElementById("crisis-overlay");
 const btnDeposit = document.getElementById("btn-deposit");
@@ -271,8 +283,10 @@ let roundEndsAtMs = null;
 let roundIndexMeta = 0;
 /** С сервера: игра полностью завершена (финал) */
 let gameFinishedMeta = false;
-/** После выхода из соло открыть список команд, а не приветственный экран */
+/** После leaveTeam открыть список команд (кнопка «Вступить», уже не в команде) */
 let pendingLeaveToTeamList = false;
+/** После leaveTeam открыть форму «Новая команда» (кнопка «Создать», пока ещё в команде) */
+let pendingLeaveToCreate = false;
 
 /** Экономика с сервера */
 let walletState = null;
@@ -679,11 +693,11 @@ function refreshToolbarSessionButton() {
     if (myTeamId != null) {
       btnToolbarSession.textContent = "Сменить команду";
       btnToolbarSession.title = isCurrentTeamSolo()
-        ? "Выйти из соло и выбрать другую команду или создать новую."
-        : "Выйти из текущей команды и выбрать другую или создать новую.";
+        ? "Выбор другой команды или создание новой. Можно закрыть окно (×) — останетесь в соло."
+        : "Выбор другой команды или создание новой. Можно закрыть окно (×) — останетесь в текущей команде.";
     } else {
       btnToolbarSession.textContent = "Войти";
-      btnToolbarSession.title = "Создать команду или вступить в существующую";
+      btnToolbarSession.title = "Создать команду или вступить в существующую (окно можно закрыть без действия)";
     }
   } else {
     btnToolbarSession.textContent = "Очистить локально";
@@ -1124,11 +1138,31 @@ function showWelcomeOverlay() {
 }
 
 function setupWelcomeUi() {
+  btnWelcomeClose?.addEventListener("click", () => {
+    if (welcomeOverlay) welcomeOverlay.hidden = true;
+  });
+  welcomeOverlay?.addEventListener("click", (e) => {
+    if (e.target === welcomeOverlay) welcomeOverlay.hidden = true;
+  });
   btnWelcomeCreate?.addEventListener("click", () => {
+    if (myTeamId != null) {
+      pendingLeaveToTeamList = false;
+      pendingLeaveToCreate = true;
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      sendLeaveTeamRequest();
+      return;
+    }
     if (welcomeOverlay) welcomeOverlay.hidden = true;
     openCreateTeamOverlay(true);
   });
   btnWelcomeJoin?.addEventListener("click", () => {
+    if (myTeamId != null) {
+      pendingLeaveToTeamList = true;
+      pendingLeaveToCreate = false;
+      if (welcomeOverlay) welcomeOverlay.hidden = true;
+      sendLeaveTeamRequest();
+      return;
+    }
     if (welcomeOverlay) welcomeOverlay.hidden = true;
     if (teamOverlay) teamOverlay.hidden = false;
   });
@@ -1271,10 +1305,9 @@ function setupTeamSettingsUi() {
   });
 }
 
-/** Выход из команды / соло без диалога — затем открывается список команд (pendingLeaveToTeamList). */
-function leaveTeamToSwitch() {
+/** Запрос выхода из команды по WebSocket (какой экран показать после «left» — флаги pending*). */
+function sendLeaveTeamRequest() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  pendingLeaveToTeamList = true;
   ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
 }
 
@@ -1443,6 +1476,8 @@ function syncClientCooldownFromWalletFields() {
 /** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || 20000` (ломает 0 и баффы). */
 function getWalletActionCooldownMs() {
   if (!walletState) return 20000;
+  /* Без пересчёта по текущему времени после окончания personalRecoveryUntil остаётся устаревший effectiveRecoverySec (напр. 1 с). */
+  syncClientCooldownFromWalletFields();
   const sec = walletState.effectiveRecoverySec;
   if (typeof sec === "number" && Number.isFinite(sec) && sec >= 0) {
     return Math.max(0, Math.round(sec * 1000));
@@ -1539,18 +1574,10 @@ function updateActiveBuffBars() {
   if (!online || spectatorMode || !walletState) {
     toolbarBuffsEl.hidden = true;
     if (toolbarBuffPersonalEl) toolbarBuffPersonalEl.hidden = true;
-    if (toolbarBuffTeamEl) toolbarBuffTeamEl.hidden = true;
     return;
   }
   const now = Date.now();
   const pu = typeof walletState.personalRecoveryUntil === "number" && walletState.personalRecoveryUntil > now;
-  const te = walletState.teamEffects;
-  const tu =
-    te &&
-    typeof te.teamRecoveryUntil === "number" &&
-    te.teamRecoveryUntil > now;
-
-  let any = false;
 
   if (pu && toolbarBuffPersonalEl && toolbarBuffPersonalLabelEl && toolbarBuffPersonalFillEl) {
     const left = walletState.personalRecoveryUntil - now;
@@ -1563,28 +1590,11 @@ function updateActiveBuffBars() {
     toolbarBuffPersonalFillEl.style.width = `${pct}%`;
     toolbarBuffPersonalEl.hidden = false;
     toolbarBuffPersonalEl.title = `Суперсила: пиксель каждые ${sec} с. Действует ещё ${formatBuffRemainingMs(left)} (всего 2 мин с покупки).`;
-    any = true;
-  } else if (toolbarBuffPersonalEl) {
-    toolbarBuffPersonalEl.hidden = true;
+    toolbarBuffsEl.hidden = false;
+  } else {
+    if (toolbarBuffPersonalEl) toolbarBuffPersonalEl.hidden = true;
+    toolbarBuffsEl.hidden = true;
   }
-
-  if (tu && toolbarBuffTeamEl && toolbarBuffTeamLabelEl && toolbarBuffTeamFillEl) {
-    const left = te.teamRecoveryUntil - now;
-    const sec = te.teamRecoverySec ?? "?";
-    const pct = Math.min(
-      100,
-      Math.max(0, (Math.min(left, RECOVERY_BUFF_DURATION_MS) / RECOVERY_BUFF_DURATION_MS) * 100)
-    );
-    toolbarBuffTeamLabelEl.textContent = `👥 Команда ${sec} с/ход · ещё ${formatBuffRemainingMs(left)}`;
-    toolbarBuffTeamFillEl.style.width = `${pct}%`;
-    toolbarBuffTeamEl.hidden = false;
-    toolbarBuffTeamEl.title = `Командный буст: пиксель каждые ${sec} с. Действует ещё ${formatBuffRemainingMs(left)} (всего 2 мин с покупки).`;
-    any = true;
-  } else if (toolbarBuffTeamEl) {
-    toolbarBuffTeamEl.hidden = true;
-  }
-
-  toolbarBuffsEl.hidden = !any;
 }
 
 function updateToolbarHud() {
@@ -1795,7 +1805,7 @@ function applyGlobalPurchaseVfx(msg) {
   }
 }
 
-/** Только для покупателя: всплывающие подсказки и «Снова»; карта — через applyGlobalPurchaseVfx. */
+/** Только для покупателя: всплывающие подсказки и «Повторить»; карта — через applyGlobalPurchaseVfx. */
 function handlePurchaseOk(msg) {
   const kind = msg.kind;
   const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
@@ -2059,7 +2069,7 @@ function renderQuickBuyRail() {
   updateQuickBuyBuffRings();
 }
 
-/** Круговой «радар» оставшегося времени баффа на кнопке «Снова» (личн. / команда). */
+/** Круговой «радар» оставшегося времени баффа на кнопке «Повторить» (личн. / команда). */
 function updateQuickBuyBuffRings() {
   const host = document.getElementById("quick-buy-list");
   if (!host) return;
@@ -2150,6 +2160,7 @@ function updateShopAvailability() {
     renderQuickBuyRail();
     return;
   }
+  syncClientCooldownFromWalletFields();
   const st = walletState.tournamentStage || "MASS_BATTLE";
   const hints = {
     MASS_BATTLE: "",
@@ -2607,6 +2618,7 @@ function connectWs() {
       closeTeamSettings();
       closeCreateTeamOverlay();
       pendingLeaveToTeamList = false;
+      pendingLeaveToCreate = false;
       spectatorMode = true;
       gameFinishedMeta = true;
       lastMyTeamPercent = null;
@@ -2637,6 +2649,7 @@ function connectWs() {
       closeTeamSettings();
       closeCreateTeamOverlay();
       pendingLeaveToTeamList = false;
+      pendingLeaveToCreate = false;
       lastMyTeamPercent = null;
       const gw = typeof msg.grid?.w === "number" ? msg.grid.w : gridW;
       const gh = typeof msg.grid?.h === "number" ? msg.grid.h : gridH;
@@ -2973,8 +2986,14 @@ function connectWs() {
       clearTeamIdentityFromSession();
       stripTeamFromUrl();
       const openTeamList = pendingLeaveToTeamList;
+      const openCreate = pendingLeaveToCreate;
       pendingLeaveToTeamList = false;
-      if (openTeamList) {
+      pendingLeaveToCreate = false;
+      if (openCreate) {
+        if (welcomeOverlay) welcomeOverlay.hidden = true;
+        teamOverlay.hidden = true;
+        openCreateTeamOverlay(true);
+      } else if (openTeamList) {
         if (welcomeOverlay) welcomeOverlay.hidden = true;
         teamOverlay.hidden = false;
       } else {
@@ -2990,7 +3009,10 @@ function connectWs() {
       return;
     }
     if (msg.type === "leaveError") {
+      const hadPendingIntent = pendingLeaveToTeamList || pendingLeaveToCreate;
       pendingLeaveToTeamList = false;
+      pendingLeaveToCreate = false;
+      if (hadPendingIntent && welcomeOverlay) welcomeOverlay.hidden = false;
       return;
     }
     if (msg.type === "full") {
@@ -3465,12 +3487,8 @@ function setupToolbarSession() {
   btnToolbarSession.addEventListener("click", () => {
     const online = wantOnline && getWsUrl();
     if (online) {
-      if (myTeamId != null) {
-        leaveTeamToSwitch();
-      } else {
-        showWelcomeOverlay();
-        if (teamOverlay) teamOverlay.hidden = true;
-      }
+      showWelcomeOverlay();
+      if (teamOverlay) teamOverlay.hidden = true;
       return;
     }
     const runLocalClear = () => {

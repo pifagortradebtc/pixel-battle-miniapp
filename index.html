@@ -18,6 +18,15 @@
   <div id="welcome-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings welcome-card">
       <div class="welcome-panel" role="dialog" aria-labelledby="welcome-title" aria-modal="true">
+        <button
+          type="button"
+          id="btn-welcome-close"
+          class="welcome-panel__close"
+          aria-label="Закрыть"
+          title="Закрыть без смены команды"
+        >
+          ×
+        </button>
         <h2 id="welcome-title" class="welcome-panel__title">Pixel Battle</h2>
         <div class="tg-promo-bubble" role="status">
           Создай команду, захвати больше территорий, попади в финал и получи 5000 usd.
@@ -483,25 +492,6 @@
             —
           </div>
           <span id="wallet-balance" class="toolbar__wallet toolbar__wallet--lead" hidden title="Игровая валюта — кванты">💰 0 квантов</span>
-          <div
-            id="toolbar-buffs"
-            class="toolbar-buffs"
-            hidden
-            aria-label="Активные баффы на скорость пикселя"
-          >
-            <div id="toolbar-buff-personal" class="toolbar-buff toolbar-buff--personal" hidden>
-              <span class="toolbar-buff__label" id="toolbar-buff-personal-label"></span>
-              <div class="toolbar-buff__track" aria-hidden="true">
-                <div class="toolbar-buff__fill" id="toolbar-buff-personal-fill"></div>
-              </div>
-            </div>
-            <div id="toolbar-buff-team" class="toolbar-buff toolbar-buff--team" hidden>
-              <span class="toolbar-buff__label" id="toolbar-buff-team-label"></span>
-              <div class="toolbar-buff__track" aria-hidden="true">
-                <div class="toolbar-buff__fill" id="toolbar-buff-team-fill"></div>
-              </div>
-            </div>
-          </div>
         </div>
         <div class="toolbar__actions">
           <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить кванты (оплата USDT)">Кванты +</button>
@@ -517,6 +507,19 @@
           <span id="spectator-badge" class="toolbar__spectator" hidden>Наблюдение</span>
           <button type="button" id="btn-toolbar-session" class="toolbar__btn" title="">Сменить команду</button>
           <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
+          <div
+            id="toolbar-buffs"
+            class="toolbar-buffs"
+            hidden
+            aria-label="Личное ускорение пикселя"
+          >
+            <div id="toolbar-buff-personal" class="toolbar-buff toolbar-buff--personal" hidden>
+              <span class="toolbar-buff__label" id="toolbar-buff-personal-label"></span>
+              <div class="toolbar-buff__track" aria-hidden="true">
+                <div class="toolbar-buff__fill" id="toolbar-buff-personal-fill"></div>
+              </div>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -553,7 +556,7 @@
             hidden
             aria-label="Повтор последних покупок"
           >
-            <div class="quick-buy-rail__caption">Снова</div>
+            <div class="quick-buy-rail__caption">Повторить</div>
             <div id="quick-buy-list" class="quick-buy-rail__list"></div>
           </aside>
         </div>

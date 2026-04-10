@@ -7,7 +7,7 @@
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   /* Плавающая шапка и низ — карта на весь экран под ними */
-  --toolbar-h: 42px;
+  --toolbar-h: 34px;
   --hud-bg: rgba(5, 10, 18, 0.42);
   --hud-border: rgba(255, 255, 255, 0.08);
 }
@@ -54,7 +54,7 @@ body {
   position: absolute;
   z-index: 12;
   left: 2px;
-  top: calc(var(--safe-top) + var(--toolbar-h) + 2px);
+  top: calc(var(--safe-top) + var(--toolbar-h) + 1px);
   width: min(26vw, 112px);
   max-width: 122px;
   max-height: min(38vh, 220px);
@@ -169,11 +169,11 @@ body {
   /* grid: правая колонка (кнопки) не сжимается ниже контента — иначе «Магазин» обрезался слева */
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 8px;
-  column-gap: 10px;
+  align-items: center;
+  gap: 4px;
+  column-gap: 6px;
   min-height: var(--toolbar-h);
-  padding: 8px calc(10px + env(safe-area-inset-right, 0px)) 8px calc(10px + env(safe-area-inset-left, 0px));
+  padding: 4px calc(8px + env(safe-area-inset-right, 0px)) 4px calc(8px + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--hud-border);
   /* Без backdrop-filter: в Telegram WebView размытие часто «тянется» на пол-экрана над картой */
   background: rgba(5, 10, 18, 0.82);
@@ -188,15 +188,15 @@ body {
   flex-direction: column;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
 }
 
 .toolbar__round--lead {
-  font-size: 0.58rem;
-  line-height: 1.25;
+  font-size: 0.52rem;
+  line-height: 1.18;
   color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
   max-width: 100% !important;
   width: 100%;
@@ -213,8 +213,8 @@ body {
 
 .toolbar__pixel-timer {
   font-weight: 700;
-  font-size: 0.78rem;
-  letter-spacing: 0.04em;
+  font-size: 0.66rem;
+  letter-spacing: 0.03em;
   font-variant-numeric: tabular-nums;
   flex: 0 1 auto;
   min-width: 0;
@@ -246,13 +246,13 @@ body {
   flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
   flex-shrink: 0;
   min-width: min-content;
   max-width: 100%;
   overflow: visible;
-  padding-top: 1px;
-  padding-bottom: 1px;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .toolbar__actions .toolbar__btn,
@@ -274,7 +274,7 @@ body {
 }
 
 .toolbar__conn {
-  font-size: 0.62rem;
+  font-size: 0.56rem;
   color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
   max-width: 88px;
   white-space: nowrap;
@@ -295,10 +295,10 @@ body {
   border: 1px solid color-mix(in srgb, var(--tg-hint) 35%, transparent);
   background: rgba(0, 0, 0, 0.25);
   color: var(--tg-text);
-  font-size: 0.68rem;
+  font-size: 0.6rem;
   font-weight: 500;
-  padding: 4px 8px;
-  border-radius: 7px;
+  padding: 2px 6px;
+  border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
@@ -315,7 +315,7 @@ body {
 }
 
 .toolbar__cooldown {
-  font-size: 0.65rem;
+  font-size: 0.56rem;
   color: var(--tg-hint);
 }
 
@@ -330,7 +330,7 @@ body {
 }
 
 .toolbar__spectator {
-  font-size: 0.62rem;
+  font-size: 0.56rem;
   color: #e94560;
   font-weight: 600;
 }
@@ -339,11 +339,11 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 28px;
-  min-height: 28px;
-  padding: 2px 6px;
-  border-radius: 8px;
-  font-size: 0.95rem;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 1px 4px;
+  border-radius: 6px;
+  font-size: 0.85rem;
   line-height: 1;
   text-decoration: none;
   color: var(--tg-text);
@@ -363,7 +363,7 @@ body {
   opacity: 0.88;
 }
 
-/* Блок «Снова»: ровно 3 последние покупки в строку, без горизонтального скролла */
+/* Блок «Повторить»: ровно 3 последние покупки в строку, без горизонтального скролла */
 .quick-buy-rail {
   pointer-events: auto;
   isolation: isolate;
@@ -379,26 +379,28 @@ body {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex: 1 1 auto;
   min-width: 0;
-  /* Шире блок — «Снова» и три карточки умещаются в одну строку */
-  max-width: min(78%, 300px);
+  /* Шире блок — подпись и три карточки умещаются в одну строку */
+  max-width: min(82%, 320px);
   justify-content: flex-start;
 }
 
 .quick-buy-rail__caption {
-  font-size: 0.5rem;
+  font-size: clamp(0.45rem, 1.9vw, 0.55rem);
   font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  text-transform: none;
   color: color-mix(in srgb, var(--tg-hint) 88%, transparent);
   text-align: left;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
   flex-shrink: 0;
   line-height: 1.15;
-  width: 2.4em;
-  min-width: 2.4em;
+  white-space: nowrap;
+  margin-right: 6px;
+  padding-right: 2px;
+  /* Раньше width: 2.4em — подпись наезжала на первую карточку */
 }
 
 .quick-buy-rail__list {
@@ -877,14 +879,47 @@ body {
 }
 
 .welcome-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
   width: 100%;
 }
 
+.welcome-panel__close {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--tg-bg) 70%, transparent);
+  color: color-mix(in srgb, var(--tg-hint) 95%, transparent);
+  font-size: 1.35rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.welcome-panel__close:hover {
+  background: color-mix(in srgb, var(--tg-hint) 22%, transparent);
+  color: var(--tg-text);
+}
+
+.welcome-panel__close:active {
+  opacity: 0.88;
+}
+
 .welcome-panel__title {
   margin: 0;
+  padding-right: 28px;
   font-size: 1.05rem;
   font-weight: 800;
   letter-spacing: 0.04em;
@@ -1167,7 +1202,7 @@ body {
 }
 
 .toolbar__wallet {
-  font-size: 0.62rem;
+  font-size: 0.56rem;
   font-weight: 600;
   color: #feca57;
   white-space: nowrap;
@@ -1175,13 +1210,13 @@ body {
 
 /** Слева под таймером — не уезжает в горизонтальный скролл кнопок справа */
 .toolbar__wallet--lead {
-  font-size: 0.72rem;
+  font-size: 0.62rem;
   flex: 0 0 auto;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.25;
-  margin-top: 1px;
+  line-height: 1.15;
+  margin-top: 0;
 }
 
 .deposit-presets {
@@ -1365,13 +1400,18 @@ body {
   display: none !important;
 }
 
+/* Справа в колонке кнопок — компактная полоска баффа */
 .toolbar-buffs {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 4px;
-  width: 100%;
+  gap: 2px;
+  width: auto;
   min-width: 0;
+  max-width: min(48vw, 200px);
+  flex-shrink: 0;
+  align-self: center;
+  margin-top: 0;
 }
 
 .toolbar-buffs[hidden] {
@@ -1382,15 +1422,15 @@ body {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 2px;
+  gap: 1px;
   flex-shrink: 0;
   width: 100%;
 }
 
 .toolbar-buff__label {
-  font-size: 0.52rem;
+  font-size: 0.46rem;
   font-weight: 600;
-  line-height: 1.2;
+  line-height: 1.12;
   letter-spacing: 0.01em;
   color: color-mix(in srgb, var(--tg-hint) 95%, transparent);
   max-width: 100%;
@@ -1400,7 +1440,7 @@ body {
 }
 
 .toolbar-buff__track {
-  height: 5px;
+  height: 3px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
   overflow: hidden;
@@ -1413,11 +1453,6 @@ body {
   background: linear-gradient(90deg, #f59e0b, #fbbf24);
   box-shadow: 0 0 8px rgba(251, 191, 36, 0.35);
   transition: width 0.3s linear;
-}
-
-.toolbar-buff--team .toolbar-buff__fill {
-  background: linear-gradient(90deg, #22c55e, #4ade80);
-  box-shadow: 0 0 8px rgba(74, 222, 128, 0.35);
 }
 
 .crisis-overlay__card {

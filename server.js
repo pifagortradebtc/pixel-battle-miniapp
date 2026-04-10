@@ -12,11 +12,8 @@ import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
 import {
   BASE_ACTION_COOLDOWN_SEC,
-  MASS_CAPTURE_COOLDOWN_MS,
   PRICES_QUANT,
   RECOVERY_BUFF_DURATION_MS,
-  ZONE12_CAPTURE_COOLDOWN_MS,
-  ZONE_CAPTURE_COOLDOWN_MS,
   getCurrentCooldownMs,
   getEffectiveRecoverySec,
   quantToUsdt,
@@ -2024,10 +2021,6 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      if (u.lastZoneCaptureAt + ZONE_CAPTURE_COOLDOWN_MS > now) {
-        safeSend(ws, { type: "purchaseError", reason: "zone capture cooldown" });
-        return;
-      }
       const priceQuant = PRICES_QUANT.zone4;
       const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
@@ -2083,10 +2076,6 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      if (u.lastMassCaptureAt + MASS_CAPTURE_COOLDOWN_MS > now) {
-        safeSend(ws, { type: "purchaseError", reason: "mass capture cooldown" });
-        return;
-      }
       const priceQuant = PRICES_QUANT.zone6;
       const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
@@ -2140,10 +2129,6 @@ wss.on("connection", (ws, req) => {
       const planned = planCaptureRect(cx - 5, cy - 5, cx + 6, cy + 6);
       if (planned.length === 0) {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
-        return;
-      }
-      if (u.lastZone12CaptureAt + ZONE12_CAPTURE_COOLDOWN_MS > now) {
-        safeSend(ws, { type: "purchaseError", reason: "zone12 capture cooldown" });
         return;
       }
       const priceQuant = PRICES_QUANT.zone12;
