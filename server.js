@@ -151,8 +151,9 @@ const TELEGRAM_BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || "").replace(
 const TELEGRAM_MINIAPP_SHORT_NAME = (process.env.TELEGRAM_MINIAPP_SHORT_NAME || "").trim();
 const TELEGRAM_START_MESSAGE =
   (process.env.TELEGRAM_START_MESSAGE || "").trim() ||
-  "Создай команду, захвати больше пикселей, попади в финал, получи 5000 USDT.";
-const TELEGRAM_START_BUTTON_TEXT = (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "Запустить игру";
+  "Создай команду, захвати больше территорий, попади в финал и получи 5000 usd.";
+const TELEGRAM_START_BUTTON_TEXT =
+  (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "🕹️ Запустить игру";
 
 function getTelegramMiniAppLaunchUrl() {
   if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
@@ -1835,99 +1836,12 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg.type === "soloPlay") {
-      if (!assertCanPlay(ws)) return;
-      attachPlayerKey(ws, msg);
-      reconcileWsTeamMembership(ws);
-      if (roundIndex === 2) {
-        safeSend(ws,{ type: "soloError", reason: "round" });
-        return;
-      }
-      if (roundIndex === 3 && dynamicTeams.length >= 2) {
-        safeSend(ws, { type: "soloError", reason: "limit" });
-        return;
-      }
-      if (ws.teamId != null) {
-        safeSend(ws,{ type: "soloError", reason: "already" });
-        return;
-      }
-      const name = sanitizeTeamName(msg.name);
-      const color = sanitizeHexColor(msg.color);
-      if (!name || !color) {
-        safeSend(ws,{ type: "soloError", reason: "fields" });
-        return;
-      }
-      if (nextTeamId > 255) {
-        safeSend(ws,{ type: "soloError", reason: "limit" });
-        return;
-      }
-      const id = nextTeamId++;
-      const emoji = sanitizeTeamEmoji(msg.emoji) || "🙂";
-      const soloResumeToken = newTeamEditToken();
-      dynamicTeams.push({ id, name, emoji, color, solo: true, soloResumeToken });
-      saveDynamicTeams();
-      ws.teamId = id;
-      teamPlayerCounts.set(id, 1);
-      if (ws.playerKey) addTeamMemberKey(id, ws.playerKey);
-      const team = { id, name, emoji, color, solo: true };
-      safeSend(ws, {
-        type: "soloJoined",
-        teamId: id,
-        team,
-        resumeToken: soloResumeToken,
-        teams: teamsForMeta(),
-        teamCounts: Object.fromEntries(teamPlayerCounts),
-      });
-      broadcast({ type: "teamsFull", teams: teamsForMeta() });
-      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
-      broadcastStatsImmediate();
+      safeSend(ws, { type: "soloError", reason: "disabled" });
       return;
     }
 
     if (msg.type === "soloResume") {
-      if (!assertCanPlay(ws)) return;
-      attachPlayerKey(ws, msg);
-      reconcileWsTeamMembership(ws);
-      if (roundIndex === 2) {
-        safeSend(ws,{ type: "soloResumeError", reason: "round" });
-        return;
-      }
-      if (ws.teamId != null) {
-        safeSend(ws,{ type: "soloResumeError", reason: "already" });
-        return;
-      }
-      const tid = Number(msg.teamId) | 0;
-      const sent = typeof msg.resumeToken === "string" ? msg.resumeToken.trim() : "";
-      const dt = dynamicTeams.find((t) => t.id === tid);
-      if (!dt || !dt.solo || !dt.soloResumeToken || sent !== dt.soloResumeToken) {
-        safeSend(ws,{ type: "soloResumeError", reason: "invalid" });
-        return;
-      }
-      const cur = teamPlayerCounts.get(tid) || 0;
-      if (cur >= getMaxPerTeam()) {
-        safeSend(ws,{ type: "soloResumeError", reason: "full" });
-        return;
-      }
-      ws.teamId = tid;
-      teamPlayerCounts.set(tid, cur + 1);
-      if (ws.playerKey) addTeamMemberKey(tid, ws.playerKey);
-      const team = {
-        id: tid,
-        name: dt.name,
-        emoji: dt.emoji,
-        color: dt.color,
-        solo: true,
-      };
-      safeSend(ws, {
-        type: "soloJoined",
-        teamId: tid,
-        team,
-        resumeToken: dt.soloResumeToken,
-        teams: teamsForMeta(),
-        teamCounts: Object.fromEntries(teamPlayerCounts),
-      });
-      broadcast({ type: "teamsFull", teams: teamsForMeta() });
-      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
-      broadcastStatsImmediate();
+      safeSend(ws, { type: "soloResumeError", reason: "disabled" });
       return;
     }
 

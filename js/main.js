@@ -107,16 +107,10 @@ const cooldownLabel = document.getElementById("cooldown-label");
 const connStatus = document.getElementById("conn-status");
 const btnToolbarSession = document.getElementById("btn-toolbar-session");
 const welcomeOverlay = document.getElementById("welcome-overlay");
-const welcomeNameInput = document.getElementById("welcome-name");
-const welcomePaletteEl = document.getElementById("welcome-palette");
-const btnWelcomeSolo = document.getElementById("btn-welcome-solo");
 const btnWelcomeCreate = document.getElementById("btn-welcome-create");
 const btnWelcomeJoin = document.getElementById("btn-welcome-join");
-const btnWelcomeStart = document.getElementById("btn-welcome-start");
-const welcomeHeroEl = document.getElementById("welcome-hero");
-const welcomeFormEl = document.getElementById("welcome-form");
-/** После «Запустить игру» показываем форму без повторного интро */
-const WELCOME_HERO_STORAGE_KEY = "pixel-battle-welcome-hero-dismissed";
+/** Макс. длина названия команды в боковой панели и в списке (графемы Unicode). */
+const TEAM_NAME_DISPLAY_MAX = 6;
 const teamOverlay = document.getElementById("team-overlay");
 const btnTeamOverlayBack = document.getElementById("btn-team-overlay-back");
 const teamListEl = document.getElementById("team-list");
@@ -321,8 +315,7 @@ async function applyGridFromServer(w, h) {
 }
 
 function syncWelcomeForRound() {
-  const hideSolo = wantOnline && roundIndexMeta >= 2;
-  if (btnWelcomeSolo) btnWelcomeSolo.hidden = hideSolo;
+  /* Раньше скрывали соло в финале — соло отключён. */
 }
 
 function countryColor(regionId) {
@@ -428,6 +421,40 @@ function clearTeamIdentityFromSession() {
     });
   } catch {
     /* ignore */
+  }
+}
+
+/** Убрать сохранённую соло-сессию (режим отключён на сервере). */
+function clearSoloFromSession() {
+  try {
+    const s = loadOnlineSession();
+    if (!s || !s.solo) return;
+    saveOnlineSessionRaw({
+      playerName: s.playerName,
+      welcomeColorIdx: s.welcomeColorIdx,
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Короткая подпись названия команды для компактного UI (лидерборд, бейдж). */
+function truncateTeamDisplayName(raw, maxLen = TEAM_NAME_DISPLAY_MAX) {
+  if (raw == null || raw === "") return "";
+  const s = String(raw);
+  const chars = [...s];
+  if (chars.length <= maxLen) return s;
+  return chars.slice(0, maxLen).join("");
+}
+
+function setCompactTeamName(el, fullName) {
+  if (!el) return;
+  const t = truncateTeamDisplayName(fullName);
+  el.textContent = t;
+  if (fullName != null && String(fullName).length > TEAM_NAME_DISPLAY_MAX) {
+    el.title = String(fullName);
+  } else {
+    el.removeAttribute("title");
   }
 }
 
@@ -606,15 +633,15 @@ function refreshToolbarSessionButton() {
       if (isCurrentTeamSolo()) {
         btnToolbarSession.textContent = "Войти в команду";
         btnToolbarSession.title =
-          "Выйти из соло и открыть список команд — вступить или создать команду (карта на сервере сохраняется)";
+          "Открыть выбор команды — создать или вступить (карта на сервере сохраняется)";
       } else {
         btnToolbarSession.textContent = "Сменить команду";
         btnToolbarSession.title =
-          "Выйти из текущей команды и снова выбрать соло или другую команду (карта для всех не сбрасывается)";
+          "Выйти из текущей команды и выбрать другую или создать новую (общая карта не сбрасывается)";
       }
     } else {
       btnToolbarSession.textContent = "Войти";
-      btnToolbarSession.title = "Открыть экран входа: имя, соло или команда";
+      btnToolbarSession.title = "Создать команду или вступить в существующую";
     }
   } else {
     btnToolbarSession.textContent = "Очистить локально";
@@ -629,7 +656,7 @@ function updateTeamBadge() {
   const s = loadOnlineSession();
   if (t) {
     if (teamBadgeEmoji) teamBadgeEmoji.textContent = t.emoji || "";
-    teamBadgeName.textContent = t.name;
+    setCompactTeamName(teamBadgeName, t.name);
     teamBadgeName.style.removeProperty("color");
     const cnt = teamCounts[t.id] ?? 0;
     teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
@@ -637,7 +664,7 @@ function updateTeamBadge() {
   }
   if (s && s.teamId === myTeamId && s.cachedTeamName) {
     if (teamBadgeEmoji) teamBadgeEmoji.textContent = s.cachedEmoji || "";
-    teamBadgeName.textContent = s.cachedTeamName;
+    setCompactTeamName(teamBadgeName, s.cachedTeamName);
     const cnt = teamCounts[myTeamId] ?? 0;
     teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
   }
@@ -671,7 +698,7 @@ function renderLeaderboard(msg) {
     top.append(rank, em);
     const name = document.createElement("div");
     name.className = "leaderboard__name";
-    name.textContent = row.name || "";
+    setCompactTeamName(name, row.name || "");
     const meta = document.createElement("div");
     meta.className = "leaderboard__meta";
     const pct = typeof row.percent === "number" ? row.percent : 0;
@@ -774,7 +801,7 @@ function rebuildTeamList() {
     em.className = "team-list__emoji";
     em.textContent = t.emoji || "●";
     const name = document.createElement("span");
-    name.textContent = t.name;
+    setCompactTeamName(name, t.name);
     const left = document.createElement("span");
     left.style.display = "flex";
     left.style.alignItems = "center";
@@ -805,20 +832,11 @@ function rebuildTeamList() {
 function tryRestoreSession() {
   const sess = loadOnlineSession();
   if (!sess || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (sess.solo && sess.soloResumeToken) {
-    ws.send(
-      JSON.stringify({
-        type: "soloResume",
-        teamId: sess.teamId,
-        resumeToken: sess.soloResumeToken,
-        playerKey: getOrCreatePlayerKey(),
-      })
-    );
-  } else {
-    ws.send(
-      JSON.stringify({ type: "joinTeam", teamId: sess.teamId, playerKey: getOrCreatePlayerKey() })
-    );
+  if (sess.solo) {
+    clearSoloFromSession();
+    return;
   }
+  ws.send(JSON.stringify({ type: "joinTeam", teamId: sess.teamId, playerKey: getOrCreatePlayerKey() }));
 }
 
 /**
@@ -1008,13 +1026,6 @@ function buildSwatchPalette(container, selectedIdx, onPick) {
   });
 }
 
-function buildWelcomePalette() {
-  buildSwatchPalette(welcomePaletteEl, welcomeColorIdx, (i) => {
-    welcomeColorIdx = i;
-    saveOnlineSession({ welcomeColorIdx: i });
-  });
-}
-
 function buildCreateTeamPalette() {
   buildSwatchPalette(createTeamColorPaletteEl, createTeamColorIdx, (i) => {
     createTeamColorIdx = i;
@@ -1065,71 +1076,11 @@ function submitCreateTeam() {
   );
 }
 
-function submitWelcomeSolo() {
-  if (sessionRestorePending) {
-    const tg = window.Telegram?.WebApp;
-    const m = "Подождите секунду — восстанавливается сессия.";
-    if (typeof tg?.showAlert === "function") tg.showAlert(m);
-    else alert(m);
-    return;
-  }
-  const name = welcomeNameInput?.value.trim() ?? "";
-  if (!name) {
-    const tg = window.Telegram?.WebApp;
-    const msg = "Введите имя.";
-    if (typeof tg?.showAlert === "function") tg.showAlert(msg);
-    else alert(msg);
-    return;
-  }
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  saveOnlineSession({ playerName: name, welcomeColorIdx });
-  ws.send(
-    JSON.stringify({
-      type: "soloPlay",
-      name,
-      color: PALETTE[welcomeColorIdx],
-      playerKey: getOrCreatePlayerKey(),
-    })
-  );
-}
-
-function syncWelcomeHeroVisibility() {
-  if (!welcomeHeroEl || !welcomeFormEl) return;
-  let dismissed = false;
-  try {
-    dismissed = localStorage.getItem(WELCOME_HERO_STORAGE_KEY) === "1";
-  } catch {
-    dismissed = false;
-  }
-  welcomeHeroEl.hidden = dismissed;
-  welcomeFormEl.hidden = !dismissed;
-}
-
-function dismissWelcomeHero() {
-  try {
-    localStorage.setItem(WELCOME_HERO_STORAGE_KEY, "1");
-  } catch {
-    /* ignore */
-  }
-  if (welcomeHeroEl) welcomeHeroEl.hidden = true;
-  if (welcomeFormEl) welcomeFormEl.hidden = false;
-  welcomeNameInput?.focus();
-}
-
 function showWelcomeOverlay() {
   if (welcomeOverlay) welcomeOverlay.hidden = false;
-  syncWelcomeHeroVisibility();
 }
 
 function setupWelcomeUi() {
-  buildWelcomePalette();
-  syncWelcomeHeroVisibility();
-  btnWelcomeStart?.addEventListener("click", dismissWelcomeHero);
-  welcomeNameInput?.addEventListener("input", () => {
-    const v = welcomeNameInput.value.trim();
-    if (v) saveOnlineSession({ playerName: v });
-  });
-  btnWelcomeSolo?.addEventListener("click", submitWelcomeSolo);
   btnWelcomeCreate?.addEventListener("click", () => {
     if (welcomeOverlay) welcomeOverlay.hidden = true;
     openCreateTeamOverlay(true);
@@ -1346,8 +1297,13 @@ function onMeta(msg) {
     }
 
     const sess = loadOnlineSession();
-    const savedTeamId = sess?.teamId;
-    if (savedTeamId != null) {
+    if (sess?.solo) {
+      clearSoloFromSession();
+      myTeamId = null;
+      endSessionRestore();
+      showWelcomeOverlay();
+      teamOverlay.hidden = true;
+    } else if (sess?.teamId != null) {
       beginSessionRestore();
       if (welcomeOverlay) welcomeOverlay.hidden = true;
       tryRestoreSession();
@@ -1935,7 +1891,12 @@ function connectWs() {
     lastClaimEligibilityAt = 0;
     setConnState("online", "онлайн");
     const sess = loadOnlineSession();
-    myTeamId = sess?.teamId ?? null;
+    if (sess?.solo) {
+      clearSoloFromSession();
+      myTeamId = null;
+    } else {
+      myTeamId = sess?.teamId ?? null;
+    }
     if (leaderboardPanel) leaderboardPanel.hidden = false;
     setFooterMode();
     updateRoundTimer();
@@ -2152,7 +2113,7 @@ function connectWs() {
         if (sendLeaveTeamToRecoverFromStaleServer()) {
           const tg = window.Telegram?.WebApp;
           const text =
-            "На сервере оставалась сессия в команде — выход выполнен. Нажмите «Играть соло» ещё раз.";
+            "На сервере оставалась сессия в команде — выход выполнен. Создайте команду или вступите в списке ещё раз.";
           if (typeof tg?.showAlert === "function") tg.showAlert(text);
           else alert(text);
         } else {
@@ -2164,13 +2125,24 @@ function connectWs() {
         }
         return;
       }
+      if (msg.reason === "disabled") {
+        const tg = window.Telegram?.WebApp;
+        const text = "Соло-режим отключён — создайте команду или вступите в существующую.";
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else alert(text);
+        clearSoloFromSession();
+        showWelcomeOverlay();
+        if (teamOverlay) teamOverlay.hidden = true;
+        setFooterMode();
+        return;
+      }
       const map = {
         fields: "Введите имя и выберите цвет.",
         limit: "Достигнут лимит команд на сервере.",
         round:
-          "В финале команд (команды по 2 человека) соло недоступно — создайте команду из двух или вступите в существующую.",
+          "В финале команд (команды по 2 человека) доступны только команды — создайте команду из двух или вступите в существующую.",
       };
-      const text = map[msg.reason] || "Не удалось начать соло.";
+      const text = map[msg.reason] || "Соло недоступно.";
       const tg = window.Telegram?.WebApp;
       if (typeof tg?.showAlert === "function") tg.showAlert(text);
       else alert(text);
@@ -2178,29 +2150,12 @@ function connectWs() {
     }
     if (msg.type === "soloJoined") {
       endSessionRestore();
-      teamsMeta = msg.teams || [];
-      teamCounts = msg.teamCounts || {};
-      myTeamId = msg.teamId;
-      {
-        const patch = {
-          teamId: msg.teamId,
-          solo: true,
-          cachedTeamName: msg.team?.name,
-          cachedEmoji: msg.team?.emoji,
-        };
-        if (typeof msg.resumeToken === "string" && msg.resumeToken.length > 0) {
-          patch.soloResumeToken = msg.resumeToken;
-        }
-        saveOnlineSession(patch);
-      }
-      if (welcomeOverlay) welcomeOverlay.hidden = true;
-      teamOverlay.hidden = true;
-      closeCreateTeamOverlay();
-      stripTeamFromUrl();
+      clearSoloFromSession();
+      myTeamId = null;
+      showWelcomeOverlay();
+      if (teamOverlay) teamOverlay.hidden = true;
       rebuildTeamList();
       setFooterMode();
-      schedulePersist();
-      draw();
       return;
     }
     if (msg.type === "createTeamError") {
@@ -2224,7 +2179,7 @@ function connectWs() {
       const map = {
         fields: "Укажите название, смайлик и цвет команды.",
         limit: "Достигнут лимит команд на сервере.",
-        duel: "Финальная дуэль 1 на 1 — только соло; публичные команды недоступны.",
+        duel: "Финальная дуэль 1 на 1 — публичные команды в этот момент недоступны.",
       };
       const text = map[msg.reason] || "Не удалось создать команду.";
       const tg = window.Telegram?.WebApp;
@@ -2239,7 +2194,7 @@ function connectWs() {
         emoji: "Выберите смайлик (эмодзи).",
         no_team: "Сначала вступите в команду.",
         not_owner: "Название и смайлик может менять только создатель этой команды.",
-        solo: "В соло-режиме имя и цвет задаются при входе. Выйдите и зайдите снова или вступите в команду.",
+        solo: "Соло-режим отключён. Вступите в команду или создайте свою.",
       };
       const text = map[msg.reason] || "Не удалось сохранить.";
       const tg = window.Telegram?.WebApp;
@@ -2272,7 +2227,7 @@ function connectWs() {
         if (sendLeaveTeamToRecoverFromStaleServer()) {
           const tg = window.Telegram?.WebApp;
           const text =
-            "На сервере уже была активная команда — выход выполнен. Нажмите «Играть соло» или вступите в команду снова.";
+            "На сервере уже была активная команда — выход выполнен. Создайте команду или вступите в списке снова.";
           if (typeof tg?.showAlert === "function") tg.showAlert(text);
           else alert(text);
         } else {
@@ -2284,10 +2239,18 @@ function connectWs() {
         }
         return;
       }
+      if (msg.reason === "disabled") {
+        clearSoloFromSession();
+        showWelcomeOverlay();
+        if (teamOverlay) teamOverlay.hidden = true;
+        rebuildTeamList();
+        setFooterMode();
+        return;
+      }
       if (msg.reason === "round") {
         const tg = window.Telegram?.WebApp;
         const text =
-          "В финале команд (команды по 2) соло недоступно — создайте команду из двух человек или вступите в существующую.";
+          "В финале команд (команды по 2) нужна команда — создайте из двух человек или вступите в существующую.";
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         showWelcomeOverlay();
         teamOverlay.hidden = true;
@@ -2315,7 +2278,7 @@ function connectWs() {
       endSessionRestore();
       if (msg.reason === "duel") {
         const tg = window.Telegram?.WebApp;
-        const text = "В дуэли 1 на 1 нельзя вступать в чужие команды — только своё соло.";
+        const text = "В дуэли 1 на 1 нельзя вступать в чужие команды — играйте только за свою команду.";
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         else alert(text);
         rebuildTeamList();
@@ -2437,7 +2400,7 @@ function connectWs() {
     ws = null;
     stopMapAnimLoop();
     const sess = loadOnlineSession();
-    myTeamId = sess?.teamId ?? null;
+    myTeamId = sess?.solo ? null : sess?.teamId ?? null;
     teamsMeta = null;
     if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("error", "нет связи");
@@ -2961,8 +2924,8 @@ async function bootstrap() {
   await loadRegions();
   loadFromStorage();
   migrateLegacySessionStorage();
+  clearSoloFromSession();
   const os = loadOnlineSession();
-  if (os?.playerName && welcomeNameInput) welcomeNameInput.value = os.playerName;
   if (
     typeof os?.welcomeColorIdx === "number" &&
     os.welcomeColorIdx >= 0 &&

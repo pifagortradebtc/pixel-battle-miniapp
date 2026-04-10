@@ -17,33 +17,30 @@
   <!-- Порядок оверлеев: снизу вверх (последний в DOM — поверх остальных). -->
   <div id="welcome-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings welcome-card">
-      <div id="welcome-hero" class="welcome-hero">
+      <div class="welcome-panel" role="dialog" aria-labelledby="welcome-title" aria-modal="true">
+        <h2 id="welcome-title" class="welcome-panel__title">Pixel Battle</h2>
         <div class="tg-promo-bubble" role="status">
-          Создай команду, захвати больше пикселей, попади в финал, получи 5000 USDT.
+          Создай команду, захвати больше территорий, попади в финал и получи 5000 usd.
         </div>
-        <button type="button" id="btn-welcome-start" class="tg-miniapp-start" aria-label="Запустить игру">
-          <span class="tg-miniapp-start__corner-icon" aria-hidden="true">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="4" y="6" width="16" height="14" rx="2" stroke="currentColor" stroke-width="1.6" />
-              <path d="M4 10h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-            </svg>
-          </span>
-          <span class="tg-miniapp-start__label">Запустить игру</span>
-        </button>
-      </div>
-      <div id="welcome-form" class="welcome-form" hidden>
-        <h2 class="overlay__title">Добро пожаловать</h2>
-        <p class="overlay__hint">Введите имя и выберите цвет — можно играть одному. Либо создайте команду (название, смайлик и цвет команды) или вступите в существующую из списка. В команде у всех один цвет.</p>
-        <label class="field">
-          <span class="field__label">Ваше имя</span>
-          <input type="text" id="welcome-name" class="field__input" maxlength="40" autocomplete="off" placeholder="Как к вам обращаться" />
-        </label>
-        <p class="field__label">Цвет (для соло или до вступления в команду)</p>
-        <div id="welcome-palette" class="palette" role="listbox" aria-label="Цвет"></div>
-        <div class="overlay__actions overlay__actions--stack">
-          <button type="button" id="btn-welcome-solo" class="overlay__btn">Играть соло</button>
-          <button type="button" id="btn-welcome-create" class="overlay__btn overlay__btn--secondary">Создать команду</button>
-          <button type="button" id="btn-welcome-join" class="overlay__btn overlay__btn--secondary">Вступить в команду</button>
+        <div class="welcome-game-strip" aria-hidden="true">
+          <span class="welcome-pixel" style="--px:#ff5c8a"></span>
+          <span class="welcome-pixel" style="--px:#5cff8a"></span>
+          <span class="welcome-pixel" style="--px:#5c8aff"></span>
+          <span class="welcome-pixel" style="--px:#ffd65c"></span>
+          <span class="welcome-game-strip__joy">🕹️</span>
+          <span class="welcome-pixel" style="--px:#c85cff"></span>
+          <span class="welcome-pixel" style="--px:#ff8a5c"></span>
+        </div>
+        <p class="welcome-panel__lead">Чтобы играть, создайте команду или вступите в существующую.</p>
+        <div class="welcome-team-choice">
+          <button type="button" id="btn-welcome-create" class="welcome-team-btn welcome-team-btn--create">
+            <span class="welcome-team-btn__icon" aria-hidden="true">➕</span>
+            <span class="welcome-team-btn__text">Создать команду</span>
+          </button>
+          <button type="button" id="btn-welcome-join" class="welcome-team-btn welcome-team-btn--join">
+            <span class="welcome-team-btn__icon" aria-hidden="true">👥</span>
+            <span class="welcome-team-btn__text">Вступить в команду</span>
+          </button>
         </div>
       </div>
     </div>
@@ -52,7 +49,7 @@
   <div id="team-overlay" class="overlay" hidden>
     <div class="overlay__card">
       <h2 class="overlay__title">Команда</h2>
-      <p class="overlay__hint">Пока никто не создал команду, список пуст. Создайте свою или дождитесь других. Вступите в команду из списка (лимит участников показан у каждой команды). По ссылке с номером команды друзья сразу попадут к вам.</p>
+      <p class="overlay__hint">Пока никто не создал команду, список пуст. Создайте свою или дождитесь других. Вступите в команду из списка (лимит участников у каждой команды). По ссылке с номером команды друзья сразу попадут к вам.</p>
       <button type="button" id="btn-open-create-team" class="team-create-btn">Создать команду</button>
       <button type="button" id="btn-team-overlay-back" class="overlay__btn overlay__btn--secondary team-back-btn">Назад</button>
       <p class="overlay__sub" id="team-list-label">Или вступите в уже существующую:</p>
@@ -114,7 +111,7 @@
   <div id="team-settings-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Команда</h2>
-      <p class="overlay__hint">Видят все игроки. Название, смайлик и цвет может менять только создатель команды. Не чаще раза в 5 секунд. Соло-режим настраивается только при входе.</p>
+      <p class="overlay__hint">Видят все игроки. Название, смайлик и цвет может менять только создатель команды. Не чаще раза в 5 секунд.</p>
       <label class="field">
         <span class="field__label">Название</span>
         <input type="text" id="team-settings-name" class="field__input" maxlength="40" autocomplete="off" />
