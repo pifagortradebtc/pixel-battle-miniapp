@@ -1386,6 +1386,15 @@ function getWalletActionCooldownMs() {
   return 20000;
 }
 
+/**
+ * Последнее действие по пикселю для онлайна: max(сервер, локальный отправленный клик).
+ * Пока `wallet.lastActionAt` не пришёл по WS, без этого интервал «0» и клики проходят каждую секунду.
+ */
+function getOnlineLastPixelActionAt() {
+  const w = Number(walletState?.lastActionAt) || 0;
+  return Math.max(w, lastPlaceAt);
+}
+
 function applyWalletFromServer(msg) {
   walletState = msg;
   syncClientCooldownFromWalletFields();
@@ -1573,7 +1582,7 @@ function updateToolbarPixelTimer() {
     return;
   }
   const cd = getWalletActionCooldownMs();
-  const la = Number(walletState.lastActionAt) || 0;
+  const la = getOnlineLastPixelActionAt();
   const left = la + cd - Date.now();
   const erSec =
     typeof walletState.effectiveRecoverySec === "number" && Number.isFinite(walletState.effectiveRecoverySec)
@@ -3196,7 +3205,7 @@ function placePixel(gx, gy) {
   const now = Date.now();
   if (online && walletState) {
     const cd = getWalletActionCooldownMs();
-    const la = Number(walletState.lastActionAt) || 0;
+    const la = getOnlineLastPixelActionAt();
     if (now < la + cd) {
       showCooldown(la + cd - now);
       return;
