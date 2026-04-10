@@ -86,11 +86,11 @@
   <div id="crisis-overlay" class="overlay crisis-overlay" hidden>
     <div class="overlay__card crisis-overlay__card">
       <h2 class="overlay__title crisis-overlay__title">Команда теряет контроль!</h2>
-      <p class="overlay__hint">Доля территории падает. Поддержите команду — эффекты временные, упор на координацию.</p>
+      <p class="overlay__hint">Доля территории падает. Откройте магазин: восстановление, командный бафф или масс-захват 6×6.</p>
       <div class="crisis-overlay__actions">
-        <button type="button" class="overlay__btn" id="crisis-cta-boost">⚡ Быстрее восстановление</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-shield">🛡 Защита зоны для команды</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-raid">💥 Масс-захват</button>
+        <button type="button" class="overlay__btn" id="crisis-cta-boost">⚡ Личное восстановление</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-team-recovery">👥 Командное восстановление</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-raid">💥 Масс-захват 6×6</button>
       </div>
       <button type="button" class="overlay__btn overlay__btn--secondary crisis-overlay__dismiss" id="crisis-dismiss">Позже</button>
     </div>
@@ -136,16 +136,16 @@
 
   <div id="deposit-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
-      <h2 class="overlay__title">Пополнение тугров</h2>
+      <h2 class="overlay__title">Пополнение квантов</h2>
       <p class="overlay__hint">
-        В игре отображаются <strong>Тугры</strong> (1 USDT = 7 Тугров). Оплата — <strong>USDT BEP20</strong>. После оплаты баланс пополнится в пересчёте на тугры; бонусы из пакетов начисляются автоматически. Вывод не предусмотрен.
+        В игре отображаются <strong>кванты</strong> (1 USDT = 7 квантов). Оплата — <strong>USDT BEP20</strong>. После оплаты баланс пополнится в пересчёте на кванты; бонусы из пакетов начисляются автоматически. Вывод не предусмотрен.
       </p>
       <div class="deposit-presets" role="group" aria-label="Пакеты">
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="1" data-bonus="0">7 Т · 1 USDT</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="5" data-bonus="3">35+3 Т · 5 USDT</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="10" data-bonus="10">70+10 Т · 10 USDT</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="20" data-bonus="25">140+25 Т · 20 USDT</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="50" data-bonus="80">350+80 Т · 50 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="1" data-bonus="0">7 кв. · 1 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="5" data-bonus="3">35+3 кв. · 5 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="10" data-bonus="10">70+10 кв. · 10 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="20" data-bonus="25">140+25 кв. · 20 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="50" data-bonus="80">350+80 кв. · 50 USDT</button>
       </div>
       <label class="field">
         <span class="field__label">Своя сумма оплаты (USDT)</span>
@@ -181,175 +181,204 @@
       <header class="game-shop__header">
         <div class="game-shop__brand">
           <div>
-            <h2 id="shop-main-title" class="game-shop__title">Арсенал</h2>
-            <p class="game-shop__subtitle">Тугры · тактика · усиления</p>
+            <h2 id="shop-main-title" class="game-shop__title">Магазин</h2>
+            <p class="game-shop__subtitle">Кванты · интервал · захват зон</p>
           </div>
           <div class="game-shop__balance" aria-live="polite">
             <span class="game-shop__balance-label">Баланс</span>
             <div class="game-shop__balance-main">
               <span id="shop-display-balance" class="game-shop__balance-value">0</span>
-              <span id="shop-display-balance-unit" class="game-shop__balance-unit">Тугров</span>
+              <span id="shop-display-balance-unit" class="game-shop__balance-unit">квантов</span>
             </div>
             <span id="shop-display-usdt-sub" class="game-shop__balance-sub">~0 USDT</span>
           </div>
         </div>
-        <div class="game-shop__tabs game-shop__tabs--six" role="tablist">
+        <div class="game-shop__tabs game-shop__tabs--quad" role="tablist">
           <button type="button" class="game-shop__tab is-active" role="tab" data-tab="recovery" aria-selected="true">Восстановление</button>
-          <button type="button" class="game-shop__tab" role="tab" data-tab="defense" aria-selected="false">Защита</button>
-          <button type="button" class="game-shop__tab" role="tab" data-tab="expansion" aria-selected="false">Расширение</button>
-          <button type="button" class="game-shop__tab" role="tab" data-tab="attack" aria-selected="false">Захват</button>
           <button type="button" class="game-shop__tab" role="tab" data-tab="team" aria-selected="false">Команда</button>
+          <button type="button" class="game-shop__tab" role="tab" data-tab="area" aria-selected="false">Захват зоны</button>
           <button type="button" class="game-shop__tab" role="tab" data-tab="topup" aria-selected="false">Пополнение</button>
         </div>
       </header>
 
       <div class="game-shop__body">
-        <section class="game-shop__starter-wrap" aria-label="Стартовый набор">
-          <div class="starter-pack">
-            <div class="starter-pack__aurora" aria-hidden="true"></div>
-            <div class="starter-pack__inner">
-              <div class="starter-pack__ribbon">
-                <span class="starter-pack__ribbon-tag starter-pack__ribbon-tag--hot">🔥 Лучшее предложение</span>
-                <span class="starter-pack__ribbon-tag starter-pack__ribbon-tag--pop">⭐ Популярно</span>
-              </div>
-              <h3 class="starter-pack__title">🔥 Стартовый набор</h3>
-              <p class="starter-pack__subtitle">Лучший старт для новых игроков</p>
-              <p class="starter-pack__hook">Стартуй быстрее и доминируй в ранней игре</p>
-              <ul class="starter-pack__rewards">
-                <li class="starter-pack__reward">
-                  <span class="starter-pack__ricon" aria-hidden="true">💰</span>
-                  <span class="starter-pack__rtext">Тугры на баланс по выбранному пакету</span>
-                </li>
-                <li class="starter-pack__reward">
-                  <span class="starter-pack__ricon" aria-hidden="true">⏱️</span>
-                  <span class="starter-pack__rtext">Один интервал между действиями — ставьте пиксели по правилам раунда</span>
-                </li>
-                <li class="starter-pack__reward">
-                  <span class="starter-pack__ricon" aria-hidden="true">🛒</span>
-                  <span class="starter-pack__rtext">Дальше — «Быстрее восстановление», линия, зоны и командные усиления</span>
-                </li>
-              </ul>
-              <div class="starter-pack__cta-row">
-                <div class="starter-pack__price-block">
-                  <span class="starter-pack__price-old">35 Тугров</span>
-                  <span class="starter-pack__price-main">14 Тугров</span>
-                  <span class="starter-pack__price-sub">~2 USDT</span>
-                </div>
-                <button type="button" class="starter-pack__cta" id="shop-starter-cta">Купить за 14 Тугров</button>
-              </div>
-              <p class="starter-pack__urgency">Только для новых игроков</p>
-            </div>
-          </div>
-        </section>
-
         <p class="game-shop__hint" id="shop-stage-hint">—</p>
 
         <div class="game-shop__panel" data-panel="recovery" id="shop-panel-recovery">
-          <p class="game-shop__section-label">Чаще ходы (интервал короче)</p>
-          <div class="game-shop__grid">
+          <p class="game-shop__section-label">Личное восстановление · 2 минуты · новая покупка заменяет текущую</p>
+          <p class="game-shop__subhint" id="shop-effective-recovery-hint"></p>
+          <div class="game-shop__grid game-shop__grid--recovery">
             <article class="game-shop__card">
-              <div class="game-shop__badges">
-                <span class="game-shop__badge game-shop__badge--star">⭐ Популярно</span>
-              </div>
               <div class="game-shop__card-head">
                 <div class="game-shop__icon">⏱️</div>
                 <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Быстрее восстановление</h3>
-                  <p class="game-shop__card-desc">10 минут: интервал между действиями −50% (20 с → 10 с). Без постоянных бонусов.</p>
+                  <h3 class="game-shop__card-title">Каждые 15 сек</h3>
+                  <p class="game-shop__card-desc">Ставьте пиксель каждые 15 сек в течение 2 мин.</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">35 Тугров</span>
-                  <span class="game-shop__price-usdt">~5 USDT</span>
-                </div>
-                <button type="button" class="game-shop__buy shop-btn" id="shop-recovery" data-action="recoveryBoost">Купить</button>
-              </div>
-            </article>
-          </div>
-        </div>
-
-        <div class="game-shop__panel" data-panel="defense" id="shop-panel-defense" hidden>
-          <p class="game-shop__section-label">Защита своих клеток</p>
-          <div class="game-shop__grid">
-            <article class="game-shop__card">
-              <div class="game-shop__card-head">
-                <div class="game-shop__icon">🛡️</div>
-                <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Щит на пиксель</h3>
-                  <p class="game-shop__card-desc">60 секунд клетку нельзя захватить. Тап по своей клетке на карте.</p>
-                </div>
-              </div>
-              <div class="game-shop__price-row">
-                <div class="game-shop__price-stack">
-                  <span class="game-shop__price">14 Тугров</span>
+                  <span class="game-shop__price">14 квантов</span>
                   <span class="game-shop__price-usdt">~2 USDT</span>
                 </div>
-                <button type="button" class="game-shop__buy shop-btn" id="shop-shield-pixel" data-action="shieldMode">Активировать</button>
+                <button type="button" class="game-shop__buy shop-btn" data-action="personalRecovery" data-tier-sec="15">Купить</button>
+              </div>
+            </article>
+            <article class="game-shop__card">
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">⏱️</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Каждые 10 сек</h3>
+                  <p class="game-shop__card-desc">Ставьте пиксель каждые 10 сек в течение 2 мин.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">28 квантов</span>
+                  <span class="game-shop__price-usdt">~4 USDT</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" data-action="personalRecovery" data-tier-sec="10">Купить</button>
+              </div>
+            </article>
+            <article class="game-shop__card">
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">⏱️</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Каждые 5 сек</h3>
+                  <p class="game-shop__card-desc">Ставьте пиксель каждые 5 сек в течение 2 мин.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">56 квантов</span>
+                  <span class="game-shop__price-usdt">~8 USDT</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" data-action="personalRecovery" data-tier-sec="5">Купить</button>
+              </div>
+            </article>
+            <article class="game-shop__card game-shop__card--premium">
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">⚡</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Каждые 2 сек</h3>
+                  <p class="game-shop__card-desc">Ставьте пиксель каждые 2 сек в течение 2 мин.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">112 квантов</span>
+                  <span class="game-shop__price-usdt">~16 USDT</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" data-action="personalRecovery" data-tier-sec="2">Купить</button>
               </div>
             </article>
           </div>
         </div>
 
-        <div class="game-shop__panel" data-panel="expansion" id="shop-panel-expansion" hidden>
-          <p class="game-shop__section-label">Расширение территории</p>
-          <div class="game-shop__grid">
-            <article class="game-shop__card game-shop__card--feature">
-              <div class="game-shop__badges">
-                <span class="game-shop__badge game-shop__badge--hot">Линия</span>
-              </div>
+        <div class="game-shop__panel" data-panel="team" id="shop-panel-team" hidden>
+          <p class="game-shop__section-label">Командное восстановление · 2 минуты · для всей команды · заменяет предыдущий командный эффект</p>
+          <div class="game-shop__grid game-shop__grid--recovery">
+            <article class="game-shop__card">
               <div class="game-shop__card-head">
-                <div class="game-shop__icon">╱</div>
+                <div class="game-shop__icon">👥</div>
                 <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Линия захвата</h3>
-                  <p class="game-shop__card-desc">Первый тап — начало, второй — направление. Захват 5–7 клеток по линии. Повтор линии: ~15 с.</p>
+                  <h3 class="game-shop__card-title">Команда каждые 15 сек</h3>
+                  <p class="game-shop__card-desc">Вся команда ставит пиксели каждые 15 сек, 2 мин.</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">70 Тугров</span>
-                  <span class="game-shop__price-usdt">~10 USDT</span>
+                  <span class="game-shop__price">140 квантов</span>
+                  <span class="game-shop__price-usdt">~20 USDT</span>
                 </div>
-                <button type="button" class="game-shop__buy shop-btn" id="shop-line-tool" data-action="lineTool">Выбрать</button>
+                <button type="button" class="game-shop__buy shop-btn" data-action="teamRecovery" data-tier-sec="15">Купить</button>
               </div>
             </article>
+            <article class="game-shop__card">
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">👥</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Команда каждые 10 сек</h3>
+                  <p class="game-shop__card-desc">Вся команда ставит пиксели каждые 10 сек, 2 мин.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">210 квантов</span>
+                  <span class="game-shop__price-usdt">~30 USDT</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" data-action="teamRecovery" data-tier-sec="10">Купить</button>
+              </div>
+            </article>
+            <article class="game-shop__card">
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">👥</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Команда каждые 5 сек</h3>
+                  <p class="game-shop__card-desc">Вся команда ставит пиксели каждые 5 сек, 2 мин.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">350 квантов</span>
+                  <span class="game-shop__price-usdt">~50 USDT</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" data-action="teamRecovery" data-tier-sec="5">Купить</button>
+              </div>
+            </article>
+            <article class="game-shop__card game-shop__card--premium">
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">👥</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Команда каждые 2 сек</h3>
+                  <p class="game-shop__card-desc">Вся команда ставит пиксели каждые 2 сек, 2 мин.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">700 квантов</span>
+                  <span class="game-shop__price-usdt">~100 USDT</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" data-action="teamRecovery" data-tier-sec="2">Купить</button>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="game-shop__panel" data-panel="area" id="shop-panel-area" hidden>
+          <p class="game-shop__section-label">Захват зоны · 100% клеток в области · без случайности</p>
+          <div class="game-shop__grid">
             <article class="game-shop__card">
               <div class="game-shop__card-head">
                 <div class="game-shop__icon">▦</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Зона 4×4</h3>
-                  <p class="game-shop__card-desc">Мгновенно 4×4 (16 клеток). Повтор зоны: ~60 с. Тап по углу области.</p>
+                  <p class="game-shop__card-desc">Мгновенно перекрашивает все клетки 4×4 в ваш цвет. Тап по углу области на карте.</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">140 Тугров</span>
-                  <span class="game-shop__price-usdt">~20 USDT</span>
+                  <span class="game-shop__price">84 кванта</span>
+                  <span class="game-shop__price-usdt">~12 USDT</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-zone-capture" data-action="zoneCapture">Выбрать</button>
               </div>
             </article>
-          </div>
-        </div>
-
-        <div class="game-shop__panel" data-panel="attack" id="shop-panel-attack" hidden>
-          <p class="game-shop__section-label">Большой захват</p>
-          <div class="game-shop__grid">
             <article class="game-shop__card game-shop__card--premium game-shop__card--elite">
               <div class="game-shop__badges">
-                <span class="game-shop__badge game-shop__badge--hot">Масс-захват</span>
+                <span class="game-shop__badge game-shop__badge--hot">Премиум</span>
               </div>
               <div class="game-shop__card-head">
                 <div class="game-shop__icon">💥</div>
                 <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Массовый захват</h3>
-                  <p class="game-shop__card-desc">Область 6×6: около 60–70% клеток перекрашивается. Повтор: ~2 мин. Тап по центру.</p>
+                  <h3 class="game-shop__card-title">Масс-захват 6×6</h3>
+                  <p class="game-shop__card-desc">Мгновенно перекрашивает все 36 клеток 6×6. Тап по центру области.</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">210 Тугров</span>
-                  <span class="game-shop__price-usdt">~30 USDT</span>
+                  <span class="game-shop__price">168 квантов</span>
+                  <span class="game-shop__price-usdt">~24 USDT</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-mass-capture" data-action="massCapture">Выбрать</button>
               </div>
@@ -357,77 +386,36 @@
           </div>
         </div>
 
-        <div class="game-shop__panel" data-panel="team" id="shop-panel-team" hidden>
-          <p class="game-shop__section-label">Усиления для всей команды</p>
-          <div class="game-shop__grid">
-            <article class="game-shop__card game-shop__card--premium">
-              <div class="game-shop__badges">
-                <span class="game-shop__badge game-shop__badge--star">⭐ Важно</span>
-              </div>
-              <div class="game-shop__card-head">
-                <div class="game-shop__icon">👥</div>
-                <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Командное восстановление</h3>
-                  <p class="game-shop__card-desc">2 минуты: всей команде −30% к интервалу (20 с → 14 с).</p>
-                </div>
-              </div>
-              <div class="game-shop__price-row">
-                <div class="game-shop__price-stack">
-                  <span class="game-shop__price">175 Тугров</span>
-                  <span class="game-shop__price-usdt">~25 USDT</span>
-                </div>
-                <button type="button" class="game-shop__buy shop-btn" id="shop-team-recovery" data-action="teamRecoveryBoost">Купить</button>
-              </div>
-            </article>
-            <article class="game-shop__card game-shop__card--premium">
-              <div class="game-shop__card-head">
-                <div class="game-shop__icon">🛡️</div>
-                <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Защитная зона 4×4</h3>
-                  <p class="game-shop__card-desc">Временно защищает область для всей команды. Тап по углу зоны на карте.</p>
-                </div>
-              </div>
-              <div class="game-shop__price-row">
-                <div class="game-shop__price-stack">
-                  <span class="game-shop__price">140 Тугров</span>
-                  <span class="game-shop__price-usdt">~20 USDT</span>
-                </div>
-                <button type="button" class="game-shop__buy shop-btn" id="shop-team-shield-zone" data-action="teamShieldZone">Выбрать</button>
-              </div>
-            </article>
-          </div>
-        </div>
-
         <div class="game-shop__panel" data-panel="topup" id="shop-panel-topup" hidden>
-          <p class="game-shop__section-label">Пополнение тугров</p>
-          <p class="game-shop__topup-intro">1 USDT = 7 Тугров. Оплата в USDT — в игре видишь только тугры.</p>
+          <p class="game-shop__section-label">Пополнение квантов</p>
+          <p class="game-shop__topup-intro">1 USDT = 7 квантов. Оплата в USDT — в игре отображаются кванты.</p>
           <div class="game-shop__topup-grid">
             <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="1" data-bonus="0">
-              <span class="game-shop__topup-tugry">7 Тугров</span>
+              <span class="game-shop__topup-quant">7 квантов</span>
               <span class="game-shop__topup-usdt">1 USDT</span>
             </button>
             <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="5" data-bonus="3">
               <span class="game-shop__topup-badge">+3 бонус</span>
-              <span class="game-shop__topup-tugry">35 Тугров</span>
-              <span class="game-shop__topup-bonus">+3 Т бонус</span>
+              <span class="game-shop__topup-quant">35 квантов</span>
+              <span class="game-shop__topup-bonus">+3 кв. бонус</span>
               <span class="game-shop__topup-usdt">5 USDT</span>
             </button>
             <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="10" data-bonus="10">
               <span class="game-shop__topup-badge">+10 бонус</span>
-              <span class="game-shop__topup-tugry">70 Тугров</span>
-              <span class="game-shop__topup-bonus">+10 Т бонус</span>
+              <span class="game-shop__topup-quant">70 квантов</span>
+              <span class="game-shop__topup-bonus">+10 кв. бонус</span>
               <span class="game-shop__topup-usdt">10 USDT</span>
             </button>
             <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="20" data-bonus="25">
               <span class="game-shop__topup-badge">+25 бонус</span>
-              <span class="game-shop__topup-tugry">140 Тугров</span>
-              <span class="game-shop__topup-bonus">+25 Т бонус</span>
+              <span class="game-shop__topup-quant">140 квантов</span>
+              <span class="game-shop__topup-bonus">+25 кв. бонус</span>
               <span class="game-shop__topup-usdt">20 USDT</span>
             </button>
             <button type="button" class="game-shop__topup-card game-shop__topup-card--best shop-topup-pack" data-amt="50" data-bonus="80">
               <span class="game-shop__topup-badge game-shop__topup-badge--best">🔥 Лучшее</span>
-              <span class="game-shop__topup-tugry">350 Тугров</span>
-              <span class="game-shop__topup-bonus">+80 Т бонус</span>
+              <span class="game-shop__topup-quant">350 квантов</span>
+              <span class="game-shop__topup-bonus">+80 кв. бонус</span>
               <span class="game-shop__topup-usdt">50 USDT</span>
             </button>
           </div>
@@ -461,8 +449,8 @@
               <div class="toolbar-energy__fill" id="toolbar-energy-fill"></div>
             </div>
           </div>
-          <span id="wallet-balance" class="toolbar__wallet" hidden title="Игровая валюта — Тугры">💰 0 Тугров</span>
-          <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить тугры (оплата USDT)">Тугры +</button>
+          <span id="wallet-balance" class="toolbar__wallet" hidden title="Игровая валюта — кванты">💰 0 квантов</span>
+          <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить кванты (оплата USDT)">Кванты +</button>
           <button type="button" id="btn-shop" class="toolbar__btn" hidden title="Улучшения и бусты">Магазин</button>
           <span id="conn-status" class="toolbar__conn" title="Состояние сети" data-state="local">локально</span>
           <span id="round-timer" class="toolbar__round" hidden title="Время до конца текущего раунда"></span>

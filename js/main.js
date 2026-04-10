@@ -169,12 +169,9 @@ const floatFxHost = document.getElementById("float-fx");
 /** @type {ReturnType<typeof createBoardVfx> | null} */
 let boardVfx = null;
 let mapAnimTimer = null;
-/** Последний тап линии (для VFX) */
-let lastLineTapGx = 0;
-let lastLineTapGy = 0;
 let lastZoneGx = 0;
 let lastZoneGy = 0;
-let prevWalletTugry = null;
+let prevWalletQuant = null;
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -243,51 +240,25 @@ let walletState = null;
 let lastStatsGlobalEvent = null;
 let lastMyTeamPercent = null;
 let crisisCooldownUntil = 0;
-/** Ожидание тапа по карте: линия / щит / зона */
+/** Ожидание тапа по карте: зона 4×4 или 6×6 */
 let pendingMapAction = null;
-/** Бонус тугр к депозиту (см. пакеты на сервере) */
-let depositBonusTugry = 0;
+/** Бонус квантов к депозиту (см. пакеты на сервере) */
+let depositBonusQuant = 0;
 
-const TUGRY_PER_USDT = 7;
+const QUANT_PER_USDT = 7;
 
-/** Совпадает с сервером LINE_DIRS8 — для выбора направления линии по двум тапам. */
-const LINE_DIR8_VEC = [
-  [1, 0],
-  [1, -1],
-  [0, -1],
-  [-1, -1],
-  [-1, 0],
-  [-1, 1],
-  [0, 1],
-  [1, 1],
-];
-
-function nearestDirIndex8(dx, dy) {
-  if (dx === 0 && dy === 0) return 2;
-  let best = 0;
-  let bestDot = -Infinity;
-  for (let i = 0; i < 8; i++) {
-    const [vx, vy] = LINE_DIR8_VEC[i];
-    const dot = vx * dx + vy * dy;
-    if (dot > bestDot) {
-      bestDot = dot;
-      best = i;
-    }
-  }
-  return best;
-}
-
-function tugryWord(n) {
+/** Склонение «квант» для числа n (1 квант, 2 кванта, 5 квантов). */
+function quantWord(n) {
   const x = Math.abs(Math.round(n)) % 100;
   const v = x % 10;
-  if (x > 10 && x < 20) return "Тугров";
-  if (v === 1) return "Тугр";
-  if (v >= 2 && v <= 4) return "Тугра";
-  return "Тугров";
+  if (x > 10 && x < 20) return "квантов";
+  if (v === 1) return "квант";
+  if (v >= 2 && v <= 4) return "кванта";
+  return "квантов";
 }
 
-function usdtToTugry(usdt) {
-  return Math.round(Number(usdt) * TUGRY_PER_USDT);
+function usdtToQuant(usdt) {
+  return Math.round(Number(usdt) * QUANT_PER_USDT);
 }
 
 function formatApproxUsdt(usdt) {
@@ -1196,15 +1167,23 @@ function setupCreateTeamUi() {
     if (e.target === referralSplashOverlay) hideReferralSplash();
   });
   document.getElementById("crisis-cta-boost")?.addEventListener("click", () => {
-    wsSendJson({ type: "purchaseRecoveryBoost" });
     hideCrisisOverlay();
+    const root = document.getElementById("shop-overlay");
+    if (root) {
+      root.querySelectorAll(".game-shop__tab").forEach((t) => {
+        const on = t.dataset.tab === "recovery";
+        t.classList.toggle("is-active", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      root.querySelectorAll(".game-shop__panel").forEach((p) => {
+        p.hidden = p.dataset.panel !== "recovery";
+      });
+    }
+    if (shopOverlay) shopOverlay.hidden = false;
+    syncShopHeaderBalance();
+    updateShopAvailability();
   });
-  document.getElementById("crisis-cta-raid")?.addEventListener("click", () => {
-    hideCrisisOverlay();
-    pendingMapAction = { type: "massCapture" };
-    setPendingHint();
-  });
-  document.getElementById("crisis-cta-shield")?.addEventListener("click", () => {
+  document.getElementById("crisis-cta-team-recovery")?.addEventListener("click", () => {
     hideCrisisOverlay();
     const root = document.getElementById("shop-overlay");
     if (root) {
@@ -1218,7 +1197,12 @@ function setupCreateTeamUi() {
       });
     }
     if (shopOverlay) shopOverlay.hidden = false;
-    pendingMapAction = { type: "teamShieldZone" };
+    syncShopHeaderBalance();
+    updateShopAvailability();
+  });
+  document.getElementById("crisis-cta-raid")?.addEventListener("click", () => {
+    hideCrisisOverlay();
+    pendingMapAction = { type: "massCapture" };
     setPendingHint();
   });
   document.getElementById("crisis-dismiss")?.addEventListener("click", hideCrisisOverlay);
@@ -1405,15 +1389,10 @@ function notifyPurchaseError(reason) {
   const m = {
     "not enough balance": "Недостаточно средств на балансе.",
     "not available": "В этой стадии турнира недоступно.",
-    "recovery boost already active": "«Быстрее восстановление» уже активно.",
-    "pixel is shielded": "Пиксель под щитом.",
-    "not your pixel": "Можно защитить только свой пиксель.",
-    "shield zone already active": "Зона щита уже активна.",
-    "line capture cooldown": "Линия: подождите перед повтором (~15 с).",
     "zone capture cooldown": "Зона 4×4: подождите перед повтором (~60 с).",
     "mass capture cooldown": "Масс-захват: подождите перед повтором (~2 мин).",
     "cooldown not ready": "Сначала дождитесь обычного интервала между действиями.",
-    "zones overlap": "Зона пересекается с чужой.",
+    "bad request": "Некорректный запрос.",
   };
   notifyReject(m[reason] || reason);
 }
@@ -1425,7 +1404,7 @@ function syncEventBanner() {
     eventBannerEl.hidden = false;
     const left = Math.max(0, ge.until - Date.now());
     const m = Math.max(1, Math.ceil(left / 60000));
-    eventBannerEl.textContent = `⚡ Окно битвы: интервал между действиями ~12 с · ещё ~${m} мин`;
+    eventBannerEl.textContent = `⚡ Событие на карте · ещё ~${m} мин`;
     return;
   }
   eventBannerEl.hidden = true;
@@ -1453,15 +1432,15 @@ function syncShopHeaderBalance() {
   }
   if (walletState.devUnlimited) {
     el.textContent = "∞";
-    if (unitEl) unitEl.textContent = "Тугр";
+    if (unitEl) unitEl.textContent = "квантов";
     if (subEl) subEl.textContent = "";
     syncDevUnlimitedShopHints();
     return;
   }
   const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
-  const t = usdtToTugry(b);
+  const t = usdtToQuant(b);
   el.textContent = String(t);
-  if (unitEl) unitEl.textContent = tugryWord(t);
+  if (unitEl) unitEl.textContent = quantWord(t);
   if (subEl) subEl.textContent = formatApproxUsdt(b);
   syncDevUnlimitedShopHints();
 }
@@ -1480,7 +1459,7 @@ function updateWalletBar() {
   if (!walletBalanceEl) return;
   const online = wantOnline && getWsUrl();
   if (!online || !walletState) {
-    prevWalletTugry = null;
+    prevWalletQuant = null;
     walletBalanceEl.hidden = true;
     if (btnDeposit) btnDeposit.hidden = true;
     if (btnShop) btnShop.hidden = true;
@@ -1493,26 +1472,26 @@ function updateWalletBar() {
   if (btnDeposit) btnDeposit.hidden = spectatorMode || !!walletState.devUnlimited;
   if (btnShop) btnShop.hidden = spectatorMode;
   if (walletState.devUnlimited) {
-    prevWalletTugry = null;
-    walletBalanceEl.textContent = "💰 ∞ Тугр (тест)";
-    walletBalanceEl.title = "Режим теста: бесконечные тугры";
+    prevWalletQuant = null;
+    walletBalanceEl.textContent = "💰 ∞ квантов (тест)";
+    walletBalanceEl.title = "Режим теста: бесконечные кванты";
   } else {
     const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
-    const t = usdtToTugry(b);
-    if (prevWalletTugry !== null && prevWalletTugry !== t) {
+    const t = usdtToQuant(b);
+    if (prevWalletQuant !== null && prevWalletQuant !== t) {
       walletBalanceEl.classList.add("toolbar__wallet--pulse");
       setTimeout(() => walletBalanceEl.classList.remove("toolbar__wallet--pulse"), 700);
     }
-    prevWalletTugry = t;
-    walletBalanceEl.textContent = `💰 ${t} ${tugryWord(t)}`;
+    prevWalletQuant = t;
+    walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}`;
   }
   const cd = walletState.cooldownMs || 20000;
   const la = walletState.lastActionAt || 0;
   const left = Math.max(0, la + cd - Date.now());
   if (left > 500 && !spectatorMode) {
-    walletBalanceEl.title = `Интервал между действиями: ~${(left / 1000).toFixed(1)} с · тугры`;
+    walletBalanceEl.title = `Интервал между действиями: ~${(left / 1000).toFixed(1)} с · кванты`;
   } else {
-    walletBalanceEl.title = "Игровая валюта — Тугры. Пополнение оплачивается в USDT.";
+    walletBalanceEl.title = "Игровая валюта — кванты. Пополнение оплачивается в USDT.";
   }
   syncShopHeaderBalance();
   syncShopDepositButton();
@@ -1525,17 +1504,12 @@ function handlePurchaseOk(msg) {
   const kind = msg.kind;
   const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
 
-  if (kind === "recoveryBoost" && boardVfx) {
+  if (kind === "personalRecovery" && boardVfx) {
     app?.classList.add("fx-recovery");
     setTimeout(() => app?.classList.remove("fx-recovery"), 2400);
     boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
-    spawnFloatingText(floatFxHost, "⚡ ЧАЩЕ ХОДЫ", flo, "float-fx__pop--gold");
-  }
-  if (kind === "lineCapture" && boardVfx && myTeamId != null) {
-    const di = typeof msg.dirIndex === "number" ? msg.dirIndex : 0;
-    const n = typeof msg.cells === "number" ? Math.min(7, Math.max(1, msg.cells | 0)) : 5;
-    boardVfx.lineBeam(lastLineTapGx, lastLineTapGy, di, teamColor(myTeamId), tr, n);
-    spawnFloatingText(floatFxHost, "ЛИНИЯ", flo, "float-fx__pop--gold");
+    const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
+    spawnFloatingText(floatFxHost, `⚡ ЛИЧНО: ${s} С`, flo, "float-fx__pop--gold");
   }
   if (kind === "zoneCapture" && boardVfx && myTeamId != null) {
     boardVfx.zoneFlash(lastZoneGx, lastZoneGy, teamColor(myTeamId), tr, 4);
@@ -1544,15 +1518,13 @@ function handlePurchaseOk(msg) {
   if (kind === "massCapture" && boardVfx && myTeamId != null) {
     boardVfx.zoneFlash(lastZoneGx, lastZoneGy, teamColor(myTeamId), tr, 6);
     boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
-    spawnFloatingText(floatFxHost, "МАСС-ЗАХВАТ", { x: flo.x, y: flo.y - 8 }, "float-fx__pop--raid");
+    spawnFloatingText(floatFxHost, "МАСС-ЗАХВАТ 6×6", { x: flo.x, y: flo.y - 8 }, "float-fx__pop--raid");
   }
-  if (kind === "teamRecoveryBoost") {
+  if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
-    spawnFloatingText(floatFxHost, "👥 КОМАНДА: ЧАЩЕ ХОДЫ", { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
-  }
-  if (kind === "teamShieldZone") {
-    spawnFloatingText(floatFxHost, "🛡 ЗАЩИТА 4×4", { x: flo.x, y: flo.y - 6 }, "float-fx__pop--gold");
+    const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
+    spawnFloatingText(floatFxHost, `👥 КОМАНДА: ${s} С`, { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
   }
 }
 
@@ -1581,47 +1553,54 @@ function updateShopAvailability() {
   if (!shopStageHint || !walletState) return;
   const st = walletState.tournamentStage || "MASS_BATTLE";
   const hints = {
-    MASS_BATTLE: "Массовая битва — все разделы магазина.",
-    SEMI_FINAL: "Полуфинал: без линии, зоны захвата, масс-захвата и командной защиты зоны.",
-    FINAL: "Финал: «быстрее восстановление», щит на пиксель и командное восстановление.",
-    DUEL: "Дуэль: без платных предметов.",
-    GRAND_FINAL: "Наблюдение: без покупок.",
+    MASS_BATTLE: "Базовый интервал между пикселями — 20 с. Бусты и зоны — в вкладках.",
+    SEMI_FINAL: "Базовый интервал — 20 с. Все покупки доступны.",
+    FINAL: "Базовый интервал — 20 с. Все покупки доступны.",
+    DUEL: "Дуэль: покупки отключены.",
+    GRAND_FINAL: "Наблюдение: покупки отключены.",
   };
   shopStageHint.textContent = hints[st] || st;
   const dis =
     walletState.devUnlimited === true
       ? false
       : st === "GRAND_FINAL" || st === "DUEL" || spectatorMode;
-  const semi = st === "SEMI_FINAL";
-  const fin = st === "FINAL";
   document.querySelectorAll(".shop-btn").forEach((btn) => {
     btn.disabled = !!dis;
   });
-  ["shop-line-tool", "shop-zone-capture", "shop-mass-capture", "shop-team-shield-zone"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = !!dis || semi || fin;
-  });
-  ["shop-recovery", "shop-shield-pixel"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = !!dis;
-  });
-  const tr = document.getElementById("shop-team-recovery");
-  if (tr) tr.disabled = !!dis;
+  const effEl = document.getElementById("shop-effective-recovery-hint");
+  if (effEl) {
+    if (walletState.devUnlimited) {
+      effEl.textContent = "";
+    } else {
+      const now = Date.now();
+      const sec = walletState.effectiveRecoverySec ?? 20;
+      const pu = walletState.personalRecoveryUntil > now;
+      const tu = walletState.teamEffects?.teamRecoveryUntil > now;
+      let sub = "";
+      if (pu || tu) {
+        const p = pu ? `личн. ${walletState.personalRecoverySec} с` : null;
+        const t = tu ? `ком. ${walletState.teamEffects.teamRecoverySec} с` : null;
+        sub = ` Активно: ${[p, t].filter(Boolean).join(", ")}.`;
+      }
+      effEl.textContent = `Сейчас пиксель каждые ~${sec} с (минимум из базы 20 с и баффов).${sub}`;
+    }
+  }
   if (shopEffects) {
     const te = walletState.teamEffects;
     const now = Date.now();
     const parts = [];
     if (walletState.referralBonusActive) parts.push("Приглашённый онлайн");
-    if (te) {
-      if (te.teamRecoveryUntil > now) parts.push(`Команда: интервал −30% до ${fmtTime(te.teamRecoveryUntil)}`);
-      if (te.shieldZone && te.shieldZone.until > now) {
-        parts.push(`Защитная зона до ${fmtTime(te.shieldZone.until)}`);
-      }
+    if (te && te.teamRecoveryUntil > now) {
+      parts.push(
+        `Команда: пиксель каждые ${te.teamRecoverySec ?? "?"} с до ${fmtTime(te.teamRecoveryUntil)}`
+      );
     }
-    if (walletState.recoveryBoostUntil > now) {
-      parts.push(`Вы чаще ставите пиксели до ${fmtTime(walletState.recoveryBoostUntil)}`);
+    if (walletState.personalRecoveryUntil > now) {
+      parts.push(
+        `Лично: каждые ${walletState.personalRecoverySec ?? "?"} с до ${fmtTime(walletState.personalRecoveryUntil)}`
+      );
     }
-    shopEffects.textContent = parts.length ? parts.join(" · ") : "Нет активных эффектов.";
+    shopEffects.textContent = parts.length ? parts.join(" · ") : "Нет активных баффов восстановления.";
   }
 }
 
@@ -1638,7 +1617,7 @@ function isWalletDevUnlimited() {
 function notifyDevUnlimitedNoDeposit(hint) {
   const msg =
     hint ||
-    "У вас тестовый безлимитный баланс. Пополнение USDT не нужно — откройте магазин и покупайте предметы за тугры.";
+    "У вас тестовый безлимитный баланс. Пополнение USDT не нужно — откройте магазин и покупайте предметы за кванты.";
   const tg = window.Telegram?.WebApp;
   if (typeof tg?.showAlert === "function") tg.showAlert(msg);
   else alert(msg);
@@ -1650,12 +1629,6 @@ function syncDevUnlimitedShopHints() {
     btn.style.opacity = dev ? "0.55" : "";
     btn.title = dev ? "В тестовом режиме пополнение не требуется" : "";
   });
-  const st = document.getElementById("shop-starter-cta");
-  if (st) {
-    st.title = dev
-      ? "В тесте оплата пакета не нужна — покупайте предметы в магазине за тугры"
-      : "";
-  }
 }
 
 function setupEconomyUi() {
@@ -1664,7 +1637,7 @@ function setupEconomyUi() {
       notifyDevUnlimitedNoDeposit();
       return;
     }
-    depositBonusTugry = 0;
+    depositBonusQuant = 0;
     if (depositOverlay) depositOverlay.hidden = false;
     if (depositError) depositError.hidden = true;
   });
@@ -1678,12 +1651,12 @@ function setupEconomyUi() {
     b.addEventListener("click", () => {
       const a = Number(b.dataset.amt);
       const bon = Number(b.dataset.bonus ?? 0);
-      depositBonusTugry = Number.isFinite(bon) ? bon | 0 : 0;
+      depositBonusQuant = Number.isFinite(bon) ? bon | 0 : 0;
       if (depositCustom) depositCustom.value = String(a);
     });
   });
   depositCustom?.addEventListener("input", () => {
-    depositBonusTugry = 0;
+    depositBonusQuant = 0;
   });
   depositSubmit?.addEventListener("click", async () => {
     if (depositSubmit?.disabled) return;
@@ -1715,7 +1688,7 @@ function setupEconomyUi() {
         body: JSON.stringify({
           playerKey: getOrCreatePlayerKey(),
           amount,
-          bonusTugry: depositBonusTugry,
+          bonusQuant: depositBonusQuant,
           payCurrency: DEPOSIT_PAY_CURRENCY,
           initData: getTelegramInitDataForServer(),
         }),
@@ -1788,21 +1761,7 @@ function setupEconomyUi() {
       notifyDevUnlimitedNoDeposit();
       return;
     }
-    depositBonusTugry = 0;
-    if (shopOverlay) shopOverlay.hidden = true;
-    if (depositOverlay) depositOverlay.hidden = false;
-    if (depositError) depositError.hidden = true;
-  });
-
-  document.getElementById("shop-starter-cta")?.addEventListener("click", () => {
-    if (isWalletDevUnlimited()) {
-      notifyDevUnlimitedNoDeposit(
-        "Стартовый набор в проде оплачивается через USDT. В тестовом режиме баланс безлимитный — откройте магазин и покупайте предметы напрямую."
-      );
-      return;
-    }
-    depositBonusTugry = 0;
-    if (depositCustom) depositCustom.value = "2";
+    depositBonusQuant = 0;
     if (shopOverlay) shopOverlay.hidden = true;
     if (depositOverlay) depositOverlay.hidden = false;
     if (depositError) depositError.hidden = true;
@@ -1816,7 +1775,7 @@ function setupEconomyUi() {
       }
       const a = Number(btn.dataset.amt);
       const bon = Number(btn.dataset.bonus ?? 0);
-      depositBonusTugry = Number.isFinite(bon) ? bon | 0 : 0;
+      depositBonusQuant = Number.isFinite(bon) ? bon | 0 : 0;
       if (depositCustom) depositCustom.value = String(a);
       if (shopOverlay) shopOverlay.hidden = true;
       if (depositOverlay) depositOverlay.hidden = false;
@@ -1857,18 +1816,18 @@ function setupEconomyUi() {
   document.querySelectorAll(".shop-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const action = btn.dataset.action;
-      if (action === "recoveryBoost") {
-        wsSendJson({ type: "purchaseRecoveryBoost" });
+      if (action === "personalRecovery") {
+        const tier = Number(btn.dataset.tierSec);
+        if ([15, 10, 5, 2].includes(tier)) {
+          wsSendJson({ type: "purchasePersonalRecovery", tierSec: tier });
+        }
         return;
       }
-      if (action === "teamRecoveryBoost") {
-        wsSendJson({ type: "purchaseTeamRecoveryBoost" });
-        return;
-      }
-      if (action === "shieldMode") {
-        pendingMapAction = { type: "shieldPixel" };
-        setPendingHint();
-        if (shopOverlay) shopOverlay.hidden = true;
+      if (action === "teamRecovery") {
+        const tier = Number(btn.dataset.tierSec);
+        if ([15, 10, 5, 2].includes(tier)) {
+          wsSendJson({ type: "purchaseTeamRecovery", tierSec: tier });
+        }
         return;
       }
       if (action === "zoneCapture") {
@@ -1883,17 +1842,6 @@ function setupEconomyUi() {
         if (shopOverlay) shopOverlay.hidden = true;
         return;
       }
-      if (action === "teamShieldZone") {
-        pendingMapAction = { type: "teamShieldZone" };
-        setPendingHint();
-        if (shopOverlay) shopOverlay.hidden = true;
-        return;
-      }
-      if (action === "lineTool") {
-        pendingMapAction = { type: "line", step: "first" };
-        setPendingHint();
-        if (shopOverlay) shopOverlay.hidden = true;
-      }
     });
   });
 
@@ -1901,7 +1849,7 @@ function setupEconomyUi() {
     if (walletState) updateWalletBar();
   }, 1000);
 
-  document.querySelectorAll(".game-shop__buy, .starter-pack__cta, .shop-topup-pack, .deposit-amt").forEach((btn) => {
+  document.querySelectorAll(".game-shop__buy, .shop-topup-pack, .deposit-amt").forEach((btn) => {
     btn.addEventListener(
       "click",
       () => {
@@ -1918,14 +1866,8 @@ function setupEconomyUi() {
 function setPendingHint() {
   const text = (() => {
     if (!pendingMapAction) return "";
-    if (pendingMapAction.type === "line") {
-      if (pendingMapAction.step === "first") return "Линия: первый тап — начало линии";
-      if (pendingMapAction.step === "second") return "Линия: второй тап — направление";
-    }
-    if (pendingMapAction.type === "shieldPixel") return "Щит: тап по своему пикселю";
-    if (pendingMapAction.type === "zoneCapture") return "Зона 4×4: тап по углу области";
-    if (pendingMapAction.type === "massCapture") return "Масс-захват 6×6: тап по центру — часть клеток перекрасится";
-    if (pendingMapAction.type === "teamShieldZone") return "Командная защита 4×4: тап по углу зоны";
+    if (pendingMapAction.type === "zoneCapture") return "Зона 4×4: тап по углу области — все 16 клеток перекрасятся";
+    if (pendingMapAction.type === "massCapture") return "Масс-захват 6×6: тап по центру — все 36 клеток перекрасятся";
     return "";
   })();
   if (shopPending) {
@@ -2467,20 +2409,16 @@ function connectWs() {
       return;
     }
     if (msg.type === "teamEffect") {
-      const tr = getVfxTransform();
-      const col = teamColor(msg.teamId);
-      if (msg.kind === "shieldZone" && boardVfx && typeof msg.cx === "number" && typeof msg.cy === "number") {
-        boardVfx.zoneFlash(msg.cx - 1, msg.cy - 1, col, tr, 4);
-      }
       if (walletState && msg.teamId === myTeamId && walletState.teamEffects) {
         const te = walletState.teamEffects;
         if (msg.kind === "teamRecovery" && typeof msg.until === "number") {
           te.teamRecoveryUntil = msg.until;
-        }
-        if (msg.kind === "shieldZone") {
-          te.shieldZone = { cx: msg.cx, cy: msg.cy, until: msg.until };
+          if (typeof msg.teamRecoverySec === "number") te.teamRecoverySec = msg.teamRecoverySec;
         }
         updateShopAvailability();
+      }
+      if (msg.kind === "teamRecovery" && boardVfx && msg.teamId === myTeamId) {
+        boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
       }
       return;
     }
@@ -2783,30 +2721,6 @@ function placePixel(gx, gy) {
   }
 
   if (online && pendingMapAction) {
-    if (pendingMapAction.type === "line") {
-      if (pendingMapAction.step === "first") {
-        pendingMapAction = { type: "line", step: "second", x0: gx, y0: gy };
-        setPendingHint();
-        return;
-      }
-      if (pendingMapAction.step === "second") {
-        const x0 = pendingMapAction.x0 | 0;
-        const y0 = pendingMapAction.y0 | 0;
-        const dx = gx - x0;
-        const dy = gy - y0;
-        if (dx === 0 && dy === 0) {
-          notifyReject("same_cell");
-          return;
-        }
-        const dirIndex = nearestDirIndex8(dx, dy);
-        lastLineTapGx = x0;
-        lastLineTapGy = y0;
-        wsSendJson({ type: "lineCapture", x: x0, y: y0, dirIndex });
-        pendingMapAction = null;
-        setPendingHint();
-        return;
-      }
-    }
     if (pendingMapAction.type === "zoneCapture") {
       lastZoneGx = gx - 1;
       lastZoneGy = gy - 1;
@@ -2819,20 +2733,6 @@ function placePixel(gx, gy) {
       lastZoneGx = gx - 2;
       lastZoneGy = gy - 2;
       wsSendJson({ type: "purchaseMassCapture", x: gx, y: gy });
-      pendingMapAction = null;
-      setPendingHint();
-      return;
-    }
-    if (pendingMapAction.type === "teamShieldZone") {
-      lastZoneGx = gx - 1;
-      lastZoneGy = gy - 1;
-      wsSendJson({ type: "purchaseTeamShieldZone", x: gx, y: gy });
-      pendingMapAction = null;
-      setPendingHint();
-      return;
-    }
-    if (pendingMapAction.type === "shieldPixel") {
-      wsSendJson({ type: "purchaseShieldPixel", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
       return;

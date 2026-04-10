@@ -4,3 +4,7 @@ node_modules/
 # Локальное состояние сервера (команды, счётчик id)
 data/dynamic-teams.json
 data/round-state.json
+# Локальная БД / тестовые данные
+data/economy.db*
+data/_arch-test/
+data/_test-wallet/
