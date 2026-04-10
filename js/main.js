@@ -23,6 +23,8 @@ const ROUND_ELIGIBLE_KEY = "pixel-battle-round-eligible";
 /** Стабильный id игрока на устройстве (или tg_<id> в Telegram) — сервер выдаёт токен победителя по ключу */
 const PLAYER_KEY_STORAGE = "pixel-battle-player-key";
 const WS_PATH = "/ws";
+/** Совпадает с NOWPayments: USDT в сети BEP20 (Binance Smart Chain) */
+const DEPOSIT_PAY_CURRENCY = "usdtbsc";
 
 /** Если localStorage недоступен — один стабильный ключ на сессию страницы */
 let cachedAnonPlayerKey = null;
@@ -93,6 +95,9 @@ const PALETTE = [
 const canvas = document.getElementById("board");
 const ctx = canvas.getContext("2d", { alpha: false });
 const paletteEl = document.getElementById("palette");
+const paletteTriggerBtn = document.getElementById("palette-trigger");
+const palettePickerOverlay = document.getElementById("palette-picker-overlay");
+const palettePickerCloseBtn = document.getElementById("palette-picker-close");
 const teamBadge = document.getElementById("team-badge");
 const teamBadgeName = document.getElementById("team-badge-name");
 const teamBadgeCount = document.getElementById("team-badge-count");
@@ -475,7 +480,7 @@ function canPickOnlineDrawColor() {
 
 /** Подсветить нижнюю палитру по текущему цвету команды в мета. */
 function syncPaletteSelectionFromTeam() {
-  if (!myTeamId || !teamsMeta || !paletteEl.querySelector(".palette__swatch")) return;
+  if (!myTeamId || !teamsMeta || !paletteEl?.querySelector(".palette__swatch")) return;
   const t = teamsMeta.find((x) => x.id === myTeamId);
   if (!t?.color) return;
   const idx = paletteIndexForHex(t.color);
@@ -483,6 +488,7 @@ function syncPaletteSelectionFromTeam() {
   paletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
     el.setAttribute("aria-selected", el.dataset.index === String(idx) ? "true" : "false");
   });
+  updatePaletteTriggerPreview();
 }
 
 function sendOnlineColorChoice(hex) {
@@ -508,7 +514,7 @@ function setFooterMode() {
   const localMode = !online;
   const showPalette =
     localMode || (online && joined && canPickOnlineDrawColor() && !spectatorMode);
-  paletteEl.hidden = !showPalette;
+  if (paletteTriggerBtn) paletteTriggerBtn.hidden = !showPalette;
   teamBadge.hidden = !online || !joined;
   if (spectatorBadgeEl) {
     spectatorBadgeEl.hidden = !online || !spectatorMode;
@@ -743,6 +749,20 @@ function tryRestoreSession() {
     ws.send(
       JSON.stringify({ type: "joinTeam", teamId: sess.teamId, playerKey: getOrCreatePlayerKey() })
     );
+  }
+}
+
+/**
+ * Сервер отвечает «already» (сокет всё ещё в команде), а клиент рассинхрон — принудительный leaveTeam.
+ * @returns {boolean} true если отправили leaveTeam
+ */
+function sendLeaveTeamToRecoverFromStaleServer() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try {
+    ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1212,6 +1232,31 @@ function applyWalletFromServer(msg) {
   updateShopAvailability();
 }
 
+function syncShopHeaderBalance() {
+  const el = document.getElementById("shop-display-balance");
+  if (!el) return;
+  const online = wantOnline && getWsUrl();
+  if (!online || !walletState) {
+    el.textContent = "—";
+    return;
+  }
+  if (walletState.devUnlimited) el.textContent = "∞";
+  else {
+    const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
+    el.textContent = b.toFixed(2);
+  }
+}
+
+function syncShopDepositButton() {
+  const b = document.getElementById("shop-open-deposit");
+  if (!b) return;
+  if (!walletState) {
+    b.hidden = true;
+    return;
+  }
+  b.hidden = spectatorMode || !!walletState.devUnlimited;
+}
+
 function updateWalletBar() {
   if (!walletBalanceEl) return;
   const online = wantOnline && getWsUrl();
@@ -1219,6 +1264,8 @@ function updateWalletBar() {
     walletBalanceEl.hidden = true;
     if (btnDeposit) btnDeposit.hidden = true;
     if (btnShop) btnShop.hidden = true;
+    syncShopHeaderBalance();
+    syncShopDepositButton();
     return;
   }
   walletBalanceEl.hidden = false;
@@ -1239,6 +1286,8 @@ function updateWalletBar() {
   } else {
     walletBalanceEl.title = "Внутренний баланс (без вывода)";
   }
+  syncShopHeaderBalance();
+  syncShopDepositButton();
 }
 
 function updateShopAvailability() {
@@ -1278,14 +1327,16 @@ function updateShopAvailability() {
   if (sh) sh.disabled = !!dis || fin;
   const up = document.getElementById("shop-upgrade");
   if (up) up.disabled = !!dis;
-  if (shopEffects && walletState.teamEffects) {
+  if (shopEffects) {
     const te = walletState.teamEffects;
     const now = Date.now();
     const parts = [];
-    if (te.teamBoostUntil > now) parts.push(`Командный буст до ${fmtTime(te.teamBoostUntil)}`);
-    if (te.raidBoostUntil > now) parts.push(`Рейд до ${fmtTime(te.raidBoostUntil)}`);
-    if (te.shieldZone && te.shieldZone.until > now) {
-      parts.push(`Зона щита до ${fmtTime(te.shieldZone.until)}`);
+    if (te) {
+      if (te.teamBoostUntil > now) parts.push(`Командный буст до ${fmtTime(te.teamBoostUntil)}`);
+      if (te.raidBoostUntil > now) parts.push(`Рейд до ${fmtTime(te.raidBoostUntil)}`);
+      if (te.shieldZone && te.shieldZone.until > now) {
+        parts.push(`Зона щита до ${fmtTime(te.shieldZone.until)}`);
+      }
     }
     if (walletState.speedBoostUntil > now) parts.push(`Личное ускорение до ${fmtTime(walletState.speedBoostUntil)}`);
     shopEffects.textContent = parts.length ? parts.join(" · ") : "Нет активных бустов.";
@@ -1336,6 +1387,7 @@ function setupEconomyUi() {
         body: JSON.stringify({
           playerKey: getOrCreatePlayerKey(),
           amount,
+          payCurrency: DEPOSIT_PAY_CURRENCY,
           initData: getTelegramInitDataForServer(),
         }),
       });
@@ -1389,9 +1441,39 @@ function setupEconomyUi() {
 
   btnShop?.addEventListener("click", () => {
     if (shopOverlay) shopOverlay.hidden = false;
+    const bal = document.getElementById("shop-display-balance");
+    if (bal) {
+      bal.setAttribute("data-pulse", "1");
+      setTimeout(() => bal.removeAttribute("data-pulse"), 500);
+    }
+    syncShopHeaderBalance();
     updateShopAvailability();
     setPendingHint();
   });
+
+  document.getElementById("shop-open-deposit")?.addEventListener("click", () => {
+    if (shopOverlay) shopOverlay.hidden = true;
+    if (depositOverlay) depositOverlay.hidden = false;
+    if (depositError) depositError.hidden = true;
+  });
+
+  (function setupGameShopTabs() {
+    const root = document.getElementById("shop-overlay");
+    if (!root) return;
+    root.querySelectorAll(".game-shop__tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        const id = tab.dataset.tab;
+        root.querySelectorAll(".game-shop__tab").forEach((t) => {
+          const on = t.dataset.tab === id;
+          t.classList.toggle("is-active", on);
+          t.setAttribute("aria-selected", on ? "true" : "false");
+        });
+        root.querySelectorAll(".game-shop__panel").forEach((p) => {
+          p.hidden = p.dataset.panel !== id;
+        });
+      });
+    });
+  })();
   shopClose?.addEventListener("click", () => {
     if (shopOverlay) shopOverlay.hidden = true;
     pendingMapAction = null;
@@ -1710,21 +1792,29 @@ function connectWs() {
     }
     if (msg.type === "soloError") {
       endSessionRestore();
-      let autoLeft = false;
-      if (msg.reason === "already" && myTeamId == null && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
-        autoLeft = true;
+      if (msg.reason === "already") {
+        if (sendLeaveTeamToRecoverFromStaleServer()) {
+          const tg = window.Telegram?.WebApp;
+          const text =
+            "На сервере оставалась сессия в команде — выход выполнен. Нажмите «Играть соло» ещё раз.";
+          if (typeof tg?.showAlert === "function") tg.showAlert(text);
+          else alert(text);
+        } else {
+          const tg = window.Telegram?.WebApp;
+          const text =
+            "Нет соединения с сервером. Закройте и откройте Mini App снова, затем повторите вход.";
+          if (typeof tg?.showAlert === "function") tg.showAlert(text);
+          else alert(text);
+        }
+        return;
       }
       const map = {
-        already: "Сначала выйдите из текущей команды.",
         fields: "Введите имя и выберите цвет.",
         limit: "Достигнут лимит команд на сервере.",
         round:
           "В финале команд (команды по 2 человека) соло недоступно — создайте команду из двух или вступите в существующую.",
       };
-      const text = autoLeft
-        ? "Сессия на сервере сброшена. Нажмите «Играть соло» ещё раз."
-        : map[msg.reason] || "Не удалось начать соло.";
+      const text = map[msg.reason] || "Не удалось начать соло.";
       const tg = window.Telegram?.WebApp;
       if (typeof tg?.showAlert === "function") tg.showAlert(text);
       else alert(text);
@@ -1759,20 +1849,28 @@ function connectWs() {
     }
     if (msg.type === "createTeamError") {
       endSessionRestore();
-      let autoLeft = false;
-      if (msg.reason === "already" && myTeamId == null && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
-        autoLeft = true;
+      if (msg.reason === "already") {
+        if (sendLeaveTeamToRecoverFromStaleServer()) {
+          const tg = window.Telegram?.WebApp;
+          const text =
+            "На сервере оставалась сессия в команде — выход выполнен. Нажмите «Создать команду» ещё раз.";
+          if (typeof tg?.showAlert === "function") tg.showAlert(text);
+          else alert(text);
+        } else {
+          const tg = window.Telegram?.WebApp;
+          const text =
+            "Нет соединения с сервером. Закройте и откройте Mini App снова, затем повторите вход.";
+          if (typeof tg?.showAlert === "function") tg.showAlert(text);
+          else alert(text);
+        }
+        return;
       }
       const map = {
-        already: "Сначала выйдите из текущей команды (кнопка «Выйти из команды»).",
         fields: "Укажите название, смайлик и цвет команды.",
         limit: "Достигнут лимит команд на сервере.",
         duel: "Финальная дуэль 1 на 1 — только соло; публичные команды недоступны.",
       };
-      const text = autoLeft
-        ? "Сессия на сервере сброшена. Нажмите «Создать команду» ещё раз."
-        : map[msg.reason] || "Не удалось создать команду.";
+      const text = map[msg.reason] || "Не удалось создать команду.";
       const tg = window.Telegram?.WebApp;
       if (typeof tg?.showAlert === "function") tg.showAlert(text);
       else alert(text);
@@ -1814,6 +1912,22 @@ function connectWs() {
     }
     if (msg.type === "soloResumeError") {
       endSessionRestore();
+      if (msg.reason === "already") {
+        if (sendLeaveTeamToRecoverFromStaleServer()) {
+          const tg = window.Telegram?.WebApp;
+          const text =
+            "На сервере уже была активная команда — выход выполнен. Нажмите «Играть соло» или вступите в команду снова.";
+          if (typeof tg?.showAlert === "function") tg.showAlert(text);
+          else alert(text);
+        } else {
+          const tg = window.Telegram?.WebApp;
+          const text =
+            "Нет соединения с сервером. Закройте и откройте Mini App снова, затем повторите вход.";
+          if (typeof tg?.showAlert === "function") tg.showAlert(text);
+          else alert(text);
+        }
+        return;
+      }
       if (msg.reason === "round") {
         const tg = window.Telegram?.WebApp;
         const text =
@@ -1837,6 +1951,11 @@ function connectWs() {
       return;
     }
     if (msg.type === "joinError") {
+      /* Уже в команде на сервере (часто после повторного joinTeam при каждом meta — не трогаем UI) */
+      if (msg.reason === "already") {
+        endSessionRestore();
+        return;
+      }
       endSessionRestore();
       if (msg.reason === "duel") {
         const tg = window.Telegram?.WebApp;
@@ -1979,7 +2098,42 @@ function initTelegram() {
   });
 }
 
+function updatePaletteTriggerPreview() {
+  if (!paletteTriggerBtn) return;
+  const hex = PALETTE[selectedColor] ?? "#ffffff";
+  paletteTriggerBtn.style.backgroundColor = hex;
+}
+
+function closePalettePicker() {
+  if (palettePickerOverlay) palettePickerOverlay.hidden = true;
+  if (paletteTriggerBtn) paletteTriggerBtn.setAttribute("aria-expanded", "false");
+  paletteTriggerBtn?.focus();
+}
+
+function openPalettePicker() {
+  if (!palettePickerOverlay || paletteTriggerBtn?.hidden) return;
+  palettePickerOverlay.hidden = false;
+  paletteTriggerBtn?.setAttribute("aria-expanded", "true");
+}
+
+function setupPalettePickerUi() {
+  paletteTriggerBtn?.addEventListener("click", () => {
+    if (paletteTriggerBtn.hidden) return;
+    openPalettePicker();
+  });
+  palettePickerCloseBtn?.addEventListener("click", () => closePalettePicker());
+  palettePickerOverlay?.addEventListener("click", (e) => {
+    if (e.target === palettePickerOverlay) closePalettePicker();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!palettePickerOverlay || palettePickerOverlay.hidden) return;
+    closePalettePicker();
+  });
+}
+
 function buildPalette() {
+  if (!paletteEl) return;
   paletteEl.innerHTML = "";
   PALETTE.forEach((hex, i) => {
     const b = document.createElement("button");
@@ -1995,13 +2149,16 @@ function buildPalette() {
       paletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
         el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
       });
+      updatePaletteTriggerPreview();
       if (wantOnline && getWsUrl() && canPickOnlineDrawColor()) {
         sendOnlineColorChoice(hex);
       }
       schedulePersist();
+      closePalettePicker();
     });
     paletteEl.appendChild(b);
   });
+  updatePaletteTriggerPreview();
 }
 
 function resizeCanvas() {
@@ -2372,6 +2529,7 @@ async function bootstrap() {
   }
   wantOnline = !!getWsUrl();
   buildPalette();
+  setupPalettePickerUi();
   setFooterMode();
   setupReferralButton();
   setupWelcomeUi();

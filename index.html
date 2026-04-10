@@ -9,6 +9,7 @@
   <meta name="pixel-battle-tg-app" content="" />
   <title>Pixel Battle</title>
   <link rel="stylesheet" href="css/main.css" />
+  <link rel="stylesheet" href="css/shop.css" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -106,7 +107,7 @@
   <div id="deposit-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Пополнение USDT</h2>
-      <p class="overlay__hint">Средства зачисляются на внутренний баланс для игры. Вывод не предусмотрен.</p>
+      <p class="overlay__hint">Оплата — <strong>USDT в сети BEP20</strong> (Binance Smart Chain). Укажешь, например, 50 — к оплате и на баланс арены уйдёт ровно 50 USDT (без пересчёта в «доллары»). Вывод не предусмотрен.</p>
       <div class="deposit-presets" role="group" aria-label="Суммы">
         <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="5">5</button>
         <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="10">10</button>
@@ -127,27 +128,211 @@
     </div>
   </div>
 
-  <div id="shop-overlay" class="overlay" hidden>
-    <div class="overlay__card overlay__card--settings shop-card">
-      <h2 class="overlay__title">Магазин</h2>
-      <p class="overlay__hint" id="shop-stage-hint">—</p>
-      <p id="shop-effects" class="shop-effects"></p>
-      <div class="shop-grid">
-        <button type="button" class="overlay__btn shop-btn" id="shop-speed" data-action="speed">Ускорение 10 мин — $10</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-shield-mode" data-action="shieldMode">Щит на пиксель 20 с — $3 (затем тап по карте)</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-upgrade" data-action="upgrade">След. уровень кулдауна</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-line-up" data-action="line" data-dir="up">Линия ↑ — $20</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-line-down" data-action="line" data-dir="down">Линия ↓ — $20</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-line-left" data-action="line" data-dir="left">Линия ← — $20</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-line-right" data-action="line" data-dir="right">Линия → — $20</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-team-boost" data-action="teamBoost">Командный буст 5 мин — $50</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-raid" data-action="raid">Рейд 2 мин — $80</button>
-        <button type="button" class="overlay__btn shop-btn" id="shop-zone-mode" data-action="zoneMode">Зона 4×4, 30 с — $70 (тап — центр)</button>
-      </div>
-      <p id="shop-pending" class="shop-pending" hidden></p>
+  <div id="palette-picker-overlay" class="overlay" hidden>
+    <div
+      class="overlay__card overlay__card--palette-picker"
+      id="palette-picker-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="palette-picker-title"
+    >
+      <h2 class="overlay__title" id="palette-picker-title">Цвет кисти</h2>
+      <p class="overlay__hint">Выберите цвет — он сразу применится к кисти</p>
+      <div id="palette" class="palette palette--popup" role="listbox" aria-label="Палитра"></div>
       <div class="overlay__actions">
-        <button type="button" id="shop-close" class="overlay__btn overlay__btn--secondary">Закрыть</button>
+        <button type="button" id="palette-picker-close" class="overlay__btn overlay__btn--secondary">Готово</button>
       </div>
+    </div>
+  </div>
+
+  <div id="shop-overlay" class="overlay game-shop-overlay" hidden>
+    <div class="game-shop" role="dialog" aria-labelledby="shop-main-title">
+      <header class="game-shop__header">
+        <div class="game-shop__brand">
+          <div>
+            <h2 id="shop-main-title" class="game-shop__title">Арсенал</h2>
+            <p class="game-shop__subtitle">Pixel Battle Store</p>
+          </div>
+          <div class="game-shop__balance" aria-live="polite">
+            <span class="game-shop__balance-label">Баланс</span>
+            <span id="shop-display-balance" class="game-shop__balance-value">0.00</span>
+            <span class="game-shop__balance-label" style="opacity: 0.7">USDT</span>
+          </div>
+        </div>
+        <div class="game-shop__tabs" role="tablist">
+          <button type="button" class="game-shop__tab is-active" role="tab" data-tab="coins" aria-selected="true">Монеты</button>
+          <button type="button" class="game-shop__tab" role="tab" data-tab="boosts" aria-selected="false">Бусты</button>
+          <button type="button" class="game-shop__tab" role="tab" data-tab="strike" aria-selected="false">Удар</button>
+          <button type="button" class="game-shop__tab" role="tab" data-tab="vip" aria-selected="false">VIP</button>
+        </div>
+      </header>
+
+      <div class="game-shop__body">
+        <p class="game-shop__hint" id="shop-stage-hint">—</p>
+
+        <div class="game-shop__panel" data-panel="coins" id="shop-panel-coins">
+          <div class="game-shop__coins-panel">
+            <div class="game-shop__coins-icon" aria-hidden="true">💎</div>
+            <p class="game-shop__coins-text">USDT — внутренняя валюта арены. Пополни баланс и открой все тактические опции.</p>
+            <button type="button" class="game-shop__deposit-btn" id="shop-open-deposit">Пополнить баланс</button>
+          </div>
+          <div class="game-shop__section-label" style="margin-top: 14px">Совет</div>
+          <div class="game-shop__card">
+            <div class="game-shop__badges">
+              <span class="game-shop__badge game-shop__badge--deal">🔥 Лучший старт</span>
+            </div>
+            <div class="game-shop__card-head">
+              <div class="game-shop__icon">📦</div>
+              <div class="game-shop__card-text">
+                <h3 class="game-shop__card-title">Набор новичка</h3>
+                <p class="game-shop__card-desc">Первое пополнение + вкладка «Бусты» — быстрее втянуться в бой.</p>
+              </div>
+            </div>
+            <p class="game-shop__card-desc" style="margin: 0; font-size: 0.65rem; opacity: 0.85">Демо-подсказка: реальные пакеты привязаны к балансу на сервере.</p>
+          </div>
+        </div>
+
+        <div class="game-shop__panel" data-panel="boosts" id="shop-panel-boosts" hidden>
+          <div class="game-shop__grid">
+            <article class="game-shop__card">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--star">⭐ Топ</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">⚡</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Гипер-ускорение</h3>
+                  <p class="game-shop__card-desc">Личный темп на 10 мин — больше пикселей за тот же раунд.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <span class="game-shop__price">10 USDT</span>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-speed" data-action="speed">Купить</button>
+              </div>
+            </article>
+
+            <article class="game-shop__card">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--limited">LIMITED</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">🛡️</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Щит пикселя</h3>
+                  <p class="game-shop__card-desc">20 с защиты — затем тап по своей клетке на карте.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <span class="game-shop__price">3 USDT</span>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-shield-mode" data-action="shieldMode">Активировать</button>
+              </div>
+            </article>
+
+            <article class="game-shop__card">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--deal">Выгодно</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">⏱️</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Апгрейд кулдауна</h3>
+                  <p class="game-shop__card-desc">Следующий уровень — меньше ожидания между ходами.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <span class="game-shop__price">по уровню · USDT</span>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-upgrade" data-action="upgrade">Улучшить</button>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <div class="game-shop__panel" data-panel="strike" id="shop-panel-strike" hidden>
+          <p class="game-shop__section-label">Линии</p>
+          <div class="game-shop__card">
+            <div class="game-shop__badges">
+              <span class="game-shop__badge game-shop__badge--hot">🔥 Best deal</span>
+            </div>
+            <div class="game-shop__card-head">
+              <div class="game-shop__icon">✚</div>
+              <div class="game-shop__card-text">
+                <h3 class="game-shop__card-title">Тактический залп</h3>
+                <p class="game-shop__card-desc">Четыре направления — выбери сторону и тапни по карте. 20 USDT за линию.</p>
+              </div>
+            </div>
+            <div class="game-shop__bundle-grid">
+              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-up" data-action="line" data-dir="up">↑ 20 USDT</button>
+              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-down" data-action="line" data-dir="down">↓ 20 USDT</button>
+              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-left" data-action="line" data-dir="left">← 20 USDT</button>
+              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-right" data-action="line" data-dir="right">→ 20 USDT</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="game-shop__panel" data-panel="vip" id="shop-panel-vip" hidden>
+          <p class="game-shop__section-label">Премиум-тактика</p>
+          <div class="game-shop__grid">
+            <article class="game-shop__card game-shop__card--premium">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--star">⭐ Most popular</span>
+                <span class="game-shop__badge game-shop__badge--limited">LIMITED</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">👥</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Командный овердрайв</h3>
+                  <p class="game-shop__card-desc">Весь отряд на 5 мин сильнее — синхронный пуш.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <span class="game-shop__price">50 USDT</span>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-team-boost" data-action="teamBoost">В бой</button>
+              </div>
+            </article>
+
+            <article class="game-shop__card game-shop__card--premium">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--hot">Рейд</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">🎯</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Рейд-импульс</h3>
+                  <p class="game-shop__card-desc">2 минуты агрессивного давления на фланг.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <span class="game-shop__price">80 USDT</span>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-raid" data-action="raid">Запустить</button>
+              </div>
+            </article>
+
+            <article class="game-shop__card game-shop__card--premium">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--deal">Зона контроля</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon">⬛</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Доминатор 4×4</h3>
+                  <p class="game-shop__card-desc">30 секунд — тап по центру зоны на карте.</p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <span class="game-shop__price">70 USDT</span>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-zone-mode" data-action="zoneMode">Развернуть</button>
+              </div>
+            </article>
+          </div>
+        </div>
+
+        <p id="shop-effects" class="game-shop__effects"></p>
+        <p id="shop-pending" class="game-shop__pending" hidden></p>
+      </div>
+
+      <footer class="game-shop__footer">
+        <button type="button" id="shop-close" class="game-shop__close">Закрыть магазин</button>
+      </footer>
     </div>
   </div>
 
@@ -187,7 +372,19 @@
           <button type="button" id="btn-referral" class="team-badge__invite" hidden>Пригласить</button>
           <button type="button" id="btn-leave-team" class="team-badge__leave" hidden>Выйти / войти в команду</button>
         </div>
-        <div id="palette" class="palette" role="listbox" aria-label="Палитра"></div>
+        <div class="palette-bar__row">
+          <button
+            type="button"
+            id="palette-trigger"
+            class="palette-trigger"
+            hidden
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="palette-picker-dialog"
+            aria-label="Открыть выбор цвета кисти"
+            title="Выбрать цвет кисти"
+          ></button>
+        </div>
       </footer>
     </div>
   </div>

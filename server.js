@@ -42,6 +42,10 @@ const walletStore = new WalletStore({ dataDir: DATA_DIR });
 
 const NOWPAYMENTS_API_KEY = (process.env.NOWPAYMENTS_API_KEY || "").trim();
 const NOWPAYMENTS_IPN_SECRET = (process.env.NOWPAYMENTS_IPN_SECRET || "").trim();
+/** USDT на Binance Smart Chain (BEP20) в NOWPayments — обычно `usdtbsc` */
+const NOWPAYMENTS_PAY_CURRENCY = (process.env.NOWPAYMENTS_PAY_CURRENCY || "usdtbsc").trim().toLowerCase();
+/** В API NOWPayments сумма счёта часто задаётся как USD; 1 USDT ≈ 1 USD — зачисление на баланс в USDT */
+const NOWPAYMENTS_PRICE_CURRENCY = (process.env.NOWPAYMENTS_PRICE_CURRENCY || "usd").trim().toLowerCase();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.APP_URL || "").replace(/\/$/, "");
 const NOWPAYMENTS_API_BASE = /^true$/i.test(String(process.env.NOWPAYMENTS_SANDBOX || "").trim())
   ? API_BASE_SANDBOX
@@ -115,6 +119,44 @@ const TELEGRAM_ADMIN_IDS = new Set(
 );
 /** Первый раунд ждёт «go» в Telegram, только если задан бот и хотя бы один admin id */
 const WAIT_FOR_TELEGRAM_GO = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size > 0);
+
+/** По умолчанию выкл.: «рестарт»/restart в боте не перезапускает процесс (избегаем случайного сброса всех сессий). */
+const TELEGRAM_ENABLE_PROCESS_RESTART = /^true$/i.test(String(process.env.TELEGRAM_ENABLE_PROCESS_RESTART || "").trim());
+
+/** Ссылка на Mini App: полная `https://t.me/BotUser/appname` или собрать из username + short name (BotFather) */
+const TELEGRAM_MINIAPP_LINK = (process.env.TELEGRAM_MINIAPP_LINK || "").trim();
+const TELEGRAM_BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || "").replace(/^@/, "").trim();
+const TELEGRAM_MINIAPP_SHORT_NAME = (process.env.TELEGRAM_MINIAPP_SHORT_NAME || "").trim();
+const TELEGRAM_START_MESSAGE =
+  (process.env.TELEGRAM_START_MESSAGE || "").trim() ||
+  "Добро пожаловать в Pixel Battle!\n\nНажми кнопку ниже, чтобы открыть игру в Telegram.";
+const TELEGRAM_START_BUTTON_TEXT = (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "🎮 Запустить игру";
+
+function getTelegramMiniAppLaunchUrl() {
+  if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
+  if (TELEGRAM_BOT_USERNAME && TELEGRAM_MINIAPP_SHORT_NAME) {
+    return `https://t.me/${TELEGRAM_BOT_USERNAME}/${TELEGRAM_MINIAPP_SHORT_NAME}`;
+  }
+  return "";
+}
+
+/** Параметр после /start (реферал и т.д.) → добавляем в ссылку как ?startapp= */
+function parseStartPayload(text) {
+  const m = /^\/start(?:@[\w]+)?\s*(.*)$/i.exec(String(text || "").trim());
+  return m ? m[1].trim() : "";
+}
+
+function buildMiniAppOpenUrl(startPayload) {
+  const base = getTelegramMiniAppLaunchUrl();
+  if (!base) return "";
+  if (!startPayload) return base;
+  const sep = base.includes("?") ? "&" : "?";
+  return `${base}${sep}startapp=${encodeURIComponent(startPayload)}`;
+}
+
+function isStartCommand(text) {
+  return /^\/start(?:@[\w]+)?(?:\s|$)/i.test(String(text || "").trim());
+}
 
 /** Числовые Telegram user id: бесконечный баланс и обход кулдаунов/ограничений магазина (только при playerKey tg_<id>). */
 function buildDevUnlimitedWalletTgSet() {
@@ -819,14 +861,14 @@ async function handleApi(req, res) {
       return;
     }
     const playerKey = sanitizePlayerKey(parts[1]);
-    const amountUsd = Number(body.price_amount ?? body.actually_paid ?? body.pay_amount);
-    if (!playerKey || !Number.isFinite(amountUsd) || amountUsd <= 0) {
+    const creditUsdt = Number(body.price_amount ?? body.actually_paid ?? body.pay_amount);
+    if (!playerKey || !Number.isFinite(creditUsdt) || creditUsdt <= 0) {
       res.writeHead(200);
       res.end(JSON.stringify({ ok: false }));
       return;
     }
     walletStore.markPaymentProcessed(npId);
-    walletStore.credit(playerKey, amountUsd, { nowPaymentId: String(npId), txHash: String(body.outcome_hash || "") });
+    walletStore.credit(playerKey, creditUsdt, { nowPaymentId: String(npId), txHash: String(body.outcome_hash || "") });
     res.writeHead(200);
     res.end(JSON.stringify({ ok: true }));
     return;
@@ -890,13 +932,19 @@ async function handleApi(req, res) {
     const orderId = `dep|${playerKey}|${Date.now()}`;
     const ipnUrl = `${PUBLIC_BASE_URL}/api/ipn`;
     try {
+      const payCur =
+        typeof body.payCurrency === "string" && body.payCurrency.trim()
+          ? body.payCurrency.trim().toLowerCase()
+          : NOWPAYMENTS_PAY_CURRENCY;
       const inv = await createNowpaymentInvoice({
         apiKey: NOWPAYMENTS_API_KEY,
         apiBase: NOWPAYMENTS_API_BASE,
         amountUsd: amount,
         orderId,
         ipnUrl,
-        payCurrency: typeof body.payCurrency === "string" ? body.payCurrency : "usdttrc20",
+        payCurrency: payCur,
+        priceCurrency: NOWPAYMENTS_PRICE_CURRENCY,
+        orderDescription: `Pixel Battle — ${amount} USDT (BEP20)`,
         successUrl: body.successUrl || `${PUBLIC_BASE_URL}/`,
         cancelUrl: body.cancelUrl || `${PUBLIC_BASE_URL}/`,
       });
@@ -2192,16 +2240,17 @@ function startRoundOneTimer(durationHours) {
   return { ok: true, durationMs: ms };
 }
 
-async function telegramSendMessage(chatId, text) {
+async function telegramSendMessage(chatId, text, extra = {}) {
+  const payload = { chat_id: chatId, text, ...extra };
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify(payload),
   });
 }
 
 async function telegramPollLoop() {
-  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+  if (!TELEGRAM_BOT_TOKEN) return;
   let offset = 0;
   for (;;) {
     try {
@@ -2219,16 +2268,42 @@ async function telegramPollLoop() {
         const msg = u.message || u.edited_message;
         if (!msg || typeof msg.text !== "string") continue;
         const uid = msg.from?.id;
-        if (uid == null || !TELEGRAM_ADMIN_IDS.has(uid)) continue;
+        if (uid == null) continue;
         const chatId = msg.chat.id;
         let t = String(msg.text).trim();
+
+        if (isStartCommand(t)) {
+          const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
+          if (launchUrl) {
+            await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
+              reply_markup: {
+                inline_keyboard: [[{ text: TELEGRAM_START_BUTTON_TEXT, url: launchUrl }]],
+              },
+            });
+          } else {
+            await telegramSendMessage(
+              chatId,
+              `${TELEGRAM_START_MESSAGE}\n\n(Админу: задайте TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME — тогда здесь появится кнопка запуска.)`
+            );
+          }
+          continue;
+        }
+
+        if (!TELEGRAM_ADMIN_IDS.has(uid)) continue;
         const restartNorm = t
           .toLowerCase()
           .replace(/^\/+/, "")
           .replace(/\s+/g, " ");
         if (restartNorm === "рестарт" || restartNorm === "restart") {
-          await telegramSendMessage(chatId, "Перезапуск приложения…");
-          setTimeout(() => process.exit(0), 400);
+          if (TELEGRAM_ENABLE_PROCESS_RESTART) {
+            await telegramSendMessage(chatId, "Перезапуск приложения…");
+            setTimeout(() => process.exit(0), 400);
+          } else {
+            await telegramSendMessage(
+              chatId,
+              "Перезапуск процесса через бота отключён (чтобы не сбрасывать игру всем). Задайте TELEGRAM_ENABLE_PROCESS_RESTART=true и перезапустите сервер — или перезапустите деплой вручную (Render и т.п.)."
+            );
+          }
           continue;
         }
         t = t.replace(/^\/go\b/i, "go");
@@ -2272,18 +2347,29 @@ async function telegramPollLoop() {
 
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
-  if (WAIT_FOR_TELEGRAM_GO) {
-    console.log(
-      'Первый раунд: в личку боту — «go», «го», «гол» + часы: go 100, го 50, го 0.1; «рестарт» — перезапуск процесса (Render поднимет снова).'
-    );
+  if (TELEGRAM_BOT_TOKEN) {
     fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`).catch(
       () => {}
     );
     telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
-  } else if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size === 0) {
-    console.warn(
-      "[Pixel Battle] Задан TELEGRAM_BOT_TOKEN, но пуст TELEGRAM_ADMIN_IDS — polling не запущен; без «go» используйте только локальную разработку или добавьте ID через запятую."
-    );
+    if (getTelegramMiniAppLaunchUrl()) {
+      console.log(
+        "Telegram: команда /start — сообщение с кнопкой «Запустить игру» (TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME)."
+      );
+    } else {
+      console.warn(
+        "[Pixel Battle] Задайте TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME — иначе /start без кнопки Mini App."
+      );
+    }
+    if (WAIT_FOR_TELEGRAM_GO) {
+      console.log(
+        'Первый раунд: в личку боту — «go», «го», «гол» + часы: go 100, го 50, го 0.1. Перезапуск процесса по «рестарт»/restart — только если TELEGRAM_ENABLE_PROCESS_RESTART=true.'
+      );
+    } else if (TELEGRAM_ADMIN_IDS.size === 0) {
+      console.warn(
+        "[Pixel Battle] Пуст TELEGRAM_ADMIN_IDS — команды «go» / «рестарт» недоступны (только /start и локальная игра)."
+      );
+    }
   }
   if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size > 0) {
     console.log(
