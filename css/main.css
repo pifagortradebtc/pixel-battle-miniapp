@@ -579,3 +579,58 @@ body {
   border-color: color-mix(in srgb, var(--tg-hint) 40%, transparent);
   background: color-mix(in srgb, var(--tg-bg) 92%, #fff);
 }
+
+.toolbar__wallet {
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: #feca57;
+  white-space: nowrap;
+}
+
+.deposit-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.deposit-presets .overlay__btn {
+  flex: 1 1 calc(33% - 8px);
+  min-width: 72px;
+}
+
+.field__error {
+  color: #e94560;
+  font-size: 0.85rem;
+  margin: 8px 0 0;
+}
+
+.shop-card {
+  max-height: min(92dvh, 640px);
+}
+
+.shop-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.shop-btn {
+  width: 100%;
+  text-align: left;
+  font-size: 0.78rem;
+}
+
+.shop-effects {
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--tg-hint) 90%, transparent);
+  margin: 0 0 6px;
+  line-height: 1.35;
+}
+
+.shop-pending {
+  font-size: 0.8rem;
+  color: var(--tg-button);
+  margin: 10px 0 0;
+}

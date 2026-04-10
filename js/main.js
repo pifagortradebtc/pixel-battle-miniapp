@@ -68,6 +68,16 @@ function getTelegramUserForServer() {
   return null;
 }
 
+/** Строка initData для проверки подписи на сервере (привязка аккаунта к Telegram). */
+function getTelegramInitDataForServer() {
+  try {
+    const s = window.Telegram?.WebApp?.initData;
+    return typeof s === "string" ? s : "";
+  } catch {
+    return "";
+  }
+}
+
 /** Быстрый выбор эмодзи для команды */
 const EMOJI_PRESETS = [
   "🔥", "🦁", "🐉", "🦅", "🐻", "🐋", "⚡", "🌟", "💎", "🎯", "🚀", "🛡️", "⚔️", "🌊", "🌸", "❄️",
@@ -126,6 +136,19 @@ const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
 const roundTimerEl = document.getElementById("round-timer");
 const spectatorBadgeEl = document.getElementById("spectator-badge");
+const walletBalanceEl = document.getElementById("wallet-balance");
+const btnDeposit = document.getElementById("btn-deposit");
+const btnShop = document.getElementById("btn-shop");
+const depositOverlay = document.getElementById("deposit-overlay");
+const depositCustom = document.getElementById("deposit-custom");
+const depositError = document.getElementById("deposit-error");
+const depositCancel = document.getElementById("deposit-cancel");
+const depositSubmit = document.getElementById("deposit-submit");
+const shopOverlay = document.getElementById("shop-overlay");
+const shopClose = document.getElementById("shop-close");
+const shopStageHint = document.getElementById("shop-stage-hint");
+const shopEffects = document.getElementById("shop-effects");
+const shopPending = document.getElementById("shop-pending");
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -168,6 +191,11 @@ let roundIndexMeta = 0;
 let gameFinishedMeta = false;
 /** После выхода из соло открыть список команд, а не приветственный экран */
 let pendingLeaveToTeamList = false;
+
+/** Экономика с сервера */
+let walletState = null;
+/** Ожидание тапа по карте: линия / щит / зона */
+let pendingMapAction = null;
 
 function parseQuery() {
   const q = new URLSearchParams(location.search);
@@ -335,6 +363,7 @@ function tryClaimEligibility() {
       token: tok,
       playerKey: pk,
       telegramUser: getTelegramUserForServer(),
+      initData: getTelegramInitDataForServer(),
     })
   );
 }
@@ -475,6 +504,7 @@ function setFooterMode() {
   if (online && joined) updateTeamBadge();
   if (showPalette && online && joined) syncPaletteSelectionFromTeam();
   refreshToolbarSessionButton();
+  updateWalletBar();
 }
 
 /** Подпись кнопки в шапке: не глобальная очистка карты, а сессия / локальный сброс. */
@@ -1095,8 +1125,13 @@ function notifyReject(reason) {
   const map = {
     out_of_bounds: "Сюда нельзя (вне карты).",
     cooldown: "Слишком часто.",
+    "cooldown not ready": "Кулдаун: подождите до следующего хода.",
+    "pixel is shielded": "Пиксель под щитом.",
     no_team: "Сначала выберите команду.",
     spectator: "Режим наблюдения: пиксели ставить нельзя.",
+    not_eligible: "Вы не прошли в этот раунд турнира.",
+    need_telegram: "Откройте игру из Telegram Mini App (нужна подпись initData).",
+    rate_limited: "Слишком много действий подряд. Подождите секунду.",
   };
   const text = map[reason] || reason;
   const tg = window.Telegram?.WebApp;
@@ -1107,6 +1142,262 @@ function notifyReject(reason) {
     setTimeout(() => {
       cooldownLabel.hidden = true;
     }, 1600);
+  }
+}
+
+function notifyPurchaseError(reason) {
+  const m = {
+    "not enough balance": "Недостаточно средств на балансе.",
+    "not available": "В этой стадии турнира недоступно.",
+    "speed boost already active": "Ускорение уже активно.",
+    "pixel is shielded": "Пиксель под щитом.",
+    "not your pixel": "Можно защитить только свой пиксель.",
+    "shield zone already active": "Зона щита уже активна.",
+    "raid boost cannot be used": "Рейд или другой буст уже активен.",
+    "team_boost blocked": "Сначала дождитесь окончания рейда.",
+    "line capture cooldown": "Линия: подождите перед повтором.",
+    "cooldown not ready": "Сначала дождитесь обычного кулдауна.",
+    "zones overlap": "Зона пересекается с чужой.",
+  };
+  notifyReject(m[reason] || reason);
+}
+
+function applyWalletFromServer(msg) {
+  walletState = msg;
+  updateWalletBar();
+  updateShopAvailability();
+}
+
+function updateWalletBar() {
+  if (!walletBalanceEl) return;
+  const online = wantOnline && getWsUrl();
+  if (!online || !walletState) {
+    walletBalanceEl.hidden = true;
+    if (btnDeposit) btnDeposit.hidden = true;
+    if (btnShop) btnShop.hidden = true;
+    return;
+  }
+  walletBalanceEl.hidden = false;
+  if (btnDeposit) btnDeposit.hidden = spectatorMode || !!walletState.devUnlimited;
+  if (btnShop) btnShop.hidden = spectatorMode;
+  if (walletState.devUnlimited) {
+    walletBalanceEl.textContent = "💰 ∞ USDT (тест)";
+    walletBalanceEl.title = "Режим теста на сервере: бесконечный баланс";
+  } else {
+    const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
+    walletBalanceEl.textContent = `💰 ${b.toFixed(2)} USDT`;
+  }
+  const cd = walletState.cooldownMs || 30000;
+  const la = walletState.lastActionAt || 0;
+  const left = Math.max(0, la + cd - Date.now());
+  if (left > 500 && !spectatorMode) {
+    walletBalanceEl.title = `След. ход ~${(left / 1000).toFixed(1)} с`;
+  } else {
+    walletBalanceEl.title = "Внутренний баланс (без вывода)";
+  }
+}
+
+function updateShopAvailability() {
+  if (!shopStageHint || !walletState) return;
+  const st = walletState.tournamentStage || "MASS_BATTLE";
+  const hints = {
+    MASS_BATTLE: "Стадия: массовая битва — все покупки доступны.",
+    SEMI_FINAL: "Полуфинал: без линии, рейда и зоны щита.",
+    FINAL: "Финал: только апгрейд кулдауна и щит на пиксель.",
+    DUEL: "Дуэль 1 на 1: без платных преимуществ.",
+    GRAND_FINAL: "Гранд-финал / зритель: без платных преимуществ.",
+  };
+  shopStageHint.textContent = hints[st] || st;
+  const dis =
+    walletState.devUnlimited === true
+      ? false
+      : st === "GRAND_FINAL" || st === "DUEL" || spectatorMode;
+  const semi = st === "SEMI_FINAL";
+  const fin = st === "FINAL";
+  document.querySelectorAll(".shop-btn").forEach((btn) => {
+    btn.disabled = !!dis;
+  });
+  const lineIds = ["shop-line-up", "shop-line-down", "shop-line-left", "shop-line-right"];
+  lineIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!dis || semi || fin;
+  });
+  ["shop-raid", "shop-zone-mode"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!dis || semi || fin;
+  });
+  ["shop-speed", "shop-team-boost"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !!dis || fin;
+  });
+  const sh = document.getElementById("shop-shield-mode");
+  if (sh) sh.disabled = !!dis || fin;
+  const up = document.getElementById("shop-upgrade");
+  if (up) up.disabled = !!dis;
+  if (shopEffects && walletState.teamEffects) {
+    const te = walletState.teamEffects;
+    const now = Date.now();
+    const parts = [];
+    if (te.teamBoostUntil > now) parts.push(`Командный буст до ${fmtTime(te.teamBoostUntil)}`);
+    if (te.raidBoostUntil > now) parts.push(`Рейд до ${fmtTime(te.raidBoostUntil)}`);
+    if (te.shieldZone && te.shieldZone.until > now) {
+      parts.push(`Зона щита до ${fmtTime(te.shieldZone.until)}`);
+    }
+    if (walletState.speedBoostUntil > now) parts.push(`Личное ускорение до ${fmtTime(walletState.speedBoostUntil)}`);
+    shopEffects.textContent = parts.length ? parts.join(" · ") : "Нет активных бустов.";
+  }
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function setupEconomyUi() {
+  btnDeposit?.addEventListener("click", () => {
+    if (depositOverlay) depositOverlay.hidden = false;
+    if (depositError) depositError.hidden = true;
+  });
+  depositCancel?.addEventListener("click", () => {
+    if (depositOverlay) depositOverlay.hidden = true;
+  });
+  depositOverlay?.addEventListener("click", (e) => {
+    if (e.target === depositOverlay) depositOverlay.hidden = true;
+  });
+  document.querySelectorAll(".deposit-amt").forEach((b) => {
+    b.addEventListener("click", () => {
+      const a = Number(b.dataset.amt);
+      if (depositCustom) depositCustom.value = String(a);
+    });
+  });
+  depositSubmit?.addEventListener("click", async () => {
+    const raw = depositCustom?.value.trim() || "10";
+    const amount = parseFloat(raw.replace(",", "."));
+    if (!Number.isFinite(amount) || amount < 1) {
+      if (depositError) {
+        depositError.textContent = "Укажите сумму от 1 USDT.";
+        depositError.hidden = false;
+      }
+      return;
+    }
+    try {
+      const res = await fetch(`${location.origin}/api/deposit/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playerKey: getOrCreatePlayerKey(),
+          amount,
+          initData: getTelegramInitDataForServer(),
+        }),
+      });
+      const j = await res.json();
+      if (!j.ok || !j.paymentUrl) {
+        if (depositError) {
+          depositError.textContent = j.error || "Не удалось создать счёт (проверьте NOWPAYMENTS_API_KEY и PUBLIC_BASE_URL на сервере).";
+          depositError.hidden = false;
+        }
+        return;
+      }
+      if (depositOverlay) depositOverlay.hidden = true;
+      const tg = window.Telegram?.WebApp;
+      if (typeof tg?.openLink === "function") tg.openLink(j.paymentUrl);
+      else window.open(j.paymentUrl, "_blank", "noopener");
+    } catch (e) {
+      if (depositError) {
+        depositError.textContent = String(e.message || e);
+        depositError.hidden = false;
+      }
+    }
+  });
+
+  btnShop?.addEventListener("click", () => {
+    if (shopOverlay) shopOverlay.hidden = false;
+    updateShopAvailability();
+    setPendingHint();
+  });
+  shopClose?.addEventListener("click", () => {
+    if (shopOverlay) shopOverlay.hidden = true;
+    pendingMapAction = null;
+    setPendingHint();
+  });
+  shopOverlay?.addEventListener("click", (e) => {
+    if (e.target === shopOverlay) {
+      shopOverlay.hidden = true;
+      pendingMapAction = null;
+      setPendingHint();
+    }
+  });
+
+  document.querySelectorAll(".shop-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const action = btn.dataset.action;
+      if (action === "speed") {
+        wsSendJson({ type: "activateSpeedBoost" });
+        return;
+      }
+      if (action === "upgrade") {
+        wsSendJson({ type: "purchaseCooldownUpgrade" });
+        return;
+      }
+      if (action === "teamBoost") {
+        wsSendJson({ type: "purchaseTeamBoost" });
+        return;
+      }
+      if (action === "raid") {
+        wsSendJson({ type: "purchaseRaidBoost" });
+        return;
+      }
+      if (action === "shieldMode") {
+        pendingMapAction = { type: "shieldPixel" };
+        setPendingHint();
+        if (shopOverlay) shopOverlay.hidden = true;
+        return;
+      }
+      if (action === "zoneMode") {
+        pendingMapAction = { type: "zone" };
+        setPendingHint();
+        if (shopOverlay) shopOverlay.hidden = true;
+        return;
+      }
+      if (action === "line") {
+        pendingMapAction = { type: "line", dir: btn.dataset.dir || "up" };
+        setPendingHint();
+        if (shopOverlay) shopOverlay.hidden = true;
+      }
+    });
+  });
+
+  setInterval(() => {
+    if (walletState) updateWalletBar();
+  }, 1000);
+}
+
+function setPendingHint() {
+  const text = (() => {
+    if (!pendingMapAction) return "";
+    if (pendingMapAction.type === "line") return `Линия ${pendingMapAction.dir}: тап по карте`;
+    if (pendingMapAction.type === "shieldPixel") return "Щит: тап по своему пикселю";
+    if (pendingMapAction.type === "zone") return "Зона 4×4: тап по центру";
+    return "";
+  })();
+  if (shopPending) {
+    shopPending.hidden = !text;
+    shopPending.textContent = text;
+  }
+  if (cooldownLabel && text) {
+    cooldownLabel.hidden = false;
+    cooldownLabel.textContent = text;
+  } else if (cooldownLabel && !text) {
+    cooldownLabel.hidden = true;
+  }
+}
+
+function wsSendJson(obj) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ ...obj, playerKey: getOrCreatePlayerKey() }));
+  } catch {
+    /* ignore */
   }
 }
 
@@ -1164,6 +1455,7 @@ function connectWs() {
             type: "clientProfile",
             playerKey: getOrCreatePlayerKey(),
             telegramUser: getTelegramUserForServer(),
+            initData: getTelegramInitDataForServer(),
           })
         );
       }
@@ -1227,7 +1519,9 @@ function connectWs() {
       applyGridFromServer(gw, gh).then(() => {
         const tg = window.Telegram?.WebApp;
         const cap = typeof msg.maxPerTeam === "number" ? msg.maxPerTeam : maxPerTeam;
-        const text = `Раунд завершён. Победитель: «${msg.winnerName || "—"}». Новая карта; в команде до ${cap} чел.`;
+        const text = msg.duel
+          ? `Финал команд завершён. Победитель: «${msg.winnerName || "—"}». Дуэль 1 на 1 на той же сетке; в команде до ${cap} чел.`
+          : `Раунд завершён. Победитель: «${msg.winnerName || "—"}». Новая карта; в команде до ${cap} чел.`;
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         else if (typeof window.alert === "function") window.alert(text);
         setFooterMode();
@@ -1255,6 +1549,18 @@ function connectWs() {
         localStorage.removeItem(ROUND_ELIGIBLE_KEY);
       } catch {
         /* ignore */
+      }
+      if (msg.reason === "not_eligible") {
+        const tg = window.Telegram?.WebApp;
+        const text = "Этот аккаунт не допущен в текущий раунд турнира.";
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else if (typeof window.alert === "function") window.alert(text);
+      }
+      if (msg.reason === "rate") {
+        const tg = window.Telegram?.WebApp;
+        const text = "Слишком много попыток с токеном. Подождите минуту.";
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else if (typeof window.alert === "function") window.alert(text);
       }
       return;
     }
@@ -1327,7 +1633,8 @@ function connectWs() {
         already: "Сначала выйдите из текущей команды.",
         fields: "Введите имя и выберите цвет.",
         limit: "Достигнут лимит команд на сервере.",
-        round: "В третьем раунде доступны только команды до 2 человек (соло недоступно).",
+        round:
+          "В финале команд (команды по 2 человека) соло недоступно — создайте команду из двух или вступите в существующую.",
       };
       const text = map[msg.reason] || "Не удалось начать соло.";
       const tg = window.Telegram?.WebApp;
@@ -1366,6 +1673,7 @@ function connectWs() {
         already: "Сначала выйдите из текущей команды (кнопка «Выйти из команды»).",
         fields: "Укажите название, смайлик и цвет команды.",
         limit: "Достигнут лимит команд на сервере.",
+        duel: "Финальная дуэль 1 на 1 — только соло; публичные команды недоступны.",
       };
       const text = map[msg.reason] || "Не удалось создать команду.";
       const tg = window.Telegram?.WebApp;
@@ -1410,7 +1718,7 @@ function connectWs() {
       if (msg.reason === "round") {
         const tg = window.Telegram?.WebApp;
         const text =
-          "В третьем раунде соло недоступно — создайте команду из двух человек или вступите в существующую.";
+          "В финале команд (команды по 2) соло недоступно — создайте команду из двух человек или вступите в существующую.";
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         if (welcomeOverlay) welcomeOverlay.hidden = false;
         teamOverlay.hidden = true;
@@ -1430,6 +1738,15 @@ function connectWs() {
       return;
     }
     if (msg.type === "joinError") {
+      if (msg.reason === "duel") {
+        const tg = window.Telegram?.WebApp;
+        const text = "В дуэли 1 на 1 нельзя вступать в чужие команды — только своё соло.";
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else alert(text);
+        rebuildTeamList();
+        setFooterMode();
+        return;
+      }
       if (msg.reason === "full" || msg.reason === "team") {
         clearTeamIdentityFromSession();
         stripTeamFromUrl();
@@ -1470,8 +1787,13 @@ function connectWs() {
       pixels.clear();
       for (const p of msg.pixels || []) {
         if (!Array.isArray(p) || p.length < 3) continue;
-        const [x, y, t] = p;
-        pixels.set(`${x},${y}`, t);
+        if (msg.pixelFormat === "v2" && p.length >= 5) {
+          const [x, y, t, , sh] = p;
+          pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: sh || 0 });
+        } else {
+          const [x, y, t] = p;
+          pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: 0 });
+        }
       }
       draw();
       if (wantOnline) flushToStorage();
@@ -1479,13 +1801,36 @@ function connectWs() {
       return;
     }
     if (msg.type === "pixel") {
-      pixels.set(`${msg.x},${msg.y}`, msg.t);
+      pixels.set(`${msg.x},${msg.y}`, {
+        teamId: msg.t,
+        shieldedUntil: typeof msg.shieldedUntil === "number" ? msg.shieldedUntil : 0,
+      });
       draw();
       schedulePersist();
       return;
     }
+    if (msg.type === "wallet") {
+      applyWalletFromServer(msg);
+      return;
+    }
+    if (msg.type === "purchaseError") {
+      notifyPurchaseError(msg.reason || "");
+      return;
+    }
+    if (msg.type === "teamEffect") {
+      if (walletState && msg.teamId === myTeamId && walletState.teamEffects) {
+        const te = walletState.teamEffects;
+        if (msg.kind === "teamBoost") te.teamBoostUntil = msg.until;
+        if (msg.kind === "raidBoost") te.raidBoostUntil = msg.until;
+        if (msg.kind === "shieldZone") {
+          te.shieldZone = { cx: msg.cx, cy: msg.cy, until: msg.until };
+        }
+        updateShopAvailability();
+      }
+      return;
+    }
     if (msg.type === "pixelReject") {
-      if (msg.reason !== "cooldown") {
+      if (msg.reason !== "cooldown" && msg.reason !== "cooldown not ready") {
         lastPlaceAt = 0;
       }
       notifyReject(msg.reason || "");
@@ -1514,7 +1859,9 @@ function connectWs() {
 function sendPixelOnline(gx, gy) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
-    ws.send(JSON.stringify({ type: "pixel", x: gx, y: gy }));
+    ws.send(
+      JSON.stringify({ type: "pixel", x: gx, y: gy, playerKey: getOrCreatePlayerKey() })
+    );
   } catch {
     /* буфер/закрытие — не роняем UI */
   }
@@ -1620,6 +1967,12 @@ function draw() {
           const tid = typeof owner === "number" ? owner : owner.teamId;
           ctx.fillStyle = teamColor(tid);
           ctx.fillRect(px, py, cw, ch);
+          const sh = typeof owner === "object" && owner ? owner.shieldedUntil || 0 : 0;
+          if (sh > Date.now()) {
+            ctx.strokeStyle = "rgba(80, 200, 255, 0.85)";
+            ctx.lineWidth = Math.max(1, cell * 0.08);
+            ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+          }
         } else {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
           ctx.fillRect(px, py, cw, ch);
@@ -1668,8 +2021,36 @@ function placePixel(gx, gy) {
     }
   }
 
+  if (online && pendingMapAction) {
+    if (pendingMapAction.type === "line") {
+      wsSendJson({ type: "lineCapture", x: gx, y: gy, dir: pendingMapAction.dir });
+      pendingMapAction = null;
+      setPendingHint();
+      return;
+    }
+    if (pendingMapAction.type === "zone") {
+      wsSendJson({ type: "purchaseTeamShieldZone", x: gx, y: gy });
+      pendingMapAction = null;
+      setPendingHint();
+      return;
+    }
+    if (pendingMapAction.type === "shieldPixel") {
+      wsSendJson({ type: "purchaseShieldPixel", x: gx, y: gy });
+      pendingMapAction = null;
+      setPendingHint();
+      return;
+    }
+  }
+
   const now = Date.now();
-  if (COOLDOWN_MS > 0 && now - lastPlaceAt < COOLDOWN_MS) {
+  if (online && walletState) {
+    const cd = walletState.cooldownMs || 30000;
+    const la = walletState.lastActionAt || 0;
+    if (now < la + cd) {
+      showCooldown(la + cd - now);
+      return;
+    }
+  } else if (COOLDOWN_MS > 0 && now - lastPlaceAt < COOLDOWN_MS) {
     showCooldown(COOLDOWN_MS - (now - lastPlaceAt));
     return;
   }
@@ -1899,6 +2280,7 @@ async function bootstrap() {
   setupCreateTeamUi();
   setupToolbarSession();
   setupGestures();
+  setupEconomyUi();
 
   setInterval(updateRoundTimer, 1000);
 

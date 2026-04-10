@@ -10,11 +10,74 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { WebSocketServer } from "ws";
+import {
+  COOLDOWN_LEVELS,
+  DURATIONS_MS,
+  LINE_CAPTURE_COOLDOWN_MS,
+  MAX_COOLDOWN_LEVEL,
+  PRICES,
+  getCurrentCooldownMs,
+  stageAllows,
+  tournamentStage,
+  upgradePriceForNextLevel,
+} from "./lib/tournament-economy.js";
+import { WalletStore } from "./lib/wallet-store.js";
+import {
+  createNowpaymentInvoice,
+  verifyNowpaymentsSignature,
+  verifyNowpaymentsSignatureRaw,
+} from "./lib/nowpayments-api.js";
+import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
+import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT) || 3847;
 const WS_PATH = "/ws";
+
+const DATA_DIR = path.join(ROOT, "data");
+const walletStore = new WalletStore({ dataDir: DATA_DIR });
+
+const NOWPAYMENTS_API_KEY = (process.env.NOWPAYMENTS_API_KEY || "").trim();
+const NOWPAYMENTS_IPN_SECRET = (process.env.NOWPAYMENTS_IPN_SECRET || "").trim();
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.APP_URL || "").replace(/\/$/, "");
+
+const TRUST_PROXY = /^(1|true|yes)$/i.test(String(process.env.TRUST_PROXY || "").trim());
+const WS_MAX_CONN_PER_IP = Math.min(200, Math.max(3, Number(process.env.WS_MAX_CONN_PER_IP) || 40));
+const WS_MSG_PER_SEC = Math.min(200, Math.max(8, Number(process.env.WS_MSG_PER_SEC) || 45));
+const WS_PIXEL_BURST_PER_SEC = Math.min(40, Math.max(2, Number(process.env.WS_PIXEL_BURST_PER_SEC) || 10));
+const API_DEPOSIT_PER_MIN = Math.min(500, Math.max(2, Number(process.env.API_DEPOSIT_PER_MIN) || 25));
+const API_IPN_PER_MIN = Math.min(20000, Math.max(20, Number(process.env.API_IPN_PER_MIN) || 400));
+const MAX_DEPOSIT_USDT = Math.min(1e9, Math.max(1, Number(process.env.MAX_DEPOSIT_USDT) || 100_000));
+const TELEGRAM_INITDATA_MAX_AGE_SEC = Math.min(604800, Math.max(120, Number(process.env.TELEGRAM_INITDATA_MAX_AGE_SEC) || 86400));
+const HTTP_BODY_MAX = Math.min(2_000_000, Math.max(4096, Number(process.env.HTTP_BODY_MAX) || 65536));
+
+const apiDepositLimiter = new SlidingWindowRateLimiter();
+const apiIpnLimiter = new SlidingWindowRateLimiter();
+const wsMsgLimiter = new SlidingWindowRateLimiter();
+const wsPixelBurstLimiter = new SlidingWindowRateLimiter();
+const claimAttemptLimiter = new SlidingWindowRateLimiter();
+const wsJoinLimiter = new SlidingWindowRateLimiter();
+
+/** @type {Map<string, number>} IP → число активных WS (best-effort). */
+const activeWsByIp = new Map();
+
+/** IP клиента; X-Forwarded-For только при TRUST_PROXY=1 (за доверенным прокси). */
+function getClientIpFromReq(req) {
+  if (!req || !req.socket) return "0.0.0.0";
+  let raw = "";
+  if (TRUST_PROXY) {
+    const xff = req.headers["x-forwarded-for"];
+    if (typeof xff === "string" && xff.trim()) {
+      raw = xff.split(",")[0].trim();
+    }
+  }
+  if (!raw) {
+    raw = req.socket.remoteAddress || "";
+    raw = raw.replace(/^::ffff:/, "");
+  }
+  return raw.slice(0, 64) || "0.0.0.0";
+}
 
 const BASE_GRID = 320;
 /** После 1-го раунда сетка ÷5, после 2-го ещё ÷3 (итого 320→64→21). */
@@ -22,6 +85,7 @@ const ROUND2_DIV = 5;
 const ROUND3_DIV = 3;
 let gridW = BASE_GRID;
 let gridH = BASE_GRID;
+/** @deprecated используйте getCurrentCooldownMs для игрока */
 const COOLDOWN_MS = 0;
 /** Длительность раунда по умолчанию (100 ч); фактическое значение — roundDurationMs (задаётся «go 12» и т.д.) */
 const ROUND_MS = 100 * 60 * 60 * 1000;
@@ -47,7 +111,27 @@ const TELEGRAM_ADMIN_IDS = new Set(
 /** Первый раунд ждёт «go» в Telegram, только если задан бот и хотя бы один admin id */
 const WAIT_FOR_TELEGRAM_GO = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size > 0);
 
-/** @type {number} 0 = первый раунд (200 чел.), 1 = второй (10), 2 = третий (2), 3 = игра завершена */
+/** Числовые Telegram user id: бесконечный баланс и обход кулдаунов/ограничений магазина (только при playerKey tg_<id>). */
+function buildDevUnlimitedWalletTgSet() {
+  const s = new Set();
+  for (const id of (process.env.DEV_UNLIMITED_WALLET_TG_IDS || "").split(",")) {
+    const n = Number(String(id).trim());
+    if (Number.isFinite(n)) s.add(n);
+  }
+  if (/^(1|true|yes)$/i.test(String(process.env.DEV_UNLIMITED_WALLET_MATCH_ADMIN || "").trim())) {
+    for (const id of TELEGRAM_ADMIN_IDS) s.add(id);
+  }
+  return s;
+}
+const DEV_UNLIMITED_WALLET_TG_IDS = buildDevUnlimitedWalletTgSet();
+
+function isDevUnlimitedWallet(pk) {
+  const m = /^tg_(\d+)$/.exec(sanitizePlayerKey(pk));
+  if (!m) return false;
+  return DEV_UNLIMITED_WALLET_TG_IDS.has(Number(m[1]));
+}
+
+/** @type {number} 0..3 — игровые раунды; после финала gameFinished и roundIndex может быть 3 (последний сыгранный). */
 let roundIndex = 0;
 /** @type {number} */
 let roundStartMs = Date.now();
@@ -65,8 +149,10 @@ const teamMemberKeys = new Map();
 /** playerKey → { id, username } — данные из Mini App для уведомления о финальных победителях */
 const playerTelegramMeta = new Map();
 let roundEnding = false;
-/** После третьего раунда — только просмотр, новых игроков нет */
+/** После финала дуэли — только просмотр, новых игроков нет */
 let gameFinished = false;
+/** Ключи playerKey, допущенные в текущий раунд (после 0-го — только победители прошлого). Пустой при roundIndex===0 = не используется. */
+let eligiblePlayerKeys = new Set();
 
 function sanitizeTeamName(s) {
   return String(s ?? "")
@@ -86,23 +172,88 @@ function sanitizePlayerKey(s) {
 }
 
 function attachPlayerKey(ws, msg) {
+  if (ws.telegramVerified) return;
+  if (TELEGRAM_BOT_TOKEN && roundIndex > 0) return;
   const pk = sanitizePlayerKey(msg?.playerKey);
   if (pk) ws.playerKey = pk;
 }
 
-/** Сохраняет Telegram id/username для финального отчёта (до 2 человек в команде-победителе). */
+function setEligibleKeysFromWinnerTeam(teamId, maxKeys) {
+  const raw = [...(teamMemberKeys.get(teamId) || [])].map(sanitizePlayerKey).filter(Boolean);
+  if (typeof maxKeys === "number" && maxKeys > 0) {
+    eligiblePlayerKeys = new Set(raw.slice(0, maxKeys));
+  } else {
+    eligiblePlayerKeys = new Set(raw);
+  }
+}
+
+function isPlayerKeyEligibleForCurrentRound(pk) {
+  const k = sanitizePlayerKey(pk);
+  if (!k) return false;
+  if (roundIndex === 0) return true;
+  if (eligiblePlayerKeys.size > 0) return eligiblePlayerKeys.has(k);
+  return Object.prototype.hasOwnProperty.call(winnerTokensByPlayerKey, k);
+}
+
+function applyEligibilityFromServerState(ws) {
+  if (gameFinished) {
+    ws.eligible = false;
+    return;
+  }
+  const pk = sanitizePlayerKey(ws.playerKey);
+  if (!pk) {
+    ws.eligible = roundIndex === 0;
+    return;
+  }
+  if (roundIndex === 0) {
+    ws.eligible = true;
+    return;
+  }
+  if (!isPlayerKeyEligibleForCurrentRound(pk)) {
+    ws.eligible = false;
+    return;
+  }
+  const tok = winnerTokensByPlayerKey[pk];
+  ws.eligible = !!(tok && eligibleTokenSet.has(tok));
+}
+
+/** Сохраняет Telegram id/username для финального отчёта; при валидном initData жёстко привязывает playerKey к tg_<id>. */
 function rememberPlayerProfile(ws, msg) {
-  attachPlayerKey(ws, msg);
+  const initData = typeof msg?.initData === "string" ? msg.initData : "";
+  if (TELEGRAM_BOT_TOKEN && initData) {
+    const v = verifyTelegramWebAppInitData(initData, TELEGRAM_BOT_TOKEN, {
+      maxAgeSec: TELEGRAM_INITDATA_MAX_AGE_SEC,
+    });
+    if (v) {
+      ws.telegramVerified = true;
+      const pk = sanitizePlayerKey(`tg_${v.id}`);
+      ws.playerKey = pk;
+      const username = typeof v.username === "string" ? v.username.trim().slice(0, 64) : "";
+      const prev = playerTelegramMeta.get(pk);
+      playerTelegramMeta.set(pk, {
+        id: v.id | 0,
+        username: username || prev?.username || "",
+      });
+    }
+  }
+  if (!ws.telegramVerified) {
+    attachPlayerKey(ws, msg);
+  }
   const tu = msg?.telegramUser;
-  if (!tu || typeof tu.id !== "number") return;
-  const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
-  if (!pk) return;
-  const username = typeof tu.username === "string" ? tu.username.trim().slice(0, 64) : "";
-  const prev = playerTelegramMeta.get(pk);
-  playerTelegramMeta.set(pk, {
-    id: tu.id | 0,
-    username: username || prev?.username || "",
-  });
+  if (!ws.telegramVerified && tu && typeof tu.id === "number") {
+    const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
+    if (!pk) {
+      applyEligibilityFromServerState(ws);
+      return;
+    }
+    const username = typeof tu.username === "string" ? tu.username.trim().slice(0, 64) : "";
+    const prev = playerTelegramMeta.get(pk);
+    playerTelegramMeta.set(pk, {
+      id: tu.id | 0,
+      username: username || prev?.username || "",
+    });
+  }
+  applyEligibilityFromServerState(ws);
 }
 
 function addTeamMemberKey(teamId, playerKey) {
@@ -198,7 +349,9 @@ function getMaxPerTeam() {
   if (gameFinished) return 0;
   if (roundIndex === 0) return MAX_PER_TEAM_FIRST;
   if (roundIndex === 1) return MAX_PER_TEAM_NEXT;
-  return MAX_PER_TEAM_FINAL;
+  if (roundIndex === 2) return MAX_PER_TEAM_FINAL;
+  if (roundIndex === 3) return 1;
+  return 0;
 }
 
 function saveRoundState() {
@@ -212,6 +365,7 @@ function saveRoundState() {
         roundDurationMs,
         roundTimerStarted,
         eligibleTokens: [...eligibleTokenSet],
+        eligiblePlayerKeys: [...eligiblePlayerKeys],
         gameFinished,
         winnerTokensByPlayerKey,
       }),
@@ -239,8 +393,10 @@ function loadRoundState() {
         roundTimerStarted = true;
       }
       eligibleTokenSet = new Set(Array.isArray(j.eligibleTokens) ? j.eligibleTokens : []);
+      eligiblePlayerKeys = new Set(
+        Array.isArray(j.eligiblePlayerKeys) ? j.eligiblePlayerKeys.map(sanitizePlayerKey).filter(Boolean) : []
+      );
       if (typeof j.gameFinished === "boolean") gameFinished = j.gameFinished;
-      if (roundIndex >= 3) gameFinished = true;
       if (j.winnerTokensByPlayerKey && typeof j.winnerTokensByPlayerKey === "object" && !Array.isArray(j.winnerTokensByPlayerKey)) {
         winnerTokensByPlayerKey = {};
         for (const [k, v] of Object.entries(j.winnerTokensByPlayerKey)) {
@@ -253,6 +409,9 @@ function loadRoundState() {
         }
       } else {
         winnerTokensByPlayerKey = {};
+      }
+      if (eligiblePlayerKeys.size === 0 && roundIndex > 0 && winnerTokensByPlayerKey && typeof winnerTokensByPlayerKey === "object") {
+        eligiblePlayerKeys = new Set(Object.keys(winnerTokensByPlayerKey).map(sanitizePlayerKey).filter(Boolean));
       }
       if (roundIndex >= 1 || gameFinished) roundTimerStarted = true;
     } else {
@@ -312,14 +471,14 @@ let landGrid = null;
 /** Знаменатель для «% территории» — все клетки текущей сетки (w×h). */
 let landPixelsTotal = BASE_GRID * BASE_GRID;
 
-/** Размер стороны сетки по индексу раунда (0: 320, 1: 64, 2: 21). */
+/** Размер стороны сетки по индексу раунда (0: 320, 1: 64, 2+ : 21 — в т.ч. дуэль 1v1). */
 function gridSizeForRoundIndex(ri) {
   if (ri <= 0) return BASE_GRID;
   if (ri === 1) return Math.max(1, Math.floor(BASE_GRID / ROUND2_DIV));
   return Math.max(1, Math.floor(BASE_GRID / ROUND2_DIV / ROUND3_DIV));
 }
 
-/** @param {number} ri — 0: 320×320, 1: 64×64, 2: 21×21 */
+/** @param {number} ri — 0: 320×320, 1: 64×64, 2+: 21×21 */
 function rebuildLandFromRound(ri) {
   const w = gridSizeForRoundIndex(ri);
   const h = w;
@@ -363,7 +522,7 @@ function applyRoundShapeMask(ri, buf, w, h) {
     }
     return;
   }
-  if (ri === 2) {
+  if (ri >= 2) {
     const cx = (w - 1) / 2;
     const cy = (h - 1) / 2;
     const R = Math.floor((Math.min(w, h) - 1) / 2);
@@ -376,13 +535,72 @@ function applyRoundShapeMask(ri, buf, w, h) {
   }
 }
 
-/** @type {Map<string, number>} key "x,y" → teamId */
+/** @type {Map<string, { teamId: number, ownerPlayerKey: string, shieldedUntil: number } | number>} */
 const pixels = new Map();
+
+/** @type {Map<number, { teamBoostUntil: number, raidBoostUntil: number, shieldZone: { cx: number, cy: number, until: number } | null }>} */
+const teamEffects = new Map();
 
 function pixelTeam(val) {
   if (val && typeof val === "object") return val.teamId;
   return val;
 }
+
+function normalizePixel(val) {
+  if (val == null) {
+    return { teamId: 0, ownerPlayerKey: "", shieldedUntil: 0 };
+  }
+  if (typeof val === "object") {
+    return {
+      teamId: val.teamId | 0,
+      ownerPlayerKey: String(val.ownerPlayerKey || "").slice(0, 128),
+      shieldedUntil: Number(val.shieldedUntil) || 0,
+    };
+  }
+  const tid = Number(val) | 0;
+  return { teamId: tid, ownerPlayerKey: "", shieldedUntil: 0 };
+}
+
+function clearTeamEffectsMap() {
+  teamEffects.clear();
+}
+
+function getTeamFx(tid) {
+  if (!teamEffects.has(tid)) {
+    teamEffects.set(tid, { teamBoostUntil: 0, raidBoostUntil: 0, shieldZone: null });
+  }
+  return teamEffects.get(tid);
+}
+
+function zoneRect4(cx, cy) {
+  return { x0: cx - 1, y0: cy - 1, x1: cx + 2, y1: cy + 2 };
+}
+
+function rectsOverlap(a, b) {
+  return !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
+}
+
+/** @returns {string | null} причина отказа или null если можно ставить */
+function placementBlocked(x, y, attackerTeamId, now) {
+  for (const [tid, fx] of teamEffects) {
+    const z = fx.shieldZone;
+    if (!z || z.until <= now) continue;
+    const r = zoneRect4(z.cx, z.cy);
+    if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) {
+      if (attackerTeamId !== tid) return "pixel is shielded";
+    }
+  }
+  const raw = normalizePixel(pixels.get(`${x},${y}`));
+  if (raw.teamId && raw.teamId !== attackerTeamId && raw.shieldedUntil > now) {
+    return "pixel is shielded";
+  }
+  return null;
+}
+
+function lineCaptureBlocked(x, y, attackerTeamId, now) {
+  return placementBlocked(x, y, attackerTeamId, now);
+}
+
 /** @type {Map<object, number>} */
 const lastPlace = new WeakMap();
 /** @type {Map<number, number>} teamId -> число игроков */
@@ -391,7 +609,7 @@ const teamPlayerCounts = new Map();
 loadDynamicTeams();
 loadRoundState();
 if (gameFinished) {
-  rebuildLandFromRound(2);
+  rebuildLandFromRound(Math.min(Math.max(roundIndex, 2), 3));
 } else {
   rebuildLandFromRound(roundIndex);
 }
@@ -419,7 +637,10 @@ function serveStatic(req, res) {
       return;
     }
     const ext = path.extname(full).toLowerCase();
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    res.writeHead(200, {
+      "Content-Type": MIME[ext] || "application/octet-stream",
+      "X-Content-Type-Options": "nosniff",
+    });
     fs.createReadStream(full).pipe(res);
   });
 }
@@ -428,10 +649,44 @@ function fullPayload() {
   const list = [];
   for (const [key, val] of pixels) {
     const [x, y] = key.split(",").map(Number);
-    const tid = pixelTeam(val);
-    list.push([x, y, tid]);
+    const p = normalizePixel(val);
+    list.push([x, y, p.teamId, p.ownerPlayerKey, p.shieldedUntil]);
   }
-  return JSON.stringify({ type: "full", pixels: list });
+  return JSON.stringify({ type: "full", pixels: list, pixelFormat: "v2" });
+}
+
+function buildWalletPayload(ws) {
+  const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
+  const u = walletStore.getOrCreateUser(pk);
+  const st = tournamentStage(roundIndex, gameFinished);
+  const tid = ws.teamId | 0;
+  const fx = tid ? getTeamFx(tid) : { teamBoostUntil: 0, raidBoostUntil: 0, shieldZone: null };
+  const devUnl = pk && isDevUnlimitedWallet(pk);
+  const cd = devUnl
+    ? 0
+    : pk
+      ? getCurrentCooldownMs(u, fx, st)
+      : COOLDOWN_LEVELS[0].sec * 1000;
+  return {
+    type: "wallet",
+    balanceUSDT: devUnl ? 999999999 : u.balanceUSDT,
+    cooldownUpgradeLevel: u.cooldownUpgradeLevel,
+    cooldownMs: cd,
+    speedBoostUntil: u.speedBoostUntil,
+    lastActionAt: u.lastActionAt,
+    lastLineCaptureAt: u.lastLineCaptureAt,
+    tournamentStage: st,
+    roundIndex,
+    devUnlimited: !!devUnl,
+    teamEffects: tid
+      ? {
+          teamId: tid,
+          teamBoostUntil: fx.teamBoostUntil,
+          raidBoostUntil: fx.raidBoostUntil,
+          shieldZone: fx.shieldZone,
+        }
+      : null,
+  };
 }
 
 /** Безопасная отправка одному клиенту (не роняет процесс при закрытом/битом сокете). */
@@ -458,9 +713,232 @@ function broadcast(obj) {
   }
 }
 
-const server = http.createServer(serveStatic);
+async function readRequestBody(req, maxBytes = HTTP_BODY_MAX) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (c) => {
+      total += c.length;
+      if (total > maxBytes) {
+        try {
+          req.destroy();
+        } catch {
+          /* ignore */
+        }
+        reject(new Error("body too large"));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
 
-const wss = new WebSocketServer({ server, path: WS_PATH, maxPayload: 262144 });
+async function handleApi(req, res) {
+  const url = (req.url || "").split("?")[0];
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  const clientIp = getClientIpFromReq(req);
+
+  if (req.method === "POST" && url === "/api/ipn") {
+    if (!apiIpnLimiter.allow(`ipn:${clientIp}`, API_IPN_PER_MIN, 60_000)) {
+      res.writeHead(429);
+      res.end(JSON.stringify({ ok: false, error: "rate limit" }));
+      return;
+    }
+    let rawBuf;
+    try {
+      rawBuf = await readRequestBody(req);
+    } catch {
+      res.writeHead(413);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    const raw = rawBuf.toString("utf8");
+    let body;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    const sig =
+      req.headers["x-nowpayments-sig"] ||
+      req.headers["x-nowpayments-signature"] ||
+      body.signature ||
+      "";
+    const okSig =
+      verifyNowpaymentsSignature(body, String(sig), NOWPAYMENTS_IPN_SECRET) ||
+      verifyNowpaymentsSignatureRaw(raw, String(sig), NOWPAYMENTS_IPN_SECRET);
+    if (!NOWPAYMENTS_IPN_SECRET || !okSig) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ ok: false, error: "bad signature" }));
+      return;
+    }
+    const status = String(body.payment_status || body.status || "");
+    const finished = status === "finished" || status === "confirmed" || status === "partially_paid";
+    if (!finished) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, ignored: true }));
+      return;
+    }
+    const npId = body.payment_id ?? body.id;
+    if (npId == null || walletStore.isPaymentProcessed(npId)) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, duplicate: true }));
+      return;
+    }
+    const orderId = String(body.order_id || "");
+    const parts = orderId.split("|");
+    if (parts[0] !== "dep" || !parts[1]) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: false, error: "bad order" }));
+      return;
+    }
+    const playerKey = sanitizePlayerKey(parts[1]);
+    const amountUsd = Number(body.price_amount ?? body.actually_paid ?? body.pay_amount);
+    if (!playerKey || !Number.isFinite(amountUsd) || amountUsd <= 0) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    walletStore.markPaymentProcessed(npId);
+    walletStore.credit(playerKey, amountUsd, { nowPaymentId: String(npId), txHash: String(body.outcome_hash || "") });
+    res.writeHead(200);
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (req.method === "POST" && url === "/api/deposit/create") {
+    if (!apiDepositLimiter.allow(`dep:${clientIp}`, API_DEPOSIT_PER_MIN, 60_000)) {
+      res.writeHead(429);
+      res.end(JSON.stringify({ ok: false, error: "rate limit" }));
+      return;
+    }
+    if (!NOWPAYMENTS_API_KEY || !PUBLIC_BASE_URL) {
+      res.writeHead(503);
+      res.end(JSON.stringify({ ok: false, error: "deposits not configured" }));
+      return;
+    }
+    let rawBuf;
+    try {
+      rawBuf = await readRequestBody(req);
+    } catch {
+      res.writeHead(413);
+      res.end(JSON.stringify({ ok: false, error: "body too large" }));
+      return;
+    }
+    let body;
+    try {
+      body = JSON.parse(rawBuf.toString("utf8"));
+    } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    const playerKey = sanitizePlayerKey(body.playerKey);
+    const amount = Number(body.amount);
+    if (!playerKey || !Number.isFinite(amount) || amount < 1 || amount > MAX_DEPOSIT_USDT) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "bad request" }));
+      return;
+    }
+    if (TELEGRAM_BOT_TOKEN) {
+      const initData = typeof body.initData === "string" ? body.initData : "";
+      if (!initData.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "initData required" }));
+        return;
+      }
+      const v = verifyTelegramWebAppInitData(initData, TELEGRAM_BOT_TOKEN, {
+        maxAgeSec: TELEGRAM_INITDATA_MAX_AGE_SEC,
+      });
+      if (!v) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ ok: false, error: "bad initData" }));
+        return;
+      }
+      if (sanitizePlayerKey(`tg_${v.id}`) !== playerKey) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ ok: false, error: "playerKey mismatch" }));
+        return;
+      }
+    }
+    const orderId = `dep|${playerKey}|${Date.now()}`;
+    const ipnUrl = `${PUBLIC_BASE_URL}/api/ipn`;
+    try {
+      const inv = await createNowpaymentInvoice({
+        apiKey: NOWPAYMENTS_API_KEY,
+        amountUsd: amount,
+        orderId,
+        ipnUrl,
+        payCurrency: typeof body.payCurrency === "string" ? body.payCurrency : "usdttrc20",
+        successUrl: body.successUrl || `${PUBLIC_BASE_URL}/`,
+        cancelUrl: body.cancelUrl || `${PUBLIC_BASE_URL}/`,
+      });
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          ok: true,
+          paymentId: inv.id,
+          paymentUrl: inv.paymentUrl || inv.raw?.invoice_url,
+          payAddress: inv.payAddress,
+          orderId,
+        })
+      );
+    } catch (e) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
+    }
+    return;
+  }
+
+  res.writeHead(404);
+  res.end(JSON.stringify({ ok: false }));
+}
+
+const server = http.createServer((req, res) => {
+  const u = (req.url || "").split("?")[0];
+  if (u.startsWith("/api/")) {
+    handleApi(req, res).catch((e) => {
+      res.writeHead(500);
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
+    });
+    return;
+  }
+  serveStatic(req, res);
+});
+
+let wsConnSeq = 0;
+
+const wss = new WebSocketServer({
+  server,
+  path: WS_PATH,
+  maxPayload: 131072,
+  verifyClient: (info) => {
+    const ip = getClientIpFromReq(info.req);
+    if ((activeWsByIp.get(ip) || 0) >= WS_MAX_CONN_PER_IP) return false;
+    return wsJoinLimiter.allow(`wsjoin:${ip}`, 90, 60_000);
+  },
+});
+
+setInterval(() => {
+  apiDepositLimiter.prune();
+  apiIpnLimiter.prune();
+  wsMsgLimiter.prune();
+  wsPixelBurstLimiter.prune();
+  claimAttemptLimiter.prune();
+  wsJoinLimiter.prune();
+}, 120000);
+
+function broadcastWalletToAll() {
+  for (const client of wss.clients) {
+    if (client.readyState !== 1) continue;
+    safeSend(client, buildWalletPayload(client));
+  }
+}
 
 function countOnlineClients() {
   let n = 0;
@@ -526,6 +1004,14 @@ function assertCanPlay(ws) {
     safeSend(ws, { type: "playRejected", reason: "spectator" });
     return false;
   }
+  if (TELEGRAM_BOT_TOKEN && roundIndex > 0 && !ws.telegramVerified) {
+    safeSend(ws, { type: "playRejected", reason: "need_telegram" });
+    return false;
+  }
+  if (roundIndex > 0 && ws.playerKey && !isPlayerKeyEligibleForCurrentRound(ws.playerKey)) {
+    safeSend(ws, { type: "playRejected", reason: "not_eligible" });
+    return false;
+  }
   if (!ws.eligible) {
     safeSend(ws, { type: "playRejected", reason: "spectator" });
     return false;
@@ -555,10 +1041,13 @@ function sendConnectionMeta(ws) {
     roundEndsAt: roundEndsAtForMeta(),
     eligible: !!ws.eligible,
     gameFinished: !!gameFinished,
+    tournamentStage: tournamentStage(roundIndex, gameFinished),
   });
+  safeSend(ws, buildWalletPayload(ws));
 }
 
-function finalizeThirdRound(winnerRow) {
+/** Финал: победитель дуэли 1v1 — игра окончена. */
+function finalizeGameEnd(winnerRow) {
   roundEnding = true;
   try {
     const winnerTeamId = winnerRow.teamId;
@@ -581,12 +1070,12 @@ function finalizeThirdRound(winnerRow) {
     teamMemberKeys.clear();
     teamPlayerCounts.clear();
     pixels.clear();
+    clearTeamEffectsMap();
     dynamicTeams = [];
     nextTeamId = 1;
     saveDynamicTeams();
 
     gameFinished = true;
-    roundIndex = 3;
     roundStartMs = Date.now();
     saveRoundState();
 
@@ -597,9 +1086,93 @@ function finalizeThirdRound(winnerRow) {
       winnerTeamId,
       winnerName: winningTeamName,
       percent: pct,
-      roundIndex: 3,
+      roundIndex,
       grid: { w: gridW, h: gridH },
     });
+
+    broadcast({ type: "full", pixels: [] });
+    broadcast({ type: "teamsFull", teams: teamsForMeta() });
+    broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+    broadcastStatsImmediate();
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      sendConnectionMeta(client);
+    }
+  } finally {
+    roundEnding = false;
+  }
+}
+
+/** После раунда «5×2» — только 2 участника победившей команды переходят в дуэль 1v1 (тот же размер карты). */
+function advanceToDuelRound(winnerRow) {
+  roundEnding = true;
+  try {
+    const winnerTeamId = winnerRow.teamId;
+    const winningTeamName = winnerRow.name || "";
+    setEligibleKeysFromWinnerTeam(winnerTeamId, 2);
+
+    eligibleTokenSet = new Set();
+    winnerTokensByPlayerKey = {};
+    const tokenByPlayerKey = new Map();
+    for (const pk of eligiblePlayerKeys) {
+      const tok = crypto.randomBytes(18).toString("hex");
+      eligibleTokenSet.add(tok);
+      winnerTokensByPlayerKey[pk] = tok;
+      tokenByPlayerKey.set(pk, tok);
+    }
+
+    const winnerTokenByClient = new Map();
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      const pk = client.playerKey ? sanitizePlayerKey(client.playerKey) : "";
+      const tok = pk && tokenByPlayerKey.has(pk) ? tokenByPlayerKey.get(pk) : null;
+      if (tok) {
+        winnerTokenByClient.set(client, tok);
+        client.eligible = true;
+        client.eliminated = false;
+      } else {
+        client.eligible = false;
+        client.eliminated = true;
+      }
+      client.teamId = null;
+    }
+
+    teamMemberKeys.clear();
+    teamPlayerCounts.clear();
+    pixels.clear();
+    clearTeamEffectsMap();
+    dynamicTeams = [];
+    nextTeamId = 1;
+    saveDynamicTeams();
+
+    roundIndex = 3;
+    roundTimerStarted = true;
+    roundStartMs = Date.now();
+    rebuildLandFromRound(3);
+    saveRoundState();
+
+    broadcast({
+      type: "roundEnded",
+      roundIndex: 3,
+      winnerTeamId,
+      winnerName: winningTeamName,
+      roundEndsAt: roundStartMs + roundDurationMs,
+      maxPerTeam: getMaxPerTeam(),
+      grid: { w: gridW, h: gridH },
+      duel: true,
+    });
+
+    for (const client of wss.clients) {
+      if (client.readyState !== 1) continue;
+      const tok = winnerTokenByClient.get(client);
+      if (tok) {
+        safeSend(client, {
+          type: "roundWinnerPass",
+          token: tok,
+          roundIndex: 3,
+        });
+      }
+    }
 
     broadcast({ type: "full", pixels: [] });
     broadcast({ type: "teamsFull", teams: teamsForMeta() });
@@ -627,14 +1200,24 @@ function maybeEndRound() {
     return;
   }
 
-  if (roundIndex >= 2) {
+  if (roundIndex === 3) {
     const top = rows[0];
     if (!top || typeof top.teamId !== "number") {
       roundStartMs = Date.now();
       saveRoundState();
       return;
     }
-    finalizeThirdRound(top);
+    finalizeGameEnd(top);
+    return;
+  }
+  if (roundIndex === 2) {
+    const top = rows[0];
+    if (!top || typeof top.teamId !== "number") {
+      roundStartMs = Date.now();
+      saveRoundState();
+      return;
+    }
+    advanceToDuelRound(top);
     return;
   }
 
@@ -642,6 +1225,8 @@ function maybeEndRound() {
   try {
     const winnerTeamId = rows[0].teamId;
     const winningTeamName = rows[0].name || "";
+
+    setEligibleKeysFromWinnerTeam(winnerTeamId);
 
     eligibleTokenSet = new Set();
     winnerTokensByPlayerKey = {};
@@ -688,6 +1273,7 @@ function maybeEndRound() {
     teamMemberKeys.clear();
     teamPlayerCounts.clear();
     pixels.clear();
+    clearTeamEffectsMap();
     dynamicTeams = [];
     nextTeamId = 1;
     saveDynamicTeams();
@@ -735,8 +1321,14 @@ function maybeEndRound() {
 
 setInterval(() => maybeEndRound(), 30000);
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  const ip = getClientIpFromReq(req);
+  ws._clientIp = ip;
+  ws._connId = ++wsConnSeq;
+  activeWsByIp.set(ip, (activeWsByIp.get(ip) || 0) + 1);
+
   ws.teamId = null;
+  ws.telegramVerified = false;
   ws.eligible = !gameFinished && roundIndex === 0;
   ws.eliminated = gameFinished || roundIndex !== 0;
 
@@ -745,8 +1337,16 @@ wss.on("connection", (ws) => {
   broadcastStatsImmediate();
 
   ws.on("message", (data) => {
+    if (!wsMsgLimiter.allow(`m:${ws._connId}`, WS_MSG_PER_SEC, 1000)) {
+      try {
+        ws.close(1008, "rate");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     const raw = String(data);
-    if (raw.length > 262144) return;
+    if (raw.length > 131072) return;
     let msg;
     try {
       msg = JSON.parse(raw);
@@ -759,6 +1359,8 @@ wss.on("connection", (ws) => {
 
     if (msg.type === "clientProfile") {
       rememberPlayerProfile(ws, msg);
+      sendConnectionMeta(ws);
+      safeSend(ws, buildWalletPayload(ws));
       return;
     }
 
@@ -769,6 +1371,10 @@ wss.on("connection", (ws) => {
       }
       rememberPlayerProfile(ws, msg);
       const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
+      if (roundIndex > 0 && (!pk || !isPlayerKeyEligibleForCurrentRound(pk))) {
+        safeSend(ws, { type: "claimError", reason: "not_eligible" });
+        return;
+      }
       let t = typeof msg.token === "string" ? msg.token.trim() : "";
       const explicitToken = t.length > 0;
       const serverTok = pk ? winnerTokensByPlayerKey[pk] : "";
@@ -784,6 +1390,11 @@ wss.on("connection", (ws) => {
         safeSend(ws,{ type: "roundWinnerPass", token: t, roundIndex });
         sendConnectionMeta(ws);
       } else if (explicitToken) {
+        const cip = ws._clientIp || "unknown";
+        if (!claimAttemptLimiter.allow(`claim:${cip}`, 25, 60_000)) {
+          safeSend(ws, { type: "claimError", reason: "rate" });
+          return;
+        }
         safeSend(ws,{ type: "claimError", reason: "invalid" });
       }
       return;
@@ -921,6 +1532,10 @@ wss.on("connection", (ws) => {
     if (msg.type === "createTeam") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
+      if (roundIndex === 3) {
+        safeSend(ws, { type: "createTeamError", reason: "duel" });
+        return;
+      }
       if (ws.teamId != null) {
         safeSend(ws,{ type: "createTeamError", reason: "already" });
         return;
@@ -961,8 +1576,12 @@ wss.on("connection", (ws) => {
     if (msg.type === "soloPlay") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
-      if (roundIndex >= 2) {
+      if (roundIndex === 2) {
         safeSend(ws,{ type: "soloError", reason: "round" });
+        return;
+      }
+      if (roundIndex === 3 && dynamicTeams.length >= 2) {
+        safeSend(ws, { type: "soloError", reason: "limit" });
         return;
       }
       if (ws.teamId != null) {
@@ -1005,7 +1624,7 @@ wss.on("connection", (ws) => {
     if (msg.type === "soloResume") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
-      if (roundIndex >= 2) {
+      if (roundIndex === 2) {
         safeSend(ws,{ type: "soloResumeError", reason: "round" });
         return;
       }
@@ -1052,6 +1671,10 @@ wss.on("connection", (ws) => {
     if (msg.type === "joinTeam") {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
+      if (roundIndex === 3) {
+        safeSend(ws, { type: "joinError", reason: "duel" });
+        return;
+      }
       const tid = Number(msg.teamId) | 0;
       const valid = validTeamId(tid);
       if (!valid) {
@@ -1098,6 +1721,297 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (msg.type === "purchaseCooldownUpgrade") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!pk) return;
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "cooldown_upgrade")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const u = walletStore.getOrCreateUser(pk);
+      const next = u.cooldownUpgradeLevel + 1;
+      if (next > MAX_COOLDOWN_LEVEL) {
+        safeSend(ws, { type: "purchaseError", reason: "max level" });
+        return;
+      }
+      const price = COOLDOWN_LEVELS[next].price;
+      const spend = walletStore.trySpend(pk, price, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      u.cooldownUpgradeLevel = next;
+      if (!devUnl) walletStore.recordSpend(pk, price, "cooldown_upgrade");
+      walletStore.save();
+      safeSend(ws, { type: "purchaseOk", kind: "cooldownUpgrade", level: next });
+      safeSend(ws, buildWalletPayload(ws));
+      broadcastWalletToAll();
+      return;
+    }
+
+    if (msg.type === "activateSpeedBoost") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!pk) return;
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "personal_speed")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const u = walletStore.getOrCreateUser(pk);
+      const now = Date.now();
+      if (!devUnl && u.speedBoostUntil > now) {
+        safeSend(ws, { type: "purchaseError", reason: "speed boost already active" });
+        return;
+      }
+      const spend = walletStore.trySpend(pk, PRICES.speedBoost, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      u.speedBoostUntil = now + DURATIONS_MS.speedBoost;
+      if (!devUnl) walletStore.recordSpend(pk, PRICES.speedBoost, "speed_boost");
+      walletStore.save();
+      safeSend(ws, { type: "purchaseOk", kind: "speedBoost" });
+      safeSend(ws, buildWalletPayload(ws));
+      broadcastWalletToAll();
+      return;
+    }
+
+    if (msg.type === "purchaseShieldPixel") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "shield_pixel")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const x = msg.x | 0;
+      const y = msg.y | 0;
+      const now = Date.now();
+      const key = `${x},${y}`;
+      const existing = normalizePixel(pixels.get(key));
+      if (!existing.teamId || existing.teamId !== ws.teamId || existing.ownerPlayerKey !== pk) {
+        safeSend(ws, { type: "purchaseError", reason: "not your pixel" });
+        return;
+      }
+      if (existing.shieldedUntil > now) {
+        safeSend(ws, { type: "purchaseError", reason: "pixel is shielded" });
+        return;
+      }
+      const spend = walletStore.trySpend(pk, PRICES.shieldPixel, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      existing.shieldedUntil = now + DURATIONS_MS.shieldPixel;
+      pixels.set(key, existing);
+      if (!devUnl) walletStore.recordSpend(pk, PRICES.shieldPixel, "shield_pixel");
+      walletStore.save();
+      broadcast({ type: "pixel", x, y, t: existing.teamId, ownerPlayerKey: pk, shieldedUntil: existing.shieldedUntil });
+      safeSend(ws, buildWalletPayload(ws));
+      broadcastWalletToAll();
+      return;
+    }
+
+    if (msg.type === "lineCapture") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "line_capture")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const u = walletStore.getOrCreateUser(pk);
+      const tid = ws.teamId;
+      const fx = getTeamFx(tid);
+      const now = Date.now();
+      if (!devUnl && u.lastLineCaptureAt + LINE_CAPTURE_COOLDOWN_MS > now) {
+        safeSend(ws, { type: "purchaseError", reason: "line capture cooldown" });
+        return;
+      }
+      const cd = getCurrentCooldownMs(u, fx, st, now);
+      if (!devUnl && now < u.lastActionAt + cd) {
+        safeSend(ws, { type: "purchaseError", reason: "cooldown not ready" });
+        return;
+      }
+      const spend = walletStore.trySpend(pk, PRICES.lineCapture, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      const x0 = msg.x | 0;
+      const y0 = msg.y | 0;
+      const dir = String(msg.dir || "").toLowerCase();
+      const d =
+        dir === "up" ? [0, -1] : dir === "down" ? [0, 1] : dir === "left" ? [-1, 0] : dir === "right" ? [1, 0] : null;
+      if (!d) return;
+      const captured = [];
+      for (let i = 0; i < 5; i++) {
+        const x = x0 + d[0] * i;
+        const y = y0 + d[1] * i;
+        if (x < 0 || x >= gridW || y < 0 || y >= gridH) break;
+        const blk = lineCaptureBlocked(x, y, tid, now);
+        if (blk) continue;
+        const k = `${x},${y}`;
+        const prev = normalizePixel(pixels.get(k));
+        pixels.set(k, {
+          teamId: tid,
+          ownerPlayerKey: pk,
+          shieldedUntil: prev.shieldedUntil || 0,
+        });
+        captured.push([x, y]);
+        broadcast({ type: "pixel", x, y, t: tid, ownerPlayerKey: pk, shieldedUntil: prev.shieldedUntil || 0 });
+      }
+      u.lastActionAt = now;
+      u.lastLineCaptureAt = now;
+      if (!devUnl) walletStore.recordSpend(pk, PRICES.lineCapture, "line_capture");
+      walletStore.save();
+      scheduleStatsBroadcast();
+      safeSend(ws, { type: "purchaseOk", kind: "lineCapture", cells: captured.length });
+      safeSend(ws, buildWalletPayload(ws));
+      broadcastWalletToAll();
+      return;
+    }
+
+    if (msg.type === "purchaseTeamBoost") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "team_boost")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const tid = ws.teamId;
+      const fx = getTeamFx(tid);
+      const now = Date.now();
+      if (!devUnl && fx.raidBoostUntil > now) {
+        safeSend(ws, { type: "purchaseError", reason: "team_boost blocked" });
+        return;
+      }
+      const spend = walletStore.trySpend(pk, PRICES.teamBoost, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      if (fx.teamBoostUntil > now) {
+        fx.teamBoostUntil += DURATIONS_MS.teamBoost;
+      } else {
+        fx.teamBoostUntil = now + DURATIONS_MS.teamBoost;
+      }
+      if (!devUnl) walletStore.recordSpend(pk, PRICES.teamBoost, "team_boost");
+      walletStore.save();
+      broadcast({ type: "teamEffect", teamId: tid, kind: "teamBoost", until: fx.teamBoostUntil });
+      safeSend(ws, { type: "purchaseOk", kind: "teamBoost" });
+      broadcastWalletToAll();
+      return;
+    }
+
+    if (msg.type === "purchaseRaidBoost") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "raid_boost")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const tid = ws.teamId;
+      const fx = getTeamFx(tid);
+      const now = Date.now();
+      if (!devUnl && (fx.teamBoostUntil > now || fx.raidBoostUntil > now)) {
+        safeSend(ws, { type: "purchaseError", reason: "raid boost cannot be used" });
+        return;
+      }
+      const spend = walletStore.trySpend(pk, PRICES.raidBoost, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      fx.raidBoostUntil = now + DURATIONS_MS.raidBoost;
+      if (!devUnl) walletStore.recordSpend(pk, PRICES.raidBoost, "raid_boost");
+      walletStore.save();
+      broadcast({ type: "teamEffect", teamId: tid, kind: "raidBoost", until: fx.raidBoostUntil });
+      safeSend(ws, { type: "purchaseOk", kind: "raidBoost" });
+      broadcastWalletToAll();
+      return;
+    }
+
+    if (msg.type === "purchaseTeamShieldZone") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st, "team_shield_zone")) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const cx = msg.x | 0;
+      const cy = msg.y | 0;
+      const tid = ws.teamId;
+      const fx = getTeamFx(tid);
+      const now = Date.now();
+      if (fx.shieldZone && fx.shieldZone.until > now) {
+        safeSend(ws, { type: "purchaseError", reason: "shield zone already active" });
+        return;
+      }
+      const r = zoneRect4(cx, cy);
+      for (const [otid, ofx] of teamEffects) {
+        const oz = ofx.shieldZone;
+        if (!oz || oz.until <= now || otid === tid) continue;
+        if (rectsOverlap(r, zoneRect4(oz.cx, oz.cy))) {
+          safeSend(ws, { type: "purchaseError", reason: "zones overlap" });
+          return;
+        }
+      }
+      const spend = walletStore.trySpend(pk, PRICES.teamShieldZone, { devUnlimited: devUnl });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      fx.shieldZone = { cx, cy, until: now + DURATIONS_MS.teamShieldZone };
+      if (!devUnl) walletStore.recordSpend(pk, PRICES.teamShieldZone, "team_shield_zone");
+      walletStore.save();
+      broadcast({ type: "teamEffect", teamId: tid, kind: "shieldZone", ...fx.shieldZone });
+      safeSend(ws, { type: "purchaseOk", kind: "teamShieldZone" });
+      broadcastWalletToAll();
+      return;
+    }
+
     if (msg.type === "pixel") {
       if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
@@ -1112,23 +2026,54 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      const now = Date.now();
-      const last = lastPlace.get(ws) || 0;
-      if (COOLDOWN_MS > 0 && now - last < COOLDOWN_MS) {
-        safeSend(ws,{ type: "pixelReject", reason: "cooldown" });
+      attachPlayerKey(ws, msg);
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!pk) {
+        safeSend(ws, { type: "pixelReject", reason: "no_team" });
         return;
       }
-      lastPlace.set(ws, now);
+      const devUnlPx = isDevUnlimitedWallet(pk);
+      if (!devUnlPx && !wsPixelBurstLimiter.allow(`px:${pk}`, WS_PIXEL_BURST_PER_SEC, 1000)) {
+        safeSend(ws, { type: "pixelReject", reason: "rate_limited" });
+        return;
+      }
+      const u = walletStore.getOrCreateUser(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      const fx = getTeamFx(teamId);
+      const now = Date.now();
+      const cd = getCurrentCooldownMs(u, fx, st, now);
+      if (!devUnlPx && now < u.lastActionAt + cd) {
+        safeSend(ws, { type: "pixelReject", reason: "cooldown not ready" });
+        return;
+      }
+
+      const block = placementBlocked(x, y, teamId, now);
+      if (block) {
+        safeSend(ws, { type: "pixelReject", reason: block });
+        return;
+      }
+
+      u.lastActionAt = now;
+      walletStore.save();
 
       const key = `${x},${y}`;
-      pixels.set(key, teamId);
-      broadcast({ type: "pixel", x, y, t: teamId });
+      const prev = normalizePixel(pixels.get(key));
+      const shieldedUntil = prev.teamId === teamId ? prev.shieldedUntil : 0;
+      const rec = { teamId, ownerPlayerKey: pk, shieldedUntil };
+      pixels.set(key, rec);
+      broadcast({ type: "pixel", x, y, t: teamId, ownerPlayerKey: pk, shieldedUntil });
       scheduleStatsBroadcast();
+      safeSend(ws, buildWalletPayload(ws));
       return;
     }
   });
 
   ws.on("close", () => {
+    const cip = ws._clientIp || "0.0.0.0";
+    const left = (activeWsByIp.get(cip) || 1) - 1;
+    if (left <= 0) activeWsByIp.delete(cip);
+    else activeWsByIp.set(cip, left);
+
     if (ws.teamId != null) {
       const tid = ws.teamId;
       const c = teamPlayerCounts.get(tid) ?? 0;
