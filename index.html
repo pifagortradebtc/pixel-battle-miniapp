@@ -485,6 +485,16 @@
         </div>
       </header>
 
+      <aside
+        id="quick-buy-rail"
+        class="quick-buy-rail"
+        hidden
+        aria-label="Повтор последних покупок"
+      >
+        <div class="quick-buy-rail__caption">Снова</div>
+        <div id="quick-buy-list" class="quick-buy-rail__list"></div>
+      </aside>
+
       <main class="stage-wrap stage-wrap--alive">
         <canvas id="board" class="board" aria-label="Карта мира"></canvas>
         <canvas id="board-vfx" class="board-vfx" aria-hidden="true"></canvas>
@@ -497,9 +507,6 @@
           <span id="team-badge-emoji" class="team-badge__emoji" aria-hidden="true"></span>
           <span id="team-badge-name" class="team-badge__name"></span>
           <span id="team-badge-count" class="team-badge__count"></span>
-          <button type="button" id="btn-team-settings" class="team-badge__settings" hidden>Название и смайлик</button>
-          <button type="button" id="btn-referral" class="team-badge__invite" hidden>Пригласить</button>
-          <button type="button" id="btn-leave-team" class="team-badge__leave" hidden>Выйти / войти в команду</button>
         </div>
         <div class="palette-bar__row">
           <button

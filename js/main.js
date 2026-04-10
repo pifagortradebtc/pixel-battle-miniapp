@@ -5,7 +5,11 @@
  */
 
 import { createBoardVfx, spawnFloatingText } from "./vfx.js";
-import { getCurrentCooldownMs, getEffectiveRecoverySec } from "../lib/tournament-economy.js";
+import {
+  getCurrentCooldownMs,
+  getEffectiveRecoverySec,
+  PRICES_QUANT,
+} from "../lib/tournament-economy.js";
 
 let gridW = 320;
 let gridH = 320;
@@ -15,6 +19,10 @@ const MAX_SCALE = 8;
 const COOLDOWN_MS = 0;
 /** Длительность баффов «личное/командное восстановление» — как на сервере (tournament-economy). */
 const RECOVERY_BUFF_DURATION_MS = 2 * 60 * 1000;
+
+/** Последние покупки для боковой панели «Снова» */
+const QUICK_BUY_HISTORY_KEY = "pixel-battle-quick-buy-v1";
+const MAX_QUICK_BUY_ITEMS = 5;
 
 const STORAGE_KEY = "pixel-battle-v2";
 const LEGACY_STORAGE_KEY = "pixel-battle-v1";
@@ -117,15 +125,12 @@ const TEAM_NAME_DISPLAY_MAX = 6;
 const teamOverlay = document.getElementById("team-overlay");
 const btnTeamOverlayBack = document.getElementById("btn-team-overlay-back");
 const teamListEl = document.getElementById("team-list");
-const btnReferral = document.getElementById("btn-referral");
-const btnLeaveTeam = document.getElementById("btn-leave-team");
 const teamBadgeEmoji = document.getElementById("team-badge-emoji");
 const teamSettingsOverlay = document.getElementById("team-settings-overlay");
 const teamSettingsName = document.getElementById("team-settings-name");
 const teamSettingsEmojiInput = document.getElementById("team-settings-emoji");
 const teamSettingsEmojiPresets = document.getElementById("team-settings-emoji-presets");
 const teamSettingsColorPaletteEl = document.getElementById("team-settings-color-palette");
-const btnTeamSettings = document.getElementById("btn-team-settings");
 const btnTeamSettingsSave = document.getElementById("team-settings-save");
 const btnTeamSettingsCancel = document.getElementById("team-settings-cancel");
 const createTeamOverlay = document.getElementById("create-team-overlay");
@@ -492,35 +497,39 @@ function tryClaimEligibility() {
 
 function updateRoundTimer() {
   if (!roundTimerEl) return;
-  const online = wantOnline && getWsUrl();
-  if (!online) {
-    roundTimerEl.hidden = true;
-    return;
-  }
-  if (gameFinishedMeta) {
-    roundTimerEl.hidden = true;
-    return;
-  }
-  if (roundEndsAtMs == null && roundIndexMeta === 0) {
+  try {
+    const online = wantOnline && getWsUrl();
+    if (!online) {
+      roundTimerEl.hidden = true;
+      return;
+    }
+    if (gameFinishedMeta) {
+      roundTimerEl.hidden = true;
+      return;
+    }
+    if (roundEndsAtMs == null && roundIndexMeta === 0) {
+      roundTimerEl.hidden = false;
+      roundTimerEl.textContent = "Ожидание старта\n«go» в боте";
+      return;
+    }
+    if (roundEndsAtMs == null) {
+      roundTimerEl.hidden = true;
+      return;
+    }
     roundTimerEl.hidden = false;
-    roundTimerEl.textContent = "Ожидание старта (отправьте боту «go»)";
-    return;
+    const ms = roundEndsAtMs - Date.now();
+    if (ms <= 0) {
+      roundTimerEl.textContent = "Конец раунда…";
+      return;
+    }
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    roundTimerEl.textContent = h > 0 ? `${h}ч ${m}м` : m > 0 ? `${m}м ${sec}с` : `${sec}с`;
+  } finally {
+    syncToolbarHeightCssVar();
   }
-  if (roundEndsAtMs == null) {
-    roundTimerEl.hidden = true;
-    return;
-  }
-  roundTimerEl.hidden = false;
-  const ms = roundEndsAtMs - Date.now();
-  if (ms <= 0) {
-    roundTimerEl.textContent = "Конец раунда…";
-    return;
-  }
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  roundTimerEl.textContent = h > 0 ? `${h}ч ${m}м` : m > 0 ? `${m}м ${sec}с` : `${sec}с`;
 }
 
 function cacheTeamDisplayInSession() {
@@ -616,18 +625,11 @@ function setFooterMode() {
   if (spectatorBadgeEl) {
     spectatorBadgeEl.hidden = !online || !spectatorMode;
   }
-  if (btnReferral) btnReferral.hidden = !online || !joined || isCurrentTeamSolo();
-  if (btnTeamSettings) btnTeamSettings.hidden = !online || !joined || !canEditTeamSettings();
-  if (btnLeaveTeam) {
-    btnLeaveTeam.hidden = !online || !joined;
-    if (online && joined) {
-      btnLeaveTeam.textContent = isCurrentTeamSolo() ? "Войти в команду" : "Выйти из команды";
-    }
-  }
   if (online && joined) updateTeamBadge();
   if (showPalette && online && joined) syncPaletteSelectionFromTeam();
   refreshToolbarSessionButton();
   updateWalletBar();
+  renderQuickBuyRail();
 }
 
 /** Подпись кнопки в шапке: не глобальная очистка карты, а сессия / локальный сброс. */
@@ -641,15 +643,10 @@ function refreshToolbarSessionButton() {
   btnToolbarSession.hidden = false;
   if (online) {
     if (myTeamId != null) {
-      if (isCurrentTeamSolo()) {
-        btnToolbarSession.textContent = "Войти в команду";
-        btnToolbarSession.title =
-          "Открыть выбор команды — создать или вступить (карта на сервере сохраняется)";
-      } else {
-        btnToolbarSession.textContent = "Сменить команду";
-        btnToolbarSession.title =
-          "Выйти из текущей команды и выбрать другую или создать новую (общая карта не сбрасывается)";
-      }
+      btnToolbarSession.textContent = "Сменить команду";
+      btnToolbarSession.title = isCurrentTeamSolo()
+        ? "Выйти из соло и выбрать другую команду или создать новую."
+        : "Выйти из текущей команды и выбрать другую или создать новую.";
     } else {
       btnToolbarSession.textContent = "Войти";
       btnToolbarSession.title = "Создать команду или вступить в существующую";
@@ -966,8 +963,9 @@ async function copyReferralLink() {
 }
 
 function setupReferralButton() {
-  if (!btnReferral) return;
-  btnReferral.addEventListener("click", () => {
+  const b = document.getElementById("btn-referral");
+  if (!b) return;
+  b.addEventListener("click", () => {
     copyReferralLink();
   });
 }
@@ -1230,7 +1228,6 @@ function saveTeamSettings() {
 
 function setupTeamSettingsUi() {
   buildEmojiPresets();
-  btnTeamSettings?.addEventListener("click", openTeamSettings);
   btnTeamSettingsCancel?.addEventListener("click", closeTeamSettings);
   btnTeamSettingsSave?.addEventListener("click", saveTeamSettings);
   teamSettingsOverlay?.addEventListener("click", (e) => {
@@ -1238,28 +1235,11 @@ function setupTeamSettingsUi() {
   });
 }
 
-function requestLeaveTeam() {
-  const tg = window.Telegram?.WebApp;
-  const solo = isCurrentTeamSolo();
-  const run = () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (solo) pendingLeaveToTeamList = true;
-    ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
-  };
-  const text = solo
-    ? "Чтобы вступить в команду, вы выходите из соло. Ваши пиксели на карте остаются. Продолжить?"
-    : "Выйти из команды? Затем можно создать свою или вступить в другую.";
-  if (typeof tg?.showConfirm === "function") {
-    tg.showConfirm(text, (ok) => {
-      if (ok) run();
-    });
-  } else if (confirm(text)) {
-    run();
-  }
-}
-
-function setupLeaveTeamUi() {
-  btnLeaveTeam?.addEventListener("click", requestLeaveTeam);
+/** Выход из команды / соло без диалога — затем открывается список команд (pendingLeaveToTeamList). */
+function leaveTeamToSwitch() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  pendingLeaveToTeamList = true;
+  ws.send(JSON.stringify({ type: "leaveTeam", playerKey: getOrCreatePlayerKey() }));
 }
 
 function onMeta(msg) {
@@ -1495,10 +1475,10 @@ function updateActiveBuffBars() {
       100,
       Math.max(0, (Math.min(left, RECOVERY_BUFF_DURATION_MS) / RECOVERY_BUFF_DURATION_MS) * 100)
     );
-    toolbarBuffPersonalLabelEl.textContent = `⚡ Лично · каждые ${sec} с · ${formatBuffRemainingMs(left)}`;
+    toolbarBuffPersonalLabelEl.textContent = `⚡ Лично ${sec} с/ход · ещё ${formatBuffRemainingMs(left)}`;
     toolbarBuffPersonalFillEl.style.width = `${pct}%`;
     toolbarBuffPersonalEl.hidden = false;
-    toolbarBuffPersonalEl.title = `Буст скорости пикселя · осталось ${formatBuffRemainingMs(left)} из 2 мин`;
+    toolbarBuffPersonalEl.title = `Суперсила: пиксель каждые ${sec} с. Действует ещё ${formatBuffRemainingMs(left)} (всего 2 мин с покупки).`;
     any = true;
   } else if (toolbarBuffPersonalEl) {
     toolbarBuffPersonalEl.hidden = true;
@@ -1511,10 +1491,10 @@ function updateActiveBuffBars() {
       100,
       Math.max(0, (Math.min(left, RECOVERY_BUFF_DURATION_MS) / RECOVERY_BUFF_DURATION_MS) * 100)
     );
-    toolbarBuffTeamLabelEl.textContent = `👥 Команда · каждые ${sec} с · ${formatBuffRemainingMs(left)}`;
+    toolbarBuffTeamLabelEl.textContent = `👥 Команда ${sec} с/ход · ещё ${formatBuffRemainingMs(left)}`;
     toolbarBuffTeamFillEl.style.width = `${pct}%`;
     toolbarBuffTeamEl.hidden = false;
-    toolbarBuffTeamEl.title = `Командный буст · осталось ${formatBuffRemainingMs(left)} из 2 мин`;
+    toolbarBuffTeamEl.title = `Командный буст: пиксель каждые ${sec} с. Действует ещё ${formatBuffRemainingMs(left)} (всего 2 мин с покупки).`;
     any = true;
   } else if (toolbarBuffTeamEl) {
     toolbarBuffTeamEl.hidden = true;
@@ -1526,6 +1506,18 @@ function updateActiveBuffBars() {
 function updateToolbarHud() {
   updateToolbarPixelTimer();
   updateActiveBuffBars();
+  updateQuickBuyBuffRings();
+  syncToolbarHeightCssVar();
+}
+
+/** Синхронизирует --toolbar-h с реальной высотой шапки (несколько строк, баффы). */
+function syncToolbarHeightCssVar() {
+  const tb = document.querySelector(".toolbar");
+  if (!tb) return;
+  const h = Math.ceil(tb.getBoundingClientRect().height);
+  if (h > 0) {
+    document.documentElement.style.setProperty("--toolbar-h", `${h}px`);
+  }
 }
 
 function updateToolbarPixelTimer() {
@@ -1577,20 +1569,28 @@ function updateToolbarPixelTimer() {
   if (walletState.devUnlimited) {
     el.textContent = "Готово";
     el.classList.add("toolbar__pixel-timer--ready");
-    el.title = "Следующий пиксель без задержки";
+    el.title = "Тест: безлимитные кванты — клик без паузы (всегда «Готово»).";
     return;
   }
   const cd = getWalletActionCooldownMs();
   const la = Number(walletState.lastActionAt) || 0;
   const left = la + cd - Date.now();
+  const erSec =
+    typeof walletState.effectiveRecoverySec === "number" && Number.isFinite(walletState.effectiveRecoverySec)
+      ? walletState.effectiveRecoverySec
+      : cd / 1000;
+  const intervalHint =
+    erSec >= 19.5
+      ? "База 20 с между кликами (без буста в магазине)."
+      : `Сейчас ~${erSec.toFixed(erSec < 1 ? 1 : 0)} с между кликами (буст из магазина).`;
   if (left > 500) {
     el.textContent = formatPixelCooldownLeft(left);
     el.classList.add("toolbar__pixel-timer--wait");
-    el.title = `До следующего пикселя: ~${(left / 1000).toFixed(1)} с`;
+    el.title = `${intervalHint} Осталось ~${(left / 1000).toFixed(1)} с до следующего клика.`;
   } else {
     el.textContent = "Готово";
     el.classList.add("toolbar__pixel-timer--ready");
-    el.title = "Можно ставить пиксель";
+    el.title = `${intervalHint} Можно кликнуть по карте.`;
   }
 }
 
@@ -1617,7 +1617,7 @@ function updateWalletBar() {
   if (walletState.devUnlimited) {
     prevWalletQuant = null;
     walletBalanceEl.textContent = "💰 ∞ квантов (тест)";
-    walletBalanceEl.title = "Режим теста: бесконечные кванты";
+    walletBalanceEl.title = "Режим теста: бесконечные кванты. Готовность к клику — слева («Готово»).";
   } else {
     const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
     const t = usdtToQuant(b);
@@ -1627,14 +1627,7 @@ function updateWalletBar() {
     }
     prevWalletQuant = t;
     walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}`;
-  }
-  const cd = getWalletActionCooldownMs();
-  const la = Number(walletState.lastActionAt) || 0;
-  const left = Math.max(0, la + cd - Date.now());
-  if (left > 500 && !spectatorMode) {
-    walletBalanceEl.title = `Интервал между действиями: ~${(left / 1000).toFixed(1)} с · кванты`;
-  } else {
-    walletBalanceEl.title = "Игровая валюта — кванты. Пополнение оплачивается в USDT.";
+    walletBalanceEl.title = "Игровая валюта — кванты. Пополнение оплачивается в USDT. Пауза между кликами — слева.";
   }
   syncShopHeaderBalance();
   syncShopDepositButton();
@@ -1670,6 +1663,296 @@ function handlePurchaseOk(msg) {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
     spawnFloatingText(floatFxHost, `👥 КОМАНДА: ${s} С`, { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
   }
+  recordQuickBuyAfterPurchase(kind, msg);
+}
+
+function loadQuickBuyHistory() {
+  try {
+    const raw = localStorage.getItem(QUICK_BUY_HISTORY_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushQuickBuyHistory(entry) {
+  try {
+    let list = loadQuickBuyHistory();
+    const key = (e) => `${e.action}:${e.tierSec ?? ""}`;
+    const k = key(entry);
+    list = list.filter((x) => key(x) !== k);
+    list.unshift({ ...entry, at: Date.now() });
+    list = list.slice(0, MAX_QUICK_BUY_ITEMS);
+    localStorage.setItem(QUICK_BUY_HISTORY_KEY, JSON.stringify(list));
+  } catch {
+    /* ignore */
+  }
+  renderQuickBuyRail();
+}
+
+function recordQuickBuyAfterPurchase(kind, msg) {
+  const tier = typeof msg.tierSec === "number" ? msg.tierSec | 0 : 0;
+  if (kind === "personalRecovery" && [15, 10, 5, 2].includes(tier)) {
+    pushQuickBuyHistory({ action: "personalRecovery", tierSec: tier });
+  } else if (kind === "teamRecovery" && [15, 10, 5, 2].includes(tier)) {
+    pushQuickBuyHistory({ action: "teamRecovery", tierSec: tier });
+  } else if (kind === "zoneCapture") {
+    pushQuickBuyHistory({ action: "zoneCapture" });
+  } else if (kind === "massCapture") {
+    pushQuickBuyHistory({ action: "massCapture" });
+  }
+}
+
+function getQuickBuyPriceQuant(entry) {
+  if (entry.action === "personalRecovery") return PRICES_QUANT.personal[entry.tierSec] ?? 0;
+  if (entry.action === "teamRecovery") return PRICES_QUANT.team[entry.tierSec] ?? 0;
+  if (entry.action === "zoneCapture") return PRICES_QUANT.zone4;
+  if (entry.action === "massCapture") return PRICES_QUANT.zone6;
+  return 0;
+}
+
+function quickBuyShortLabel(entry) {
+  if (entry.action === "personalRecovery") return `⚡ ${entry.tierSec} с`;
+  if (entry.action === "teamRecovery") return `👥 ${entry.tierSec} с`;
+  if (entry.action === "zoneCapture") return "4×4";
+  if (entry.action === "massCapture") return "6×6";
+  return "?";
+}
+
+function playerCanAffordQuickBuy(entry) {
+  const q = getQuickBuyPriceQuant(entry);
+  if (!q) return false;
+  if (!walletState) return false;
+  if (walletState.devUnlimited) return true;
+  const need = quantToUsdt(q);
+  return walletState.balanceUSDT + 1e-9 >= need;
+}
+
+function isQuickBuyEntryBlocked(entry) {
+  if (spectatorMode) return true;
+  if (!walletState) return true;
+  if (!walletState.devUnlimited) {
+    const st = walletState.tournamentStage || "MASS_BATTLE";
+    if (st === "DUEL" || st === "GRAND_FINAL") return true;
+  }
+  if (entry.action === "teamRecovery" && myTeamId == null) return true;
+  if ((entry.action === "zoneCapture" || entry.action === "massCapture") && myTeamId == null) return true;
+  if (!playerCanAffordQuickBuy(entry)) return true;
+  return false;
+}
+
+function executeQuickBuy(entry) {
+  if (isQuickBuyEntryBlocked(entry)) {
+    if (walletState && !walletState.devUnlimited && !playerCanAffordQuickBuy(entry)) {
+      const q = getQuickBuyPriceQuant(entry);
+      const tg = window.Telegram?.WebApp;
+      const text = `Недостаточно квантов (нужно ${q} ${quantWord(q)}).`;
+      if (typeof tg?.showAlert === "function") tg.showAlert(text);
+      else alert(text);
+    }
+    return;
+  }
+  if (entry.action === "personalRecovery" && [15, 10, 5, 2].includes(entry.tierSec)) {
+    wsSendJson({ type: "purchasePersonalRecovery", tierSec: entry.tierSec });
+    return;
+  }
+  if (entry.action === "teamRecovery" && [15, 10, 5, 2].includes(entry.tierSec)) {
+    wsSendJson({ type: "purchaseTeamRecovery", tierSec: entry.tierSec });
+    return;
+  }
+  if (entry.action === "zoneCapture") {
+    pendingMapAction = { type: "zoneCapture" };
+    setPendingHint();
+    if (shopOverlay) shopOverlay.hidden = true;
+    return;
+  }
+  if (entry.action === "massCapture") {
+    pendingMapAction = { type: "massCapture" };
+    setPendingHint();
+    if (shopOverlay) shopOverlay.hidden = true;
+    return;
+  }
+}
+
+const QUICK_BUY_RING_R = 14;
+const QUICK_BUY_RING_C = 2 * Math.PI * QUICK_BUY_RING_R;
+
+function renderQuickBuyRail() {
+  const rail = document.getElementById("quick-buy-rail");
+  const host = document.getElementById("quick-buy-list");
+  if (!rail || !host) return;
+  const online = wantOnline && getWsUrl();
+  if (!online) {
+    rail.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+  const list = loadQuickBuyHistory();
+  if (!list.length) {
+    rail.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+  rail.hidden = false;
+  host.innerHTML = "";
+  for (const entry of list) {
+    const q = getQuickBuyPriceQuant(entry);
+    if (!q) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "quick-buy-rail__btn";
+    btn.dataset.action = entry.action;
+    if (entry.tierSec != null) btn.dataset.tierSec = String(entry.tierSec);
+    const blocked = isQuickBuyEntryBlocked(entry);
+    btn.disabled = blocked;
+    const short = quickBuyShortLabel(entry);
+    if (entry.action === "zoneCapture" || entry.action === "massCapture") {
+      btn.title = `${short} · ${q} кв. — тап по карте, затем списание`;
+    } else if (!playerCanAffordQuickBuy(entry)) {
+      btn.title = `${short} · ${q} кв. — не хватает квантов`;
+    } else {
+      btn.title = `${short} · ${q} кв. — быстрая покупка`;
+    }
+    btn.dataset.titleBase = btn.title;
+
+    const isRecovery =
+      entry.action === "personalRecovery" || entry.action === "teamRecovery";
+
+    if (isRecovery) {
+      btn.classList.add(
+        entry.action === "teamRecovery"
+          ? "quick-buy-rail__btn--kind-team"
+          : "quick-buy-rail__btn--kind-personal"
+      );
+      const face = document.createElement("div");
+      face.className = "quick-buy-rail__face";
+
+      const orbit = document.createElement("div");
+      orbit.className = "quick-buy-rail__orbit";
+      orbit.setAttribute("aria-hidden", "true");
+      const svgNs = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(svgNs, "svg");
+      svg.setAttribute("class", "quick-buy-rail__svg");
+      svg.setAttribute("viewBox", "0 0 40 40");
+      const track = document.createElementNS(svgNs, "circle");
+      track.setAttribute("class", "quick-buy-rail__ring-track");
+      track.setAttribute("cx", "20");
+      track.setAttribute("cy", "20");
+      track.setAttribute("r", String(QUICK_BUY_RING_R));
+      track.setAttribute("fill", "none");
+      const arc = document.createElementNS(svgNs, "circle");
+      arc.setAttribute("class", "quick-buy-rail__ring-arc");
+      arc.setAttribute("cx", "20");
+      arc.setAttribute("cy", "20");
+      arc.setAttribute("r", String(QUICK_BUY_RING_R));
+      arc.setAttribute("fill", "none");
+      arc.setAttribute("transform", "rotate(-90 20 20)");
+      arc.style.strokeDasharray = String(QUICK_BUY_RING_C);
+      arc.style.strokeDashoffset = String(QUICK_BUY_RING_C);
+      svg.appendChild(track);
+      svg.appendChild(arc);
+      orbit.appendChild(svg);
+
+      const inner = document.createElement("div");
+      inner.className = "quick-buy-rail__orbit-inner";
+
+      const badge = document.createElement("span");
+      badge.className = "quick-buy-rail__source-badge";
+      badge.textContent = entry.action === "teamRecovery" ? "Команда" : "Лично";
+
+      const label = document.createElement("span");
+      label.className = "quick-buy-rail__label";
+      label.textContent = short;
+      const price = document.createElement("span");
+      price.className = "quick-buy-rail__price";
+      price.textContent = `${q} кв.`;
+
+      inner.appendChild(badge);
+      inner.appendChild(label);
+      inner.appendChild(price);
+      face.appendChild(orbit);
+      face.appendChild(inner);
+      btn.appendChild(face);
+    } else {
+      const label = document.createElement("span");
+      label.className = "quick-buy-rail__label";
+      label.textContent = short;
+      const price = document.createElement("span");
+      price.className = "quick-buy-rail__price";
+      price.textContent = `${q} кв.`;
+      btn.appendChild(label);
+      btn.appendChild(price);
+    }
+
+    host.appendChild(btn);
+  }
+  updateQuickBuyBuffRings();
+}
+
+/** Круговой «радар» оставшегося времени баффа на кнопке «Снова» (личн. / команда). */
+function updateQuickBuyBuffRings() {
+  const host = document.getElementById("quick-buy-list");
+  if (!host) return;
+  const now = Date.now();
+  host.querySelectorAll(".quick-buy-rail__btn").forEach((btn) => {
+    const action = btn.dataset.action;
+    const tierRaw = btn.dataset.tierSec;
+    const tier = tierRaw !== undefined && tierRaw !== "" ? Number(tierRaw) : null;
+    const arc = btn.querySelector(".quick-buy-rail__ring-arc");
+    if (!arc || tier == null || !Number.isFinite(tier)) return;
+
+    let remain01 = 0;
+    let active = false;
+    let hintExtra = "";
+
+    if (action === "personalRecovery" && walletState) {
+      const until = walletState.personalRecoveryUntil;
+      const sec = walletState.personalRecoverySec;
+      if (until > now && sec === tier) {
+        active = true;
+        remain01 = Math.max(
+          0,
+          Math.min(1, (until - now) / RECOVERY_BUFF_DURATION_MS)
+        );
+        hintExtra = ` Буст активен · осталось ${formatBuffRemainingMs(until - now)} из 2 мин.`;
+      }
+    } else if (action === "teamRecovery" && walletState?.teamEffects) {
+      const te = walletState.teamEffects;
+      const until = te.teamRecoveryUntil;
+      const sec = te.teamRecoverySec;
+      if (until > now && sec === tier) {
+        active = true;
+        remain01 = Math.max(
+          0,
+          Math.min(1, (until - now) / RECOVERY_BUFF_DURATION_MS)
+        );
+        hintExtra = ` Командный буст активен · осталось ${formatBuffRemainingMs(until - now)} (купил ты или сокомандник).`;
+      }
+    }
+
+    btn.classList.toggle("quick-buy-rail__btn--buff-ticking", active);
+    arc.style.strokeDashoffset = String(QUICK_BUY_RING_C * (1 - remain01));
+
+    const base = btn.dataset.titleBase || "";
+    btn.title = active && hintExtra ? base + hintExtra : base;
+  });
+}
+
+function setupQuickBuyRail() {
+  const host = document.getElementById("quick-buy-list");
+  if (!host || host.dataset.quickBuyBound === "1") return;
+  host.dataset.quickBuyBound = "1";
+  host.addEventListener("click", (e) => {
+    const btn = e.target.closest(".quick-buy-rail__btn");
+    if (!btn || btn.disabled) return;
+    const action = btn.dataset.action;
+    const tierRaw = btn.dataset.tierSec;
+    /** @type {{ action: string, tierSec?: number }} */
+    const entry = { action };
+    if (tierRaw !== undefined && tierRaw !== "") entry.tierSec = Number(tierRaw);
+    executeQuickBuy(entry);
+  });
 }
 
 function startMapAnimLoop() {
@@ -1694,7 +1977,10 @@ function vfxLoop(now) {
 }
 
 function updateShopAvailability() {
-  if (!shopStageHint || !walletState) return;
+  if (!shopStageHint || !walletState) {
+    renderQuickBuyRail();
+    return;
+  }
   const st = walletState.tournamentStage || "MASS_BATTLE";
   const hints = {
     MASS_BATTLE: "Базовый интервал между пикселями — 20 с. Бусты и зоны — в вкладках.",
@@ -1746,6 +2032,7 @@ function updateShopAvailability() {
     }
     shopEffects.textContent = parts.length ? parts.join(" · ") : "Нет активных баффов восстановления.";
   }
+  renderQuickBuyRail();
 }
 
 function fmtTime(ts) {
@@ -2721,6 +3008,7 @@ function resizeCanvas() {
     if (vctx) vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   centerIfNeeded(w, h);
+  syncToolbarHeightCssVar();
   draw();
 }
 
@@ -2927,24 +3215,16 @@ function placePixel(gx, gy) {
       boardVfx.popPixel(gx, gy, PALETTE[selectedColor] ?? "#ffffff", getVfxTransform());
     }
     if (COOLDOWN_MS > 0) {
-      cooldownLabel.hidden = false;
-      cooldownLabel.textContent = `Пауза ${(COOLDOWN_MS / 1000).toFixed(1)} с`;
-      setTimeout(() => {
-        cooldownLabel.hidden = true;
-      }, 400);
+      updateToolbarHud();
     }
     schedulePersist();
     draw();
   }
 }
 
-function showCooldown(ms) {
-  cooldownLabel.hidden = false;
-  cooldownLabel.textContent = `Интервал между действиями: ${(ms / 1000).toFixed(1)} с`;
-  clearTimeout(showCooldown._t);
-  showCooldown._t = setTimeout(() => {
-    cooldownLabel.hidden = true;
-  }, 800);
+function showCooldown(_ms) {
+  /** Обратный отсчёт и «Готово» только в `#toolbar-pixel-timer` слева — не дублируем в шапке справа. */
+  updateToolbarHud();
 }
 
 function setupToolbarSession() {
@@ -2953,7 +3233,7 @@ function setupToolbarSession() {
     const online = wantOnline && getWsUrl();
     if (online) {
       if (myTeamId != null) {
-        requestLeaveTeam();
+        leaveTeamToSwitch();
       } else {
         showWelcomeOverlay();
         if (teamOverlay) teamOverlay.hidden = true;
@@ -3143,11 +3423,12 @@ async function bootstrap() {
   setupReferralButton();
   setupWelcomeUi();
   setupTeamSettingsUi();
-  setupLeaveTeamUi();
   setupCreateTeamUi();
   setupToolbarSession();
   setupGestures();
   setupEconomyUi();
+  setupQuickBuyRail();
+  renderQuickBuyRail();
 
   setInterval(updateRoundTimer, 1000);
   setInterval(updateToolbarHud, 300);

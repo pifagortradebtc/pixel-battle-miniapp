@@ -167,38 +167,42 @@ body {
   flex-shrink: 0;
   display: flex;
   flex-wrap: nowrap;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
   min-height: var(--toolbar-h);
-  padding: 6px calc(8px + env(safe-area-inset-right, 0px)) 7px calc(8px + env(safe-area-inset-left, 0px));
+  padding: 8px calc(10px + env(safe-area-inset-right, 0px)) 8px calc(10px + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--hud-border);
   background: var(--hud-bg);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   pointer-events: auto;
   min-width: 0;
+  box-sizing: border-box;
 }
 
 .toolbar__lead {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 4px;
-  flex: 1 1 auto;
+  flex: 1 1 58%;
   min-width: 0;
-  max-width: min(58vw, 260px);
+  max-width: min(76vw, 340px);
 }
 
 .toolbar__round--lead {
   font-size: 0.58rem;
-  line-height: 1.22;
+  line-height: 1.25;
   color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
-  max-width: 100%;
-  white-space: normal;
+  max-width: 100% !important;
+  width: 100%;
+  white-space: pre-line !important;
   word-break: break-word;
   overflow-wrap: anywhere;
+  overflow: visible !important;
+  text-overflow: clip !important;
 }
 
 .toolbar__round--lead[hidden] {
@@ -240,13 +244,14 @@ body {
   flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
-  flex: 1 1 auto;
+  flex: 0 1 42%;
   min-width: 0;
   justify-content: flex-end;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
+  padding-top: 1px;
   padding-bottom: 1px;
   scrollbar-width: thin;
 }
@@ -295,7 +300,8 @@ body {
   color: var(--tg-hint);
 }
 
-.toolbar__round {
+/* Старый компактный вид раунда в правом ряду (если где-то останется без --lead) */
+.toolbar__round:not(.toolbar__round--lead) {
   font-size: 0.62rem;
   color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
   white-space: nowrap;
@@ -308,6 +314,174 @@ body {
   font-size: 0.62rem;
   color: #e94560;
   font-weight: 600;
+}
+
+.quick-buy-rail {
+  position: absolute;
+  z-index: 7;
+  right: max(4px, env(safe-area-inset-right, 0px));
+  top: calc(var(--safe-top) + var(--toolbar-h) + 4px);
+  max-height: min(52vh, calc(100dvh - var(--safe-top) - var(--toolbar-h) - 120px));
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 88px;
+  pointer-events: auto;
+}
+
+.quick-buy-rail[hidden] {
+  display: none !important;
+}
+
+.quick-buy-rail__caption {
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--tg-hint) 88%, transparent);
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
+.quick-buy-rail__list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 2px 0;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+.quick-buy-rail__btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 38%, transparent);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.38);
+  color: var(--tg-text);
+  padding: 6px 4px 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-height: 44px;
+  transition: transform 0.12s ease, filter 0.15s ease, opacity 0.15s ease, box-shadow 0.2s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.quick-buy-rail__btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.quick-buy-rail__btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.quick-buy-rail__btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.quick-buy-rail__face {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.quick-buy-rail__orbit {
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  width: 56px;
+  height: 56px;
+  margin-left: -28px;
+  pointer-events: none;
+}
+
+.quick-buy-rail__svg {
+  width: 56px;
+  height: 56px;
+  display: block;
+}
+
+.quick-buy-rail__ring-track {
+  stroke: rgba(255, 255, 255, 0.14);
+  stroke-width: 3px;
+}
+
+.quick-buy-rail__ring-arc {
+  stroke-width: 3px;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.35s linear;
+}
+
+.quick-buy-rail__btn--kind-personal .quick-buy-rail__ring-arc {
+  stroke: #fbbf24;
+}
+
+.quick-buy-rail__btn--kind-team .quick-buy-rail__ring-arc {
+  stroke: #4ade80;
+}
+
+.quick-buy-rail__btn--buff-ticking.quick-buy-rail__btn--kind-personal .quick-buy-rail__orbit {
+  filter: drop-shadow(0 0 5px rgba(251, 191, 36, 0.45));
+}
+
+.quick-buy-rail__btn--buff-ticking.quick-buy-rail__btn--kind-team .quick-buy-rail__orbit {
+  filter: drop-shadow(0 0 5px rgba(74, 222, 128, 0.4));
+}
+
+.quick-buy-rail__orbit-inner {
+  position: relative;
+  z-index: 1;
+  width: 56px;
+  min-height: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 4px 2px;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.quick-buy-rail__source-badge {
+  font-size: 0.45rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1;
+  margin-bottom: 1px;
+}
+
+.quick-buy-rail__btn--kind-personal .quick-buy-rail__source-badge {
+  color: #fde68a;
+}
+
+.quick-buy-rail__btn--kind-team .quick-buy-rail__source-badge {
+  color: #bbf7d0;
+}
+
+.quick-buy-rail__label {
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1.1;
+  text-align: center;
+}
+
+.quick-buy-rail__price {
+  font-size: 0.48rem;
+  font-weight: 600;
+  color: color-mix(in srgb, #fbbf24 90%, var(--tg-text));
+  text-align: center;
+  line-height: 1.1;
 }
 
 .stage-wrap {
@@ -1079,13 +1253,13 @@ body {
 .toolbar-buff__label {
   font-size: 0.52rem;
   font-weight: 600;
-  line-height: 1.15;
+  line-height: 1.2;
   letter-spacing: 0.01em;
   color: color-mix(in srgb, var(--tg-hint) 95%, transparent);
   max-width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .toolbar-buff__track {
