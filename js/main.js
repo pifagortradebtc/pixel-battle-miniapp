@@ -2023,6 +2023,12 @@ function connectWs() {
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         else if (typeof window.alert === "function") window.alert(text);
       }
+      if (msg.reason === "need_telegram") {
+        const tg = window.Telegram?.WebApp;
+        const text = "Откройте игру из Telegram Mini App (нужна подпись initData).";
+        if (typeof tg?.showAlert === "function") tg.showAlert(text);
+        else if (typeof window.alert === "function") window.alert(text);
+      }
       return;
     }
     if (msg.type === "playRejected") {

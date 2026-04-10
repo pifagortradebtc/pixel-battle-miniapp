@@ -78,6 +78,14 @@ const API_IPN_PER_MIN = Math.min(20000, Math.max(20, Number(process.env.API_IPN_
 const MAX_DEPOSIT_USDT = Math.min(1e9, Math.max(1, Number(process.env.MAX_DEPOSIT_USDT) || 100_000));
 const TELEGRAM_INITDATA_MAX_AGE_SEC = Math.min(604800, Math.max(120, Number(process.env.TELEGRAM_INITDATA_MAX_AGE_SEC) || 86400));
 const HTTP_BODY_MAX = Math.min(2_000_000, Math.max(4096, Number(process.env.HTTP_BODY_MAX) || 65536));
+/**
+ * Только для локальной отладки: разрешить подставлять playerKey с клиента без проверки initData.
+ * В продакшене с TELEGRAM_BOT_TOKEN должен быть false (по умолчанию).
+ */
+const ALLOW_CLIENT_PLAYER_KEY = /^true$/i.test(String(process.env.ALLOW_CLIENT_PLAYER_KEY || "").trim());
+/** Игровые действия и кошелёк привязаны к tg_<id> только после проверки подписи initData. */
+const REQUIRE_TELEGRAM_AUTH_FOR_PLAY =
+  Boolean(TELEGRAM_BOT_TOKEN) && !ALLOW_CLIENT_PLAYER_KEY;
 
 const apiDepositLimiter = new SlidingWindowRateLimiter();
 const apiIpnLimiter = new SlidingWindowRateLimiter();
@@ -316,6 +324,8 @@ function getGlobalEventPayload(now = Date.now()) {
 
 function attachPlayerKey(ws, msg) {
   if (ws.telegramVerified) return;
+  /** В продакшене playerKey задаётся только через verifyTelegramWebAppInitData в rememberPlayerProfile. */
+  if (REQUIRE_TELEGRAM_AUTH_FOR_PLAY) return;
   if (TELEGRAM_BOT_TOKEN && roundIndex > 0) return;
   const pk = sanitizePlayerKey(msg?.playerKey);
   if (pk) ws.playerKey = pk;
@@ -398,7 +408,8 @@ function rememberPlayerProfile(ws, msg) {
   }
   applyEligibilityFromServerState(ws);
   const pkInvite = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
-  if (pkInvite) {
+  /** Реферал только при подтверждённом Telegram — иначе можно привязать чужой tg_<id> к своему кошельку. */
+  if (pkInvite && ws.telegramVerified) {
     let invTg = msg?.inviteTelegramId ?? msg?.inviteRef;
     if (typeof invTg === "string" && /^\d+$/.test(String(invTg).trim())) {
       invTg = Number(String(invTg).trim());
@@ -411,15 +422,6 @@ function rememberPlayerProfile(ws, msg) {
           eu.invitedByPlayerKey = refPk;
           walletStore.save();
         }
-      }
-    }
-    const directRef =
-      typeof msg?.invitedByPlayerKey === "string" ? sanitizePlayerKey(msg.invitedByPlayerKey) : "";
-    if (directRef && directRef !== pkInvite) {
-      const eu = walletStore.getOrCreateUser(pkInvite);
-      if (!eu.invitedByPlayerKey) {
-        eu.invitedByPlayerKey = directRef;
-        walletStore.save();
       }
     }
     ensureWsOnlineTracked(ws);
@@ -988,9 +990,9 @@ async function handleApi(req, res) {
       return;
     }
     const npId = body.payment_id ?? body.id;
-    if (npId == null || walletStore.isPaymentProcessed(npId)) {
+    if (npId == null) {
       res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, duplicate: true }));
+      res.end(JSON.stringify({ ok: false, error: "no payment id" }));
       return;
     }
     const orderId = String(body.order_id || "");
@@ -1017,13 +1019,11 @@ async function handleApi(req, res) {
         extraUsdt = Math.round((bonusQuant / 7) * 1e6) / 1e6;
       }
     }
-    walletStore.markPaymentProcessed(npId);
-    walletStore.credit(playerKey, creditUsdt + extraUsdt, {
-      nowPaymentId: String(npId),
+    const dep = walletStore.finalizeDeposit(npId, playerKey, creditUsdt + extraUsdt, {
       txHash: String(body.outcome_hash || ""),
     });
     res.writeHead(200);
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({ ok: dep.ok, duplicate: dep.duplicate === true }));
     return;
   }
 
@@ -1265,7 +1265,7 @@ function assertCanPlay(ws) {
     safeSend(ws, { type: "playRejected", reason: "spectator" });
     return false;
   }
-  if (TELEGRAM_BOT_TOKEN && roundIndex > 0 && !ws.telegramVerified) {
+  if (REQUIRE_TELEGRAM_AUTH_FOR_PLAY && !ws.telegramVerified) {
     safeSend(ws, { type: "playRejected", reason: "need_telegram" });
     return false;
   }
@@ -1631,6 +1631,10 @@ wss.on("connection", (ws, req) => {
         return;
       }
       rememberPlayerProfile(ws, msg);
+      if (REQUIRE_TELEGRAM_AUTH_FOR_PLAY && !ws.telegramVerified) {
+        safeSend(ws, { type: "claimError", reason: "need_telegram" });
+        return;
+      }
       const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
       if (roundIndex > 0 && (!pk || !isPlayerKeyEligibleForCurrentRound(pk))) {
         safeSend(ws, { type: "claimError", reason: "not_eligible" });
