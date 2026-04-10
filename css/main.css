@@ -373,8 +373,9 @@ body {
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  max-width: min(48%, 260px);
-  justify-content: flex-end;
+  /* Видимая ширина списка ~202px (3×64px + 2 gap) — три карточки целиком, без четвёртой; подпись «Снова» ближе к команде */
+  max-width: min(44%, 232px);
+  justify-content: flex-start;
 }
 
 .quick-buy-rail__caption {

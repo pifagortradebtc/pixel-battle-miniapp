@@ -2160,16 +2160,15 @@ function updateShopAvailability() {
   }
   const st = walletState.tournamentStage || "MASS_BATTLE";
   const hints = {
-    MASS_BATTLE:
-      "Интервал между обычными пикселями — 20 с (и баффы). Зона 4×4 и масс-захват не ждут этот таймер; у них свои паузы между повторным использованием.",
-    SEMI_FINAL:
-      "Интервал между пикселями — 20 с. Зона 4×4 и масс-захват не привязаны к нему; у зон свои ограничения по частоте.",
-    FINAL:
-      "Интервал между пикселями — 20 с. Зона 4×4 и масс-захват не привязаны к нему; у зон свои ограничения по частоте.",
+    MASS_BATTLE: "",
+    SEMI_FINAL: "",
+    FINAL: "",
     DUEL: "Дуэль: покупки отключены.",
     GRAND_FINAL: "Наблюдение: покупки отключены.",
   };
-  shopStageHint.textContent = hints[st] || st;
+  const msg = Object.prototype.hasOwnProperty.call(hints, st) ? hints[st] : st;
+  shopStageHint.textContent = msg;
+  shopStageHint.hidden = !msg;
   const dis =
     walletState.devUnlimited === true
       ? false
@@ -3119,9 +3118,7 @@ function initTelegram() {
     document.body.style.backgroundColor = tg.themeParams.bg_color || "";
   });
   /* После expand вьюпорт меняется не сразу — пересчёт canvas, иначе верх/стороны «пустые». */
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => resizeCanvas());
-  });
+  scheduleResizeCanvas();
 }
 
 function updatePaletteTriggerPreview() {
@@ -3187,23 +3184,38 @@ function buildPalette() {
   updatePaletteTriggerPreview();
 }
 
+/** Два rAF — после первого кадра layout в Telegram Desktop/WebView часто ещё не финальный размер wrap. */
+function scheduleResizeCanvas() {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => resizeCanvas());
+  });
+}
+
 function resizeCanvas() {
   const wrap = canvas.parentElement;
+  if (!wrap) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = wrap.clientWidth;
-  const h = wrap.clientHeight;
-  canvas.width = Math.floor(w * dpr);
-  canvas.height = Math.floor(h * dpr);
+  const rect = wrap.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  const bw = Math.max(1, Math.round(w * dpr));
+  const bh = Math.max(1, Math.round(h * dpr));
+  canvas.width = bw;
+  canvas.height = bh;
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
   if (canvasVfx) {
-    canvasVfx.width = Math.floor(w * dpr);
-    canvasVfx.height = Math.floor(h * dpr);
+    canvasVfx.width = bw;
+    canvasVfx.height = bh;
     canvasVfx.style.width = `${w}px`;
     canvasVfx.style.height = `${h}px`;
     const vctx = canvasVfx.getContext("2d");
-    if (vctx) vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (vctx) {
+      vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      vctx.imageSmoothingEnabled = false;
+    }
   }
   centerIfNeeded(w, h);
   syncToolbarHeightCssVar();
@@ -3214,15 +3226,12 @@ function resizeCanvas() {
 function setupStageLayoutSync() {
   const wrap = canvas?.parentElement;
   if (!wrap) return;
-  const schedule = () => {
-    requestAnimationFrame(() => resizeCanvas());
-  };
   if (typeof ResizeObserver !== "undefined") {
-    const ro = new ResizeObserver(() => schedule());
+    const ro = new ResizeObserver(() => scheduleResizeCanvas());
     ro.observe(wrap);
   }
   if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", schedule);
+    window.visualViewport.addEventListener("resize", scheduleResizeCanvas);
   }
 }
 
@@ -3700,13 +3709,14 @@ async function bootstrap() {
   setInterval(updateToolbarHud, 300);
   updateToolbarHud();
 
-  window.addEventListener("resize", resizeCanvas);
+  window.addEventListener("resize", scheduleResizeCanvas);
   setupStageLayoutSync();
   window.addEventListener("pagehide", () => {
     flushToStorage();
   });
   if (document.fonts?.ready) await document.fonts.ready;
   resizeCanvas();
+  scheduleResizeCanvas();
   if (canvasVfx) boardVfx = createBoardVfx(canvasVfx);
   requestAnimationFrame(vfxLoop);
   connectWs();
