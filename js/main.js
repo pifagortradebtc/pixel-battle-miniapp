@@ -11,8 +11,8 @@ import {
   PRICES_QUANT,
 } from "../lib/tournament-economy.js";
 
-let gridW = 320;
-let gridH = 320;
+let gridW = 640;
+let gridH = 640;
 const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;

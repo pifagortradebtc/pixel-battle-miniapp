@@ -114,12 +114,15 @@ function getClientIpFromReq(req) {
   return raw.slice(0, 64) || "0.0.0.0";
 }
 
+/** Разрешение исходной карты `data/regions-320.json` (даунсэмпл на меньшие раунды, надсэмпл на массовый). */
 const BASE_GRID = 320;
-/** После 1-го раунда сетка ÷5, после 2-го ещё ÷3 (итого 320→64→21). */
-const ROUND2_DIV = 5;
-const ROUND3_DIV = 3;
-let gridW = BASE_GRID;
-let gridH = BASE_GRID;
+/** Сторона сетки по раунду: 0 массовый, 1 полуфинал, 2 финал команд, 3 дуэль. */
+const GRID_SIZE_MASS = 640;
+const GRID_SIZE_SEMI = 320;
+const GRID_SIZE_FINAL_TEAMS = 21;
+const GRID_SIZE_DUEL = 15;
+let gridW = GRID_SIZE_MASS;
+let gridH = GRID_SIZE_MASS;
 /** @deprecated используйте getCurrentCooldownMs для игрока */
 const COOLDOWN_MS = 0;
 /** Длительность раунда по умолчанию (100 ч); фактическое значение — roundDurationMs (задаётся «go 12» и т.д.) */
@@ -131,7 +134,7 @@ const MAX_PER_TEAM_NEXT = 10;
 /** Финальный раунд (команды по 2 человека) */
 const MAX_PER_TEAM_FINAL = 2;
 /**
- * После полуфинала (конец раунда с индексом 1, на карте 64×64, в команде до 10 чел.)
+ * После полуфинала (конец раунда с индексом 1, на карте 320×320, в команде до 10 чел.)
  * в следующий раунд (21×21, в команде до 2 чел.) проходят только первые N игроков победившей команды.
  * Порядок — порядок добавления ключей в Set участников команды на сервере.
  */
@@ -672,16 +675,17 @@ try {
 /** @type {Uint8Array | null} регион: 0 океан, 1 река, ≥2 — регионы (для справки; закрасить можно любую клетку сетки). */
 let landGrid = null;
 /** Знаменатель для «% территории» — все клетки текущей сетки (w×h). */
-let landPixelsTotal = BASE_GRID * BASE_GRID;
+let landPixelsTotal = GRID_SIZE_MASS * GRID_SIZE_MASS;
 
-/** Размер стороны сетки по индексу раунда (0: 320, 1: 64, 2+ : 21 — в т.ч. дуэль 1v1). */
 function gridSizeForRoundIndex(ri) {
-  if (ri <= 0) return BASE_GRID;
-  if (ri === 1) return Math.max(1, Math.floor(BASE_GRID / ROUND2_DIV));
-  return Math.max(1, Math.floor(BASE_GRID / ROUND2_DIV / ROUND3_DIV));
+  if (ri <= 0) return GRID_SIZE_MASS;
+  if (ri === 1) return GRID_SIZE_SEMI;
+  if (ri === 2) return GRID_SIZE_FINAL_TEAMS;
+  if (ri === 3) return GRID_SIZE_DUEL;
+  return GRID_SIZE_DUEL;
 }
 
-/** @param {number} ri — 0: 320×320, 1: 64×64, 2+: 21×21 */
+/** @param {number} ri — размеры: массовый 640, полуфинал 320, финал команд 21, дуэль 15 */
 function rebuildLandFromRound(ri) {
   const w = gridSizeForRoundIndex(ri);
   const h = w;
@@ -708,9 +712,9 @@ function rebuildLandFromRound(ri) {
 }
 
 /**
- * Раунд 1 — форма зашита в regions-320 (круг + остров ₿).
- * Раунд 2 — квадрат с отступом (другая «форма» карты).
- * Раунд 3 — ромб (манхэттен от центра) — снова другая форма.
+ * Раунд 0 — без маски (вся сетка из даунсэмпла regions-320).
+ * Полуфинал — квадрат с отступом по краям.
+ * Финал команд и дуэль — ромб (манхэттен от центра).
  */
 function applyRoundShapeMask(ri, buf, w, h) {
   if (ri === 0) return;
