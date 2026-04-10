@@ -78,14 +78,6 @@ const API_IPN_PER_MIN = Math.min(20000, Math.max(20, Number(process.env.API_IPN_
 const MAX_DEPOSIT_USDT = Math.min(1e9, Math.max(1, Number(process.env.MAX_DEPOSIT_USDT) || 100_000));
 const TELEGRAM_INITDATA_MAX_AGE_SEC = Math.min(604800, Math.max(120, Number(process.env.TELEGRAM_INITDATA_MAX_AGE_SEC) || 86400));
 const HTTP_BODY_MAX = Math.min(2_000_000, Math.max(4096, Number(process.env.HTTP_BODY_MAX) || 65536));
-/**
- * Только для локальной отладки: разрешить подставлять playerKey с клиента без проверки initData.
- * В продакшене с TELEGRAM_BOT_TOKEN должен быть false (по умолчанию).
- */
-const ALLOW_CLIENT_PLAYER_KEY = /^true$/i.test(String(process.env.ALLOW_CLIENT_PLAYER_KEY || "").trim());
-/** Игровые действия и кошелёк привязаны к tg_<id> только после проверки подписи initData. */
-const REQUIRE_TELEGRAM_AUTH_FOR_PLAY =
-  Boolean(TELEGRAM_BOT_TOKEN) && !ALLOW_CLIENT_PLAYER_KEY;
 
 const apiDepositLimiter = new SlidingWindowRateLimiter();
 const apiIpnLimiter = new SlidingWindowRateLimiter();
@@ -135,6 +127,14 @@ const ROUND_STATE_PATH = path.join(ROOT, "data", "round-state.json");
 
 /** Токен бота и список user id админов (через запятую), которые могут отправить «go» для старта 1-го раунда */
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
+/**
+ * Только для локальной отладки: разрешить подставлять playerKey с клиента без проверки initData.
+ * В продакшене с TELEGRAM_BOT_TOKEN должен быть false (по умолчанию).
+ */
+const ALLOW_CLIENT_PLAYER_KEY = /^true$/i.test(String(process.env.ALLOW_CLIENT_PLAYER_KEY || "").trim());
+/** Игровые действия и кошелёк привязаны к tg_<id> только после проверки подписи initData. */
+const REQUIRE_TELEGRAM_AUTH_FOR_PLAY =
+  Boolean(TELEGRAM_BOT_TOKEN) && !ALLOW_CLIENT_PLAYER_KEY;
 const TELEGRAM_ADMIN_IDS = new Set(
   (process.env.TELEGRAM_ADMIN_IDS || "")
     .split(",")
