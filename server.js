@@ -15,6 +15,7 @@ import {
   MASS_CAPTURE_COOLDOWN_MS,
   PRICES_QUANT,
   RECOVERY_BUFF_DURATION_MS,
+  ZONE12_CAPTURE_COOLDOWN_MS,
   ZONE_CAPTURE_COOLDOWN_MS,
   getCurrentCooldownMs,
   getEffectiveRecoverySec,
@@ -53,6 +54,7 @@ const DEPOSIT_PACK_BONUS_QUANT = new Map([
   [10, 10],
   [20, 25],
   [50, 80],
+  [300, 500],
 ]);
 
 function depositBonusQuantAllowed(amountUsdt, bonusQuant) {
@@ -804,7 +806,7 @@ function getTeamFx(tid) {
     fx.teamRecoveryUntil = fx.teamBoostUntil;
   }
   if (typeof fx.teamRecoveryUntil !== "number") fx.teamRecoveryUntil = 0;
-  if (typeof fx.teamRecoverySec !== "number" || fx.teamRecoverySec < 2) {
+  if (typeof fx.teamRecoverySec !== "number" || fx.teamRecoverySec < 1) {
     fx.teamRecoverySec = 20;
   }
   delete fx.teamBoostUntil;
@@ -921,6 +923,7 @@ function buildWalletPayload(ws) {
     lastActionAt: u.lastActionAt,
     lastZoneCaptureAt: u.lastZoneCaptureAt ?? 0,
     lastMassCaptureAt: u.lastMassCaptureAt ?? 0,
+    lastZone12CaptureAt: u.lastZone12CaptureAt ?? 0,
     referralBonusActive: !!(ref && isPlayerKeyOnline(ref)),
     globalEvent: getGlobalEventPayload(now),
     tournamentStage: st,
@@ -1960,7 +1963,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      const tier = [15, 10, 5, 2].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
+      const tier = [10, 5, 2, 1].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
       if (!tier) {
         safeSend(ws, { type: "purchaseError", reason: "bad request" });
         return;
@@ -2012,8 +2015,6 @@ wss.on("connection", (ws, req) => {
       }
       const u = walletStore.getOrCreateUser(pk);
       const tid = ws.teamId;
-      const fx = getTeamFx(tid);
-      const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
       const now = Date.now();
       const cx = msg.x | 0;
       const cy = msg.y | 0;
@@ -2027,11 +2028,6 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "zone capture cooldown" });
         return;
       }
-      const cd = getCurrentCooldownMs(u, teamFxPayload, st, now);
-      if (!devUnl && now < u.lastActionAt + cd) {
-        safeSend(ws, { type: "purchaseError", reason: "cooldown not ready" });
-        return;
-      }
       const priceQuant = PRICES_QUANT.zone4;
       const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
@@ -2039,7 +2035,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       applyPlannedCapture(pk, tid, planned);
-      u.lastActionAt = now;
+      /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от зоны 4×4. */
       u.lastZoneCaptureAt = now;
       if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_4x4", { deferSave: true });
       walletStore.save();
@@ -2079,8 +2075,6 @@ wss.on("connection", (ws, req) => {
       }
       const u = walletStore.getOrCreateUser(pk);
       const tid = ws.teamId;
-      const fx = getTeamFx(tid);
-      const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
       const now = Date.now();
       const cx = msg.x | 0;
       const cy = msg.y | 0;
@@ -2093,11 +2087,6 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "mass capture cooldown" });
         return;
       }
-      const cd = getCurrentCooldownMs(u, teamFxPayload, st, now);
-      if (!devUnl && now < u.lastActionAt + cd) {
-        safeSend(ws, { type: "purchaseError", reason: "cooldown not ready" });
-        return;
-      }
       const priceQuant = PRICES_QUANT.zone6;
       const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
@@ -2105,7 +2094,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       applyPlannedCapture(pk, tid, planned);
-      u.lastActionAt = now;
+      /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от масс-захвата 6×6. */
       u.lastMassCaptureAt = now;
       if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "mass_capture_6x6", { deferSave: true });
       walletStore.save();
@@ -2119,6 +2108,64 @@ wss.on("connection", (ws, req) => {
         size: 6,
       });
       safeSend(ws, { type: "purchaseOk", kind: "massCapture", cells: planned.length, size: 6 });
+      safeSend(ws, buildWalletPayload(ws));
+      scheduleBroadcastWalletDebounced();
+      return;
+    }
+
+    if (msg.type === "purchaseZone12Capture") {
+      if (!assertCanPlay(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!devUnl && !stageAllows(st)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const u = walletStore.getOrCreateUser(pk);
+      const tid = ws.teamId;
+      const now = Date.now();
+      const cx = msg.x | 0;
+      const cy = msg.y | 0;
+      const planned = planCaptureRect(cx - 5, cy - 5, cx + 6, cy + 6);
+      if (planned.length === 0) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      if (!devUnl && u.lastZone12CaptureAt + ZONE12_CAPTURE_COOLDOWN_MS > now) {
+        safeSend(ws, { type: "purchaseError", reason: "zone12 capture cooldown" });
+        return;
+      }
+      const priceQuant = PRICES_QUANT.zone12;
+      const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      applyPlannedCapture(pk, tid, planned);
+      u.lastZone12CaptureAt = now;
+      if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_12x12", { deferSave: true });
+      walletStore.save();
+      scheduleStatsBroadcast();
+      broadcast({
+        type: "purchaseVfx",
+        kind: "zone12Capture",
+        teamId: tid,
+        gx: cx - 5,
+        gy: cy - 5,
+        size: 12,
+      });
+      safeSend(ws, { type: "purchaseOk", kind: "zone12Capture", cells: planned.length, size: 12 });
       safeSend(ws, buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
@@ -2142,7 +2189,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      const tier = [15, 10, 5, 2].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
+      const tier = [15, 10, 5, 2, 1].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
       if (!tier) {
         safeSend(ws, { type: "purchaseError", reason: "bad request" });
         return;

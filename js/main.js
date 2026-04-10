@@ -1372,7 +1372,8 @@ function notifyPurchaseError(reason) {
     "not enough balance": "Недостаточно средств на балансе.",
     "not available": "В этой стадии турнира недоступно.",
     "zone capture cooldown": "Зона 4×4: подождите перед повтором (~60 с).",
-    "mass capture cooldown": "Масс-захват: подождите перед повтором (~2 мин).",
+    "mass capture cooldown": "Масс-захват 6×6: подождите перед повтором (~2 мин).",
+    "zone12 capture cooldown": "Зона 12×12: подождите перед повтором (~2 мин).",
     "cooldown not ready": "Сначала дождитесь обычного интервала между действиями.",
     "bad request": "Некорректный запрос.",
     rate_limited: "Слишком частые покупки. Подождите несколько секунд.",
@@ -1447,14 +1448,20 @@ function syncShopHeaderBalance() {
   if (!online || !walletState) {
     el.textContent = "—";
     if (unitEl) unitEl.textContent = "";
-    if (subEl) subEl.textContent = "";
+    if (subEl) {
+      subEl.textContent = "";
+      subEl.hidden = true;
+    }
     syncDevUnlimitedShopHints();
     return;
   }
   if (walletState.devUnlimited) {
     el.textContent = "∞";
     if (unitEl) unitEl.textContent = "квантов";
-    if (subEl) subEl.textContent = "";
+    if (subEl) {
+      subEl.textContent = "";
+      subEl.hidden = true;
+    }
     syncDevUnlimitedShopHints();
     return;
   }
@@ -1462,7 +1469,10 @@ function syncShopHeaderBalance() {
   const t = usdtToQuant(b);
   el.textContent = String(t);
   if (unitEl) unitEl.textContent = quantWord(t);
-  if (subEl) subEl.textContent = formatApproxUsdt(b);
+  if (subEl) {
+    subEl.textContent = "";
+    subEl.hidden = true;
+  }
   syncDevUnlimitedShopHints();
 }
 
@@ -1683,7 +1693,7 @@ function updateWalletBar() {
     }
     prevWalletQuant = t;
     walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}`;
-    walletBalanceEl.title = "Игровая валюта — кванты. Пополнение оплачивается в USDT. Пауза между кликами — слева.";
+    walletBalanceEl.title = "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
   }
   syncShopHeaderBalance();
   syncShopDepositButton();
@@ -1742,6 +1752,17 @@ function applyGlobalPurchaseVfx(msg) {
     requestAnimationFrame(() => flushBoardVfxFrame());
     return;
   }
+  if (kind === "zone12Capture" && boardVfx && hasGrid) {
+    const sz =
+      typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
+        ? msg.size | 0
+        : 12;
+    boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
+    boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
+    return;
+  }
   if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
@@ -1765,6 +1786,9 @@ function handlePurchaseOk(msg) {
   }
   if (kind === "massCapture") {
     spawnFloatingText(floatFxHost, "МАСС-ЗАХВАТ 6×6", { x: flo.x, y: flo.y - 8 }, "float-fx__pop--raid");
+  }
+  if (kind === "zone12Capture") {
+    spawnFloatingText(floatFxHost, "ЗОНА 12×12", { x: flo.x, y: flo.y - 10 }, "float-fx__pop--raid");
   }
   if (kind === "teamRecovery") {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
@@ -1800,14 +1824,16 @@ function pushQuickBuyHistory(entry) {
 
 function recordQuickBuyAfterPurchase(kind, msg) {
   const tier = typeof msg.tierSec === "number" ? msg.tierSec | 0 : 0;
-  if (kind === "personalRecovery" && [15, 10, 5, 2].includes(tier)) {
+  if (kind === "personalRecovery" && [10, 5, 2, 1].includes(tier)) {
     pushQuickBuyHistory({ action: "personalRecovery", tierSec: tier });
-  } else if (kind === "teamRecovery" && [15, 10, 5, 2].includes(tier)) {
+  } else if (kind === "teamRecovery" && [15, 10, 5, 2, 1].includes(tier)) {
     pushQuickBuyHistory({ action: "teamRecovery", tierSec: tier });
   } else if (kind === "zoneCapture") {
     pushQuickBuyHistory({ action: "zoneCapture" });
   } else if (kind === "massCapture") {
     pushQuickBuyHistory({ action: "massCapture" });
+  } else if (kind === "zone12Capture") {
+    pushQuickBuyHistory({ action: "zone12Capture" });
   }
 }
 
@@ -1816,6 +1842,7 @@ function getQuickBuyPriceQuant(entry) {
   if (entry.action === "teamRecovery") return PRICES_QUANT.team[entry.tierSec] ?? 0;
   if (entry.action === "zoneCapture") return PRICES_QUANT.zone4;
   if (entry.action === "massCapture") return PRICES_QUANT.zone6;
+  if (entry.action === "zone12Capture") return PRICES_QUANT.zone12;
   return 0;
 }
 
@@ -1824,6 +1851,7 @@ function quickBuyShortLabel(entry) {
   if (entry.action === "teamRecovery") return `👥 ${entry.tierSec} с`;
   if (entry.action === "zoneCapture") return "4×4";
   if (entry.action === "massCapture") return "6×6";
+  if (entry.action === "zone12Capture") return "12×12";
   return "?";
 }
 
@@ -1844,7 +1872,12 @@ function isQuickBuyEntryBlocked(entry) {
     if (st === "DUEL" || st === "GRAND_FINAL") return true;
   }
   if (entry.action === "teamRecovery" && myTeamId == null) return true;
-  if ((entry.action === "zoneCapture" || entry.action === "massCapture") && myTeamId == null) return true;
+  if (
+    (entry.action === "zoneCapture" || entry.action === "massCapture" || entry.action === "zone12Capture") &&
+    myTeamId == null
+  ) {
+    return true;
+  }
   if (!playerCanAffordQuickBuy(entry)) return true;
   return false;
 }
@@ -1860,11 +1893,11 @@ function executeQuickBuy(entry) {
     }
     return;
   }
-  if (entry.action === "personalRecovery" && [15, 10, 5, 2].includes(entry.tierSec)) {
+  if (entry.action === "personalRecovery" && [10, 5, 2, 1].includes(entry.tierSec)) {
     wsSendJson({ type: "purchasePersonalRecovery", tierSec: entry.tierSec });
     return;
   }
-  if (entry.action === "teamRecovery" && [15, 10, 5, 2].includes(entry.tierSec)) {
+  if (entry.action === "teamRecovery" && [15, 10, 5, 2, 1].includes(entry.tierSec)) {
     wsSendJson({ type: "purchaseTeamRecovery", tierSec: entry.tierSec });
     return;
   }
@@ -1876,6 +1909,12 @@ function executeQuickBuy(entry) {
   }
   if (entry.action === "massCapture") {
     pendingMapAction = { type: "massCapture" };
+    setPendingHint();
+    if (shopOverlay) shopOverlay.hidden = true;
+    return;
+  }
+  if (entry.action === "zone12Capture") {
+    pendingMapAction = { type: "zone12Capture" };
     setPendingHint();
     if (shopOverlay) shopOverlay.hidden = true;
     return;
@@ -1914,7 +1953,7 @@ function renderQuickBuyRail() {
     const blocked = isQuickBuyEntryBlocked(entry);
     btn.disabled = blocked;
     const short = quickBuyShortLabel(entry);
-    if (entry.action === "zoneCapture" || entry.action === "massCapture") {
+    if (entry.action === "zoneCapture" || entry.action === "massCapture" || entry.action === "zone12Capture") {
       btn.title = `${short} · ${q} кв. — тап по карте, затем списание`;
     } else if (!playerCanAffordQuickBuy(entry)) {
       btn.title = `${short} · ${q} кв. — не хватает квантов`;
@@ -2090,9 +2129,12 @@ function updateShopAvailability() {
   }
   const st = walletState.tournamentStage || "MASS_BATTLE";
   const hints = {
-    MASS_BATTLE: "Базовый интервал между пикселями — 20 с. Бусты и зоны — в вкладках.",
-    SEMI_FINAL: "Базовый интервал — 20 с. Все покупки доступны.",
-    FINAL: "Базовый интервал — 20 с. Все покупки доступны.",
+    MASS_BATTLE:
+      "Интервал между обычными пикселями — 20 с (и баффы). Зона 4×4 и масс-захват не ждут этот таймер; у них свои паузы между повторным использованием.",
+    SEMI_FINAL:
+      "Интервал между пикселями — 20 с. Зона 4×4 и масс-захват не привязаны к нему; у зон свои ограничения по частоте.",
+    FINAL:
+      "Интервал между пикселями — 20 с. Зона 4×4 и масс-захват не привязаны к нему; у зон свои ограничения по частоте.",
     DUEL: "Дуэль: покупки отключены.",
     GRAND_FINAL: "Наблюдение: покупки отключены.",
   };
@@ -2356,14 +2398,14 @@ function setupEconomyUi() {
       const action = btn.dataset.action;
       if (action === "personalRecovery") {
         const tier = Number(btn.dataset.tierSec);
-        if ([15, 10, 5, 2].includes(tier)) {
+        if ([10, 5, 2, 1].includes(tier)) {
           wsSendJson({ type: "purchasePersonalRecovery", tierSec: tier });
         }
         return;
       }
       if (action === "teamRecovery") {
         const tier = Number(btn.dataset.tierSec);
-        if ([15, 10, 5, 2].includes(tier)) {
+        if ([15, 10, 5, 2, 1].includes(tier)) {
           wsSendJson({ type: "purchaseTeamRecovery", tierSec: tier });
         }
         return;
@@ -2376,6 +2418,12 @@ function setupEconomyUi() {
       }
       if (action === "massCapture") {
         pendingMapAction = { type: "massCapture" };
+        setPendingHint();
+        if (shopOverlay) shopOverlay.hidden = true;
+        return;
+      }
+      if (action === "zone12Capture") {
+        pendingMapAction = { type: "zone12Capture" };
         setPendingHint();
         if (shopOverlay) shopOverlay.hidden = true;
         return;
@@ -2406,6 +2454,7 @@ function setPendingHint() {
     if (!pendingMapAction) return "";
     if (pendingMapAction.type === "zoneCapture") return "Зона 4×4: тап по углу области — все 16 клеток перекрасятся";
     if (pendingMapAction.type === "massCapture") return "Масс-захват 6×6: тап по центру — все 36 клеток перекрасятся";
+    if (pendingMapAction.type === "zone12Capture") return "Зона 12×12: тап по центру — 144 клетки перекрасятся";
     return "";
   })();
   if (shopPending) {
@@ -3038,6 +3087,10 @@ function initTelegram() {
   tg.onEvent("themeChanged", () => {
     document.body.style.backgroundColor = tg.themeParams.bg_color || "";
   });
+  /* После expand вьюпорт меняется не сразу — пересчёт canvas, иначе верх/стороны «пустые». */
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => resizeCanvas());
+  });
 }
 
 function updatePaletteTriggerPreview() {
@@ -3124,6 +3177,22 @@ function resizeCanvas() {
   centerIfNeeded(w, h);
   syncToolbarHeightCssVar();
   draw();
+}
+
+/** Смена размеров без window.resize (Telegram expand, адресная строка, клавиатура). */
+function setupStageLayoutSync() {
+  const wrap = canvas?.parentElement;
+  if (!wrap) return;
+  const schedule = () => {
+    requestAnimationFrame(() => resizeCanvas());
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => schedule());
+    ro.observe(wrap);
+  }
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", schedule);
+  }
 }
 
 function centerIfNeeded(w, h) {
@@ -3301,6 +3370,14 @@ function placePixel(gx, gy) {
       lastZoneGx = gx - 2;
       lastZoneGy = gy - 2;
       wsSendJson({ type: "purchaseMassCapture", x: gx, y: gy });
+      pendingMapAction = null;
+      setPendingHint();
+      return;
+    }
+    if (pendingMapAction.type === "zone12Capture") {
+      lastZoneGx = gx - 5;
+      lastZoneGy = gy - 5;
+      wsSendJson({ type: "purchaseZone12Capture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
       return;
@@ -3549,6 +3626,7 @@ async function bootstrap() {
   updateToolbarHud();
 
   window.addEventListener("resize", resizeCanvas);
+  setupStageLayoutSync();
   window.addEventListener("pagehide", () => {
     flushToStorage();
   });

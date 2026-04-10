@@ -346,17 +346,22 @@ body {
 }
 
 .quick-buy-rail {
-  position: absolute;
-  z-index: 7;
-  right: max(4px, env(safe-area-inset-right, 0px));
+  /* fixed: не режется overflow у .app__main, стабильно на iPhone / Telegram WebView */
+  position: fixed;
+  z-index: 18;
+  right: max(8px, env(safe-area-inset-right, 0px));
   top: calc(var(--safe-top) + var(--toolbar-h) + 4px);
   max-height: min(52vh, calc(100dvh - var(--safe-top) - var(--toolbar-h) - 120px));
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 4px;
-  width: 88px;
+  width: min(88px, calc(100vw - 16px));
+  max-width: 92px;
   pointer-events: auto;
+  isolation: isolate;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
 }
 
 .quick-buy-rail[hidden] {
@@ -1117,21 +1122,7 @@ body {
 }
 
 /* —— VFX: карта, оверлей, покупки —— */
-.stage-wrap--alive {
-  transform-origin: center center;
-  animation: stage-breathe 12s ease-in-out infinite;
-}
-
-@keyframes stage-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.003);
-  }
-}
-
+/* transform на предке <canvas> не используем — в WebView Telegram возможны артефакты отрисовки. */
 .board-vfx {
   position: absolute;
   inset: 0;
@@ -1384,10 +1375,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .stage-wrap--alive {
-    animation: none;
-  }
-
   .app.fx-speed::after,
   .app.fx-recovery::after,
   .app.fx-flash::after {
