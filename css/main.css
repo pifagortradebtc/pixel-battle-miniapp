@@ -175,9 +175,8 @@ body {
   min-height: var(--toolbar-h);
   padding: 8px calc(10px + env(safe-area-inset-right, 0px)) 8px calc(10px + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--hud-border);
-  background: var(--hud-bg);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  /* Без backdrop-filter: в Telegram WebView размытие часто «тянется» на пол-экрана над картой */
+  background: rgba(5, 10, 18, 0.82);
   pointer-events: auto;
   min-width: 0;
   box-sizing: border-box;
@@ -259,9 +258,19 @@ body {
 .toolbar__actions .toolbar__btn,
 .toolbar__actions .toolbar__discussion,
 .toolbar__actions .toolbar__conn,
-.toolbar__actions .toolbar__spectator,
-.toolbar__actions .toolbar__cooldown {
+.toolbar__actions .toolbar__spectator {
   flex-shrink: 0;
+}
+
+/* Подсказка к зоне — одна строка с ellipsis; иначе длинный текст ломает сетку шапки */
+.toolbar__actions .toolbar__cooldown {
+  flex: 1 1 auto;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: min(46vw, 200px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .toolbar__conn {
@@ -354,7 +363,7 @@ body {
   opacity: 0.88;
 }
 
-/* Блок «Снова» в нижней панели (горизонтальный скролл) */
+/* Блок «Снова»: ровно 3 последние покупки в строку, без горизонтального скролла */
 .quick-buy-rail {
   pointer-events: auto;
   isolation: isolate;
@@ -370,11 +379,11 @@ body {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex: 1 1 auto;
   min-width: 0;
-  /* Видимая ширина списка ~202px (3×64px + 2 gap) — три карточки целиком, без четвёртой; подпись «Снова» ближе к команде */
-  max-width: min(44%, 232px);
+  /* Шире блок — «Снова» и три карточки умещаются в одну строку */
+  max-width: min(78%, 300px);
   justify-content: flex-start;
 }
 
@@ -384,27 +393,41 @@ body {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: color-mix(in srgb, var(--tg-hint) 88%, transparent);
-  text-align: center;
+  text-align: left;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
   flex-shrink: 0;
   line-height: 1.15;
-  max-width: 2.6em;
+  width: 2.4em;
+  min-width: 2.4em;
 }
 
 .quick-buy-rail__list {
   display: flex;
   flex-direction: row;
-  gap: 5px;
-  overflow-x: auto;
+  gap: 4px;
+  overflow-x: hidden;
   overflow-y: hidden;
-  overscroll-behavior-x: contain;
+  overscroll-behavior-x: none;
   padding: 2px 0;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: thin;
   flex: 1 1 auto;
   min-width: 0;
   max-height: 52px;
   align-items: stretch;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.quick-buy-rail__list::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* Три кнопки делят ширину поровну — без бегунка */
+.quick-buy-rail__list .quick-buy-rail__btn {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: none;
 }
 
 .quick-buy-rail__btn {
@@ -413,18 +436,27 @@ body {
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.38);
   color: var(--tg-text);
-  padding: 3px 3px 4px;
+  padding: 2px 2px 3px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1px;
+  justify-content: center;
+  gap: 0;
   min-height: 0;
-  min-width: 52px;
-  max-width: 64px;
-  flex-shrink: 0;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
   transition: transform 0.12s ease, filter 0.15s ease, opacity 0.15s ease, box-shadow 0.2s ease;
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+}
+
+.quick-buy-rail__list .quick-buy-rail__label,
+.quick-buy-rail__list .quick-buy-rail__price {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .quick-buy-rail__btn:hover:not(:disabled) {
@@ -566,9 +598,7 @@ body {
   gap: 0;
   padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--hud-border);
-  background: var(--hud-bg);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(5, 10, 18, 0.82);
   pointer-events: auto;
 }
 
@@ -1236,8 +1266,9 @@ body {
   transform: translate(-50%, -200%) scale(0.88);
 }
 
-.app.fx-speed::after,
-.app.fx-recovery::after {
+/* Только fx-speed (если класс когда-либо включат). Бафф личного восстановления — без полноэкранного слоя:
+   иначе градиент + пульс выглядят как перекрытие/«туман» на половине карты в WebView. */
+.app.fx-speed::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -1245,9 +1276,9 @@ body {
   z-index: 5;
   background: linear-gradient(
     185deg,
-    rgba(120, 200, 255, 0.18) 0%,
-    transparent 42%,
-    rgba(99, 102, 241, 0.08) 100%
+    rgba(120, 200, 255, 0.12) 0%,
+    transparent 38%,
+    rgba(99, 102, 241, 0.05) 100%
   );
   animation: fx-speed-pulse 0.45s ease-in-out 5;
 }
@@ -1430,7 +1461,6 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .app.fx-speed::after,
-  .app.fx-recovery::after,
   .app.fx-flash::after {
     animation: none;
     opacity: 0;

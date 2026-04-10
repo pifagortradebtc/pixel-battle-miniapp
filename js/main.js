@@ -1426,7 +1426,7 @@ function syncEventBanner() {
 }
 
 function syncClientCooldownFromWalletFields() {
-  if (!walletState || walletState.devUnlimited) return;
+  if (!walletState) return;
   const u = {
     personalRecoveryUntil: walletState.personalRecoveryUntil,
     personalRecoverySec: walletState.personalRecoverySec,
@@ -1443,7 +1443,6 @@ function syncClientCooldownFromWalletFields() {
 /** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || 20000` (ломает 0 и баффы). */
 function getWalletActionCooldownMs() {
   if (!walletState) return 20000;
-  if (walletState.devUnlimited) return 0;
   const sec = walletState.effectiveRecoverySec;
   if (typeof sec === "number" && Number.isFinite(sec) && sec >= 0) {
     return Math.max(0, Math.round(sec * 1000));
@@ -1537,7 +1536,7 @@ function formatBuffRemainingMs(ms) {
 function updateActiveBuffBars() {
   if (!toolbarBuffsEl) return;
   const online = wantOnline && getWsUrl();
-  if (!online || spectatorMode || !walletState || walletState.devUnlimited) {
+  if (!online || spectatorMode || !walletState) {
     toolbarBuffsEl.hidden = true;
     if (toolbarBuffPersonalEl) toolbarBuffPersonalEl.hidden = true;
     if (toolbarBuffTeamEl) toolbarBuffTeamEl.hidden = true;
@@ -1651,12 +1650,6 @@ function updateToolbarPixelTimer() {
     el.title = "Вступите в команду";
     return;
   }
-  if (walletState.devUnlimited) {
-    el.textContent = "Готово";
-    el.classList.add("toolbar__pixel-timer--ready");
-    el.title = "Тест: безлимитные кванты — клик без паузы (всегда «Готово»).";
-    return;
-  }
   const cd = getWalletActionCooldownMs();
   const la = getOnlineLastPixelActionAt();
   const left = la + cd - Date.now();
@@ -1714,7 +1707,8 @@ function updateWalletBar() {
   if (walletState.devUnlimited) {
     prevWalletQuant = null;
     walletBalanceEl.textContent = "💰 ∞ квантов (тест)";
-    walletBalanceEl.title = "Режим теста: бесконечные кванты. Готовность к клику — слева («Готово»).";
+    walletBalanceEl.title =
+      "Режим теста: бесконечные кванты. Интервал между пикселями — как у всех (таймер слева).";
   } else {
     const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
     const t = usdtToQuant(b);
@@ -1754,8 +1748,6 @@ function applyGlobalPurchaseVfx(msg) {
 
   if (kind === "personalRecovery") {
     if (boardVfx) {
-      app?.classList.add("fx-recovery");
-      setTimeout(() => app?.classList.remove("fx-recovery"), 2400);
       boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
@@ -1965,7 +1957,7 @@ function renderQuickBuyRail() {
     host.innerHTML = "";
     return;
   }
-  const list = loadQuickBuyHistory();
+  const list = loadQuickBuyHistory().slice(0, 3);
   if (!list.length) {
     rail.hidden = true;
     host.innerHTML = "";
@@ -2178,21 +2170,17 @@ function updateShopAvailability() {
   });
   const effEl = document.getElementById("shop-effective-recovery-hint");
   if (effEl) {
-    if (walletState.devUnlimited) {
-      effEl.textContent = "";
-    } else {
-      const now = Date.now();
-      const sec = walletState.effectiveRecoverySec ?? 20;
-      const pu = walletState.personalRecoveryUntil > now;
-      const tu = walletState.teamEffects?.teamRecoveryUntil > now;
-      let sub = "";
-      if (pu || tu) {
-        const p = pu ? `личн. ${walletState.personalRecoverySec} с` : null;
-        const t = tu ? `ком. ${walletState.teamEffects.teamRecoverySec} с` : null;
-        sub = ` Активно: ${[p, t].filter(Boolean).join(", ")}.`;
-      }
-      effEl.textContent = `Сейчас пиксель каждые ~${sec} с (минимум из базы 20 с и баффов).${sub}`;
+    const now = Date.now();
+    const sec = walletState.effectiveRecoverySec ?? 20;
+    const pu = walletState.personalRecoveryUntil > now;
+    const tu = walletState.teamEffects?.teamRecoveryUntil > now;
+    let sub = "";
+    if (pu || tu) {
+      const p = pu ? `личн. ${walletState.personalRecoverySec} с` : null;
+      const t = tu ? `ком. ${walletState.teamEffects.teamRecoverySec} с` : null;
+      sub = ` Активно: ${[p, t].filter(Boolean).join(", ")}.`;
     }
+    effEl.textContent = `Сейчас пиксель каждые ~${sec} с (минимум из базы 20 с и баффов).${sub}`;
   }
   if (shopEffects) {
     const te = walletState.teamEffects;
@@ -2480,22 +2468,36 @@ function setupEconomyUi() {
 }
 
 function setPendingHint() {
-  const text = (() => {
+  const full = (() => {
     if (!pendingMapAction) return "";
-    if (pendingMapAction.type === "zoneCapture") return "Зона 4×4: тап по углу области — все 16 клеток перекрасятся";
-    if (pendingMapAction.type === "massCapture") return "Масс-захват 6×6: тап по центру — все 36 клеток перекрасятся";
-    if (pendingMapAction.type === "zone12Capture") return "Зона 12×12: тап по центру — 144 клетки перекрасятся";
+    if (pendingMapAction.type === "zoneCapture")
+      return "Зона 4×4: тап по углу области — все 16 клеток перекрасятся";
+    if (pendingMapAction.type === "massCapture")
+      return "Масс-захват 6×6: тап по центру — все 36 клеток перекрасятся";
+    if (pendingMapAction.type === "zone12Capture")
+      return "Зона 12×12: тап по центру — 144 клетки перекрасятся";
     return "";
   })();
+  /** Короткая строка в шапке — иначе длинный текст раздувает toolbar на пол-экрана */
+  const short = (() => {
+    if (!pendingMapAction) return "";
+    if (pendingMapAction.type === "zoneCapture") return "4×4 · тап по карте";
+    if (pendingMapAction.type === "massCapture") return "6×6 · тап по центру";
+    if (pendingMapAction.type === "zone12Capture") return "12×12 · тап по центру";
+    return "";
+  })();
+  const text = short;
   if (shopPending) {
-    shopPending.hidden = !text;
-    shopPending.textContent = text;
+    shopPending.hidden = !full;
+    shopPending.textContent = full;
   }
   if (cooldownLabel && text) {
     cooldownLabel.hidden = false;
     cooldownLabel.textContent = text;
+    cooldownLabel.title = full;
   } else if (cooldownLabel && !text) {
     cooldownLabel.hidden = true;
+    cooldownLabel.title = "";
   }
 }
 
