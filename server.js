@@ -40,12 +40,29 @@ const WS_PATH = "/ws";
 const DATA_DIR = path.join(ROOT, "data");
 const walletStore = new WalletStore({ dataDir: DATA_DIR });
 
+/** Пакеты пополнения: бонус в Туграх (1 USDT = 7 Тугров). Кредит USDT += bonusTugry/7. */
+const DEPOSIT_PACK_BONUS_TUGRY = new Map([
+  [1, 0],
+  [5, 3],
+  [10, 8],
+  [20, 20],
+  [50, 70],
+]);
+
+function depositBonusTugryAllowed(amountUsdt, bonusTugry) {
+  const bt = bonusTugry | 0;
+  const rounded = Math.round(Number(amountUsdt) * 100) / 100;
+  const match = [...DEPOSIT_PACK_BONUS_TUGRY.keys()].find((k) => Math.abs(k - rounded) < 1e-6);
+  if (match === undefined) return bt === 0;
+  return DEPOSIT_PACK_BONUS_TUGRY.get(match) === bt;
+}
+
 const NOWPAYMENTS_API_KEY = (process.env.NOWPAYMENTS_API_KEY || "").trim();
 const NOWPAYMENTS_IPN_SECRET = (process.env.NOWPAYMENTS_IPN_SECRET || "").trim();
 /** USDT на Binance Smart Chain (BEP20) в NOWPayments — обычно `usdtbsc` */
 const NOWPAYMENTS_PAY_CURRENCY = (process.env.NOWPAYMENTS_PAY_CURRENCY || "usdtbsc").trim().toLowerCase();
-/** В API NOWPayments сумма счёта часто задаётся как USD; 1 USDT ≈ 1 USD — зачисление на баланс в USDT */
-const NOWPAYMENTS_PRICE_CURRENCY = (process.env.NOWPAYMENTS_PRICE_CURRENCY || "usd").trim().toLowerCase();
+/** База суммы счёта: `usdtbsc` = та же сеть, что оплата — на инвойсе ~ровно N USDT, без пересчёта из USD */
+const NOWPAYMENTS_PRICE_CURRENCY = (process.env.NOWPAYMENTS_PRICE_CURRENCY || "usdtbsc").trim().toLowerCase();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.APP_URL || "").replace(/\/$/, "");
 const NOWPAYMENTS_API_BASE = /^true$/i.test(String(process.env.NOWPAYMENTS_SANDBOX || "").trim())
   ? API_BASE_SANDBOX
@@ -123,14 +140,18 @@ const WAIT_FOR_TELEGRAM_GO = Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.si
 /** По умолчанию выкл.: «рестарт»/restart в боте не перезапускает процесс (избегаем случайного сброса всех сессий). */
 const TELEGRAM_ENABLE_PROCESS_RESTART = /^true$/i.test(String(process.env.TELEGRAM_ENABLE_PROCESS_RESTART || "").trim());
 
-/** Ссылка на Mini App: полная `https://t.me/BotUser/appname` или собрать из username + short name (BotFather) */
+/**
+ * Mini App URL (одно из):
+ * - Прямой HTTPS игры, тот же что в BotFather → Mini App (рекомендуется): `https://xxx.onrender.com/`
+ * - Или `https://t.me/BotUser/shortname` — shortname должен ТОЧНО совпадать с именем Mini App в BotFather, иначе «Веб-приложение не найдено».
+ */
 const TELEGRAM_MINIAPP_LINK = (process.env.TELEGRAM_MINIAPP_LINK || "").trim();
 const TELEGRAM_BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || "").replace(/^@/, "").trim();
 const TELEGRAM_MINIAPP_SHORT_NAME = (process.env.TELEGRAM_MINIAPP_SHORT_NAME || "").trim();
 const TELEGRAM_START_MESSAGE =
   (process.env.TELEGRAM_START_MESSAGE || "").trim() ||
-  "Добро пожаловать в Pixel Battle!\n\nНажми кнопку ниже, чтобы открыть игру в Telegram.";
-const TELEGRAM_START_BUTTON_TEXT = (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "🎮 Запустить игру";
+  "Создай команду, захвати больше пикселей, попади в финал, получи 5000 USDT.";
+const TELEGRAM_START_BUTTON_TEXT = (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "Запустить игру";
 
 function getTelegramMiniAppLaunchUrl() {
   if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
@@ -150,15 +171,42 @@ function buildMiniAppOpenUrl(startPayload) {
   const base = getTelegramMiniAppLaunchUrl();
   if (!base) return "";
   if (!startPayload) return base;
-  const sep = base.includes("?") ? "&" : "?";
-  return `${base}${sep}startapp=${encodeURIComponent(startPayload)}`;
+  if (/^https:\/\/t\.me\//i.test(base)) {
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}startapp=${encodeURIComponent(startPayload)}`;
+  }
+  try {
+    const u = new URL(base);
+    u.searchParams.set("startapp", startPayload);
+    return u.toString();
+  } catch {
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}startapp=${encodeURIComponent(startPayload)}`;
+  }
+}
+
+/**
+ * Кнопка «Запустить игру»: для t.me/бот/shortname — поле url; для https://ваш-сайт — web_app (домен в BotFather → Mini App).
+ * Иначе Telegram часто показывает «Веб-приложение не найдено», если short name в env не совпадает с BotFather.
+ */
+function buildTelegramStartInlineButton(launchUrl) {
+  if (!launchUrl || !/^https:\/\//i.test(launchUrl)) return null;
+  const row = { text: TELEGRAM_START_BUTTON_TEXT };
+  if (/^https:\/\/t\.me\//i.test(launchUrl)) {
+    return { ...row, url: launchUrl };
+  }
+  return { ...row, web_app: { url: launchUrl } };
 }
 
 function isStartCommand(text) {
   return /^\/start(?:@[\w]+)?(?:\s|$)/i.test(String(text || "").trim());
 }
 
-/** Числовые Telegram user id: бесконечный баланс и обход кулдаунов/ограничений магазина (только при playerKey tg_<id>). */
+/**
+ * Бесконечный баланс для выбранных аккаунтов (playerKey вида tg_<id> после валидного initData).
+ * Задайте на сервере: DEV_UNLIMITED_WALLET_TG_IDS=123456789 (несколько id через запятую).
+ * Либо DEV_UNLIMITED_WALLET_MATCH_ADMIN=true и добавьте id в TELEGRAM_ADMIN_IDS.
+ */
 function buildDevUnlimitedWalletTgSet() {
   const s = new Set();
   for (const id of (process.env.DEV_UNLIMITED_WALLET_TG_IDS || "").split(",")) {
@@ -867,8 +915,21 @@ async function handleApi(req, res) {
       res.end(JSON.stringify({ ok: false }));
       return;
     }
+    const bonusTugry = parts.length >= 4 ? Number(parts[3]) | 0 : 0;
+    const rounded = Math.round(creditUsdt * 100) / 100;
+    let extraUsdt = 0;
+    if (bonusTugry > 0) {
+      const matchKey = [...DEPOSIT_PACK_BONUS_TUGRY.keys()].find((k) => Math.abs(k - rounded) < 1e-6);
+      const expected = matchKey !== undefined ? DEPOSIT_PACK_BONUS_TUGRY.get(matchKey) : undefined;
+      if (expected === bonusTugry) {
+        extraUsdt = Math.round((bonusTugry / 7) * 1e6) / 1e6;
+      }
+    }
     walletStore.markPaymentProcessed(npId);
-    walletStore.credit(playerKey, creditUsdt, { nowPaymentId: String(npId), txHash: String(body.outcome_hash || "") });
+    walletStore.credit(playerKey, creditUsdt + extraUsdt, {
+      nowPaymentId: String(npId),
+      txHash: String(body.outcome_hash || ""),
+    });
     res.writeHead(200);
     res.end(JSON.stringify({ ok: true }));
     return;
@@ -903,9 +964,15 @@ async function handleApi(req, res) {
     }
     const playerKey = sanitizePlayerKey(body.playerKey);
     const amount = Number(body.amount);
+    const bonusTugry = Number.isFinite(Number(body.bonusTugry)) ? Number(body.bonusTugry) | 0 : 0;
     if (!playerKey || !Number.isFinite(amount) || amount < 1 || amount > MAX_DEPOSIT_USDT) {
       res.writeHead(400);
       res.end(JSON.stringify({ ok: false, error: "bad request" }));
+      return;
+    }
+    if (!depositBonusTugryAllowed(amount, bonusTugry)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "bad bonus" }));
       return;
     }
     if (TELEGRAM_BOT_TOKEN) {
@@ -929,7 +996,10 @@ async function handleApi(req, res) {
         return;
       }
     }
-    const orderId = `dep|${playerKey}|${Date.now()}`;
+    const orderId =
+      bonusTugry > 0
+        ? `dep|${playerKey}|${Date.now()}|${bonusTugry}`
+        : `dep|${playerKey}|${Date.now()}`;
     const ipnUrl = `${PUBLIC_BASE_URL}/api/ipn`;
     try {
       const payCur =
@@ -2274,10 +2344,11 @@ async function telegramPollLoop() {
 
         if (isStartCommand(t)) {
           const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
-          if (launchUrl) {
+          const startBtn = launchUrl ? buildTelegramStartInlineButton(launchUrl) : null;
+          if (startBtn) {
             await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
               reply_markup: {
-                inline_keyboard: [[{ text: TELEGRAM_START_BUTTON_TEXT, url: launchUrl }]],
+                inline_keyboard: [[startBtn]],
               },
             });
           } else {

@@ -4,6 +4,8 @@
  * остальные в команде рисуют цветом команды (задаёт создатель).
  */
 
+import { createBoardVfx, spawnFloatingText } from "./vfx.js";
+
 let gridW = 320;
 let gridH = 320;
 const BASE_CELL = 4;
@@ -154,6 +156,19 @@ const shopClose = document.getElementById("shop-close");
 const shopStageHint = document.getElementById("shop-stage-hint");
 const shopEffects = document.getElementById("shop-effects");
 const shopPending = document.getElementById("shop-pending");
+const canvasVfx = document.getElementById("board-vfx");
+const floatFxHost = document.getElementById("float-fx");
+
+/** @type {ReturnType<typeof createBoardVfx> | null} */
+let boardVfx = null;
+let mapAnimTimer = null;
+/** Последний тап линии (для VFX) */
+let lastLineTapGx = 0;
+let lastLineTapGy = 0;
+let lastLineDir = "up";
+let lastZoneGx = 0;
+let lastZoneGy = 0;
+let prevWalletTugry = null;
 
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
@@ -221,6 +236,29 @@ let pendingLeaveToTeamList = false;
 let walletState = null;
 /** Ожидание тапа по карте: линия / щит / зона */
 let pendingMapAction = null;
+/** Бонус тугр к депозиту (см. пакеты на сервере) */
+let depositBonusTugry = 0;
+
+const TUGRY_PER_USDT = 7;
+
+function tugryWord(n) {
+  const x = Math.abs(Math.round(n)) % 100;
+  const v = x % 10;
+  if (x > 10 && x < 20) return "Тугров";
+  if (v === 1) return "Тугр";
+  if (v >= 2 && v <= 4) return "Тугра";
+  return "Тугров";
+}
+
+function usdtToTugry(usdt) {
+  return Math.round(Number(usdt) * TUGRY_PER_USDT);
+}
+
+function formatApproxUsdt(usdt) {
+  if (!Number.isFinite(usdt) || usdt <= 0) return "~0 USDT";
+  const s = usdt >= 10 ? String(Math.round(usdt)) : String(Math.round(usdt * 10) / 10).replace(/\.0$/, "");
+  return `~${s} USDT`;
+}
 
 function parseQuery() {
   const q = new URLSearchParams(location.search);
@@ -290,6 +328,17 @@ function countryColor(regionId) {
 function teamColor(teamId) {
   const t = teamsMeta?.find((x) => x.id === teamId);
   return t ? t.color : "#888888";
+}
+
+function hexToRgb(hex) {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex || "");
+  return m
+    ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) }
+    : { r: 136, g: 136, b: 136 };
+}
+
+function getVfxTransform() {
+  return { offsetX, offsetY, scale, gridW, gridH, BASE_CELL };
 }
 
 function paletteIndexForHex(hex) {
@@ -1234,17 +1283,27 @@ function applyWalletFromServer(msg) {
 
 function syncShopHeaderBalance() {
   const el = document.getElementById("shop-display-balance");
+  const unitEl = document.getElementById("shop-display-balance-unit");
+  const subEl = document.getElementById("shop-display-usdt-sub");
   if (!el) return;
   const online = wantOnline && getWsUrl();
   if (!online || !walletState) {
     el.textContent = "—";
+    if (unitEl) unitEl.textContent = "";
+    if (subEl) subEl.textContent = "";
     return;
   }
-  if (walletState.devUnlimited) el.textContent = "∞";
-  else {
-    const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
-    el.textContent = b.toFixed(2);
+  if (walletState.devUnlimited) {
+    el.textContent = "∞";
+    if (unitEl) unitEl.textContent = "Тугр";
+    if (subEl) subEl.textContent = "";
+    return;
   }
+  const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
+  const t = usdtToTugry(b);
+  el.textContent = String(t);
+  if (unitEl) unitEl.textContent = tugryWord(t);
+  if (subEl) subEl.textContent = formatApproxUsdt(b);
 }
 
 function syncShopDepositButton() {
@@ -1261,6 +1320,7 @@ function updateWalletBar() {
   if (!walletBalanceEl) return;
   const online = wantOnline && getWsUrl();
   if (!online || !walletState) {
+    prevWalletTugry = null;
     walletBalanceEl.hidden = true;
     if (btnDeposit) btnDeposit.hidden = true;
     if (btnShop) btnShop.hidden = true;
@@ -1272,22 +1332,84 @@ function updateWalletBar() {
   if (btnDeposit) btnDeposit.hidden = spectatorMode || !!walletState.devUnlimited;
   if (btnShop) btnShop.hidden = spectatorMode;
   if (walletState.devUnlimited) {
-    walletBalanceEl.textContent = "💰 ∞ USDT (тест)";
-    walletBalanceEl.title = "Режим теста на сервере: бесконечный баланс";
+    prevWalletTugry = null;
+    walletBalanceEl.textContent = "💰 ∞ Тугр (тест)";
+    walletBalanceEl.title = "Режим теста: бесконечные тугры";
   } else {
     const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
-    walletBalanceEl.textContent = `💰 ${b.toFixed(2)} USDT`;
+    const t = usdtToTugry(b);
+    if (prevWalletTugry !== null && prevWalletTugry !== t) {
+      walletBalanceEl.classList.add("toolbar__wallet--pulse");
+      setTimeout(() => walletBalanceEl.classList.remove("toolbar__wallet--pulse"), 700);
+    }
+    prevWalletTugry = t;
+    walletBalanceEl.textContent = `💰 ${t} ${tugryWord(t)}`;
   }
   const cd = walletState.cooldownMs || 30000;
   const la = walletState.lastActionAt || 0;
   const left = Math.max(0, la + cd - Date.now());
   if (left > 500 && !spectatorMode) {
-    walletBalanceEl.title = `След. ход ~${(left / 1000).toFixed(1)} с`;
+    walletBalanceEl.title = `След. ход ~${(left / 1000).toFixed(1)} с · баланс в туграх`;
   } else {
-    walletBalanceEl.title = "Внутренний баланс (без вывода)";
+    walletBalanceEl.title = "Игровая валюта — Тугры. Пополнение оплачивается в USDT.";
   }
   syncShopHeaderBalance();
   syncShopDepositButton();
+}
+
+function handlePurchaseOk(msg) {
+  const app = document.getElementById("app");
+  const tr = getVfxTransform();
+  const kind = msg.kind;
+  const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
+
+  if (kind === "speedBoost" && boardVfx) {
+    app?.classList.add("fx-speed");
+    setTimeout(() => app?.classList.remove("fx-speed"), 2400);
+    boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    spawnFloatingText(floatFxHost, "⚡ УСКОРЕНИЕ", flo, "float-fx__pop--gold");
+  }
+  if (kind === "cooldownUpgrade") {
+    app?.classList.add("fx-flash");
+    setTimeout(() => app?.classList.remove("fx-flash"), 350);
+    spawnFloatingText(floatFxHost, "⏱ КУЛДАУН ↑", { x: flo.x, y: flo.y + 8 }, "float-fx__pop--gold");
+  }
+  if (kind === "lineCapture" && boardVfx && myTeamId != null) {
+    boardVfx.lineBeam(lastLineTapGx, lastLineTapGy, lastLineDir, teamColor(myTeamId), tr, 5);
+    spawnFloatingText(floatFxHost, "ЛИНИЯ!", flo, "float-fx__pop--gold");
+  }
+  if (kind === "teamBoost") {
+    app?.classList.add("fx-team-boost");
+    setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
+    spawnFloatingText(floatFxHost, "👥 БУСТ КОМАНДЫ", { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
+  }
+  if (kind === "raidBoost") {
+    spawnFloatingText(floatFxHost, "💥 РЕЙД!", { x: flo.x, y: flo.y - 10 }, "float-fx__pop--raid");
+  }
+  if (kind === "teamShieldZone") {
+    spawnFloatingText(floatFxHost, "🛡 ЗОНА 4×4", { x: flo.x, y: flo.y - 6 }, "float-fx__pop--gold");
+  }
+}
+
+function startMapAnimLoop() {
+  if (mapAnimTimer) return;
+  mapAnimTimer = setInterval(() => {
+    if (wantOnline && getWsUrl()) draw(performance.now());
+  }, 45);
+}
+
+function stopMapAnimLoop() {
+  if (mapAnimTimer) {
+    clearInterval(mapAnimTimer);
+    mapAnimTimer = null;
+  }
+}
+
+function vfxLoop(now) {
+  if (boardVfx && canvasVfx) {
+    boardVfx.render(now || performance.now(), getVfxTransform());
+  }
+  requestAnimationFrame(vfxLoop);
 }
 
 function updateShopAvailability() {
@@ -1350,6 +1472,7 @@ function fmtTime(ts) {
 
 function setupEconomyUi() {
   btnDeposit?.addEventListener("click", () => {
+    depositBonusTugry = 0;
     if (depositOverlay) depositOverlay.hidden = false;
     if (depositError) depositError.hidden = true;
   });
@@ -1362,8 +1485,13 @@ function setupEconomyUi() {
   document.querySelectorAll(".deposit-amt").forEach((b) => {
     b.addEventListener("click", () => {
       const a = Number(b.dataset.amt);
+      const bon = Number(b.dataset.bonus ?? 0);
+      depositBonusTugry = Number.isFinite(bon) ? bon | 0 : 0;
       if (depositCustom) depositCustom.value = String(a);
     });
+  });
+  depositCustom?.addEventListener("input", () => {
+    depositBonusTugry = 0;
   });
   depositSubmit?.addEventListener("click", async () => {
     if (depositSubmit?.disabled) return;
@@ -1387,6 +1515,7 @@ function setupEconomyUi() {
         body: JSON.stringify({
           playerKey: getOrCreatePlayerKey(),
           amount,
+          bonusTugry: depositBonusTugry,
           payCurrency: DEPOSIT_PAY_CURRENCY,
           initData: getTelegramInitDataForServer(),
         }),
@@ -1414,6 +1543,9 @@ function setupEconomyUi() {
           }
           if (msg === "rate limit" || msg.includes("rate")) {
             msg = "Слишком много попыток. Подождите минуту.";
+          }
+          if (msg === "bad bonus" || msg.includes("bad bonus")) {
+            msg = "Выберите пакет из списка или введите свою сумму без бонуса.";
           }
           depositError.textContent = msg;
           depositError.hidden = false;
@@ -1452,9 +1584,30 @@ function setupEconomyUi() {
   });
 
   document.getElementById("shop-open-deposit")?.addEventListener("click", () => {
+    depositBonusTugry = 0;
     if (shopOverlay) shopOverlay.hidden = true;
     if (depositOverlay) depositOverlay.hidden = false;
     if (depositError) depositError.hidden = true;
+  });
+
+  document.getElementById("shop-starter-cta")?.addEventListener("click", () => {
+    depositBonusTugry = 0;
+    if (depositCustom) depositCustom.value = "2";
+    if (shopOverlay) shopOverlay.hidden = true;
+    if (depositOverlay) depositOverlay.hidden = false;
+    if (depositError) depositError.hidden = true;
+  });
+
+  document.querySelectorAll(".shop-topup-pack").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const a = Number(btn.dataset.amt);
+      const bon = Number(btn.dataset.bonus ?? 0);
+      depositBonusTugry = Number.isFinite(bon) ? bon | 0 : 0;
+      if (depositCustom) depositCustom.value = String(a);
+      if (shopOverlay) shopOverlay.hidden = true;
+      if (depositOverlay) depositOverlay.hidden = false;
+      if (depositError) depositError.hidden = true;
+    });
   });
 
   (function setupGameShopTabs() {
@@ -1519,7 +1672,8 @@ function setupEconomyUi() {
         return;
       }
       if (action === "line") {
-        pendingMapAction = { type: "line", dir: btn.dataset.dir || "up" };
+        lastLineDir = btn.dataset.dir || "up";
+        pendingMapAction = { type: "line", dir: lastLineDir };
         setPendingHint();
         if (shopOverlay) shopOverlay.hidden = true;
       }
@@ -1529,6 +1683,19 @@ function setupEconomyUi() {
   setInterval(() => {
     if (walletState) updateWalletBar();
   }, 1000);
+
+  document.querySelectorAll(".game-shop__buy, .starter-pack__cta, .shop-topup-pack, .deposit-amt").forEach((btn) => {
+    btn.addEventListener(
+      "click",
+      () => {
+        btn.classList.remove("fx-btn-press");
+        void btn.offsetWidth;
+        btn.classList.add("fx-btn-press");
+        setTimeout(() => btn.classList.remove("fx-btn-press"), 280);
+      },
+      { passive: true }
+    );
+  });
 }
 
 function setPendingHint() {
@@ -1565,6 +1732,7 @@ function connectWs() {
   const url = getWsUrl();
   wantOnline = !!url;
   if (!url) {
+    stopMapAnimLoop();
     if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("local", "локально");
     setFooterMode();
@@ -1607,6 +1775,7 @@ function connectWs() {
     if (leaderboardPanel) leaderboardPanel.hidden = false;
     setFooterMode();
     updateRoundTimer();
+    startMapAnimLoop();
     try {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(
@@ -2020,10 +2189,22 @@ function connectWs() {
       return;
     }
     if (msg.type === "pixel") {
-      pixels.set(`${msg.x},${msg.y}`, {
+      const pk = `${msg.x},${msg.y}`;
+      const prev = pixels.get(pk);
+      const prevSh = typeof prev === "object" && prev ? prev.shieldedUntil || 0 : 0;
+      const newSh = typeof msg.shieldedUntil === "number" ? msg.shieldedUntil : 0;
+      pixels.set(pk, {
         teamId: msg.t,
-        shieldedUntil: typeof msg.shieldedUntil === "number" ? msg.shieldedUntil : 0,
+        shieldedUntil: newSh,
       });
+      const tr = getVfxTransform();
+      const col = teamColor(msg.t);
+      if (boardVfx) {
+        boardVfx.popPixel(msg.x, msg.y, col, tr);
+        if (newSh > Date.now() && newSh > prevSh) {
+          boardVfx.shieldBurst(msg.x, msg.y, col, tr);
+        }
+      }
       draw();
       schedulePersist();
       return;
@@ -2032,11 +2213,25 @@ function connectWs() {
       applyWalletFromServer(msg);
       return;
     }
+    if (msg.type === "purchaseOk") {
+      handlePurchaseOk(msg);
+      return;
+    }
     if (msg.type === "purchaseError") {
       notifyPurchaseError(msg.reason || "");
       return;
     }
     if (msg.type === "teamEffect") {
+      const tr = getVfxTransform();
+      const col = teamColor(msg.teamId);
+      if (msg.kind === "raidBoost" && boardVfx) {
+        const cx = canvas.clientWidth * 0.5;
+        const cy = canvas.clientHeight * 0.45;
+        boardVfx.shockwaveScreen(cx, cy, col);
+      }
+      if (msg.kind === "shieldZone" && boardVfx) {
+        boardVfx.zoneFlash(msg.cx, msg.cy, col, tr);
+      }
       if (walletState && msg.teamId === myTeamId && walletState.teamEffects) {
         const te = walletState.teamEffects;
         if (msg.kind === "teamBoost") te.teamBoostUntil = msg.until;
@@ -2061,6 +2256,7 @@ function connectWs() {
     clearTimeout(connectingHangTimer);
     connectingHangTimer = null;
     ws = null;
+    stopMapAnimLoop();
     const sess = loadOnlineSession();
     myTeamId = sess?.teamId ?? null;
     teamsMeta = null;
@@ -2171,6 +2367,14 @@ function resizeCanvas() {
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (canvasVfx) {
+    canvasVfx.width = Math.floor(w * dpr);
+    canvasVfx.height = Math.floor(h * dpr);
+    canvasVfx.style.width = `${w}px`;
+    canvasVfx.style.height = `${h}px`;
+    const vctx = canvasVfx.getContext("2d");
+    if (vctx) vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
   centerIfNeeded(w, h);
   draw();
 }
@@ -2190,10 +2394,11 @@ function screenToGrid(sx, sy) {
   return { gx, gy };
 }
 
-function draw() {
+function draw(time = performance.now()) {
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   const cell = BASE_CELL * scale;
+  const pulse = 0.5 + 0.5 * Math.sin(time * 0.0018);
 
   ctx.fillStyle = "#050810";
   ctx.fillRect(0, 0, w, h);
@@ -2222,17 +2427,75 @@ function draw() {
       if (owner !== undefined) {
         if (online) {
           const tid = typeof owner === "number" ? owner : owner.teamId;
-          ctx.fillStyle = teamColor(tid);
+          const tc = teamColor(tid);
+          ctx.fillStyle = tc;
           ctx.fillRect(px, py, cw, ch);
+          const { r, g, b } = hexToRgb(tc);
+          const lg = ctx.createLinearGradient(px, py, px + cw, py + ch);
+          lg.addColorStop(0, `rgba(255,255,255,${0.06 + pulse * 0.04})`);
+          lg.addColorStop(0.5, `rgba(${r},${g},${b},0.12)`);
+          lg.addColorStop(1, `rgba(0,0,0,${0.12 + pulse * 0.04})`);
+          ctx.fillStyle = lg;
+          ctx.fillRect(px, py, cw, ch);
+          if (tid === myTeamId) {
+            ctx.shadowColor = tc;
+            ctx.shadowBlur = Math.min(18, cell * 0.45);
+            ctx.strokeStyle = `rgba(255,255,255,${0.2 + pulse * 0.08})`;
+            ctx.lineWidth = Math.max(1, cell * 0.06);
+            ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+            ctx.shadowBlur = 0;
+          }
           const sh = typeof owner === "object" && owner ? owner.shieldedUntil || 0 : 0;
           if (sh > Date.now()) {
-            ctx.strokeStyle = "rgba(80, 200, 255, 0.85)";
-            ctx.lineWidth = Math.max(1, cell * 0.08);
+            ctx.strokeStyle = `rgba(120, 220, 255, ${0.75 + pulse * 0.15})`;
+            ctx.lineWidth = Math.max(1, cell * 0.06);
             ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+            ctx.fillStyle = `rgba(100, 200, 255, ${0.06 + pulse * 0.03})`;
+            ctx.fillRect(px, py, cw, ch);
           }
         } else {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
           ctx.fillRect(px, py, cw, ch);
+        }
+      }
+    }
+  }
+
+  if (online && cell >= 3) {
+    const edgePhase = (Math.sin(time * 0.0022) + 1) * 0.5;
+    for (let gy = y0; gy <= y1; gy++) {
+      for (let gx = x0; gx <= x1; gx++) {
+        const key = `${gx},${gy}`;
+        const owner = pixels.get(key);
+        if (!owner) continue;
+        const tid = typeof owner === "number" ? owner : owner.teamId;
+        const cw = Math.ceil(cell);
+        const ch = Math.ceil(cell);
+        const px = offsetX + gx * cell;
+        const py = offsetY + gy * cell;
+        const neighbors = [
+          [1, 0],
+          [0, 1],
+        ];
+        for (const [dx, dy] of neighbors) {
+          const nk = `${gx + dx},${gy + dy}`;
+          const ow = pixels.get(nk);
+          const ntid = ow ? (typeof ow === "number" ? ow : ow.teamId) : null;
+          if (ntid !== tid) {
+            const ph = time * 0.003 + gx * 0.15 + gy * 0.15;
+            const a = 0.08 + edgePhase * 0.12 * (0.5 + 0.5 * Math.sin(ph));
+            ctx.strokeStyle = `rgba(255,255,255,${a})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            if (dx === 1) {
+              ctx.moveTo(px + cw, py);
+              ctx.lineTo(px + cw, py + ch);
+            } else {
+              ctx.moveTo(px, py + ch);
+              ctx.lineTo(px + cw, py + ch);
+            }
+            ctx.stroke();
+          }
         }
       }
     }
@@ -2280,12 +2543,17 @@ function placePixel(gx, gy) {
 
   if (online && pendingMapAction) {
     if (pendingMapAction.type === "line") {
+      lastLineTapGx = gx;
+      lastLineTapGy = gy;
+      lastLineDir = pendingMapAction.dir || "up";
       wsSendJson({ type: "lineCapture", x: gx, y: gy, dir: pendingMapAction.dir });
       pendingMapAction = null;
       setPendingHint();
       return;
     }
     if (pendingMapAction.type === "zone") {
+      lastZoneGx = gx;
+      lastZoneGy = gy;
       wsSendJson({ type: "purchaseTeamShieldZone", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -2317,6 +2585,9 @@ function placePixel(gx, gy) {
     sendPixelOnline(gx, gy);
   } else {
     pixels.set(`${gx},${gy}`, selectedColor);
+    if (boardVfx) {
+      boardVfx.popPixel(gx, gy, PALETTE[selectedColor] ?? "#ffffff", getVfxTransform());
+    }
     if (COOLDOWN_MS > 0) {
       cooldownLabel.hidden = false;
       cooldownLabel.textContent = `Пауза ${(COOLDOWN_MS / 1000).toFixed(1)} с`;
@@ -2548,6 +2819,8 @@ async function bootstrap() {
   });
   if (document.fonts?.ready) await document.fonts.ready;
   resizeCanvas();
+  if (canvasVfx) boardVfx = createBoardVfx(canvasVfx);
+  requestAnimationFrame(vfxLoop);
   connectWs();
 }
 

@@ -106,19 +106,20 @@
 
   <div id="deposit-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
-      <h2 class="overlay__title">Пополнение USDT</h2>
-      <p class="overlay__hint">Оплата — <strong>USDT в сети BEP20</strong> (Binance Smart Chain). Укажешь, например, 50 — к оплате и на баланс арены уйдёт ровно 50 USDT (без пересчёта в «доллары»). Вывод не предусмотрен.</p>
-      <div class="deposit-presets" role="group" aria-label="Суммы">
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="5">5</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="10">10</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="20">20</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="50">50</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="100">100</button>
-        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="500">500</button>
+      <h2 class="overlay__title">Пополнение тугров</h2>
+      <p class="overlay__hint">
+        В игре отображаются <strong>Тугры</strong> (1 USDT = 7 Тугров). Оплата — <strong>USDT BEP20</strong>. После оплаты баланс пополнится в пересчёте на тугры; бонусы из пакетов начисляются автоматически. Вывод не предусмотрен.
+      </p>
+      <div class="deposit-presets" role="group" aria-label="Пакеты">
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="1" data-bonus="0">7 Т · 1 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="5" data-bonus="3">35+3 Т · 5 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="10" data-bonus="8">70+8 Т · 10 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="20" data-bonus="20">140+20 Т · 20 USDT</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary deposit-amt" data-amt="50" data-bonus="70">350+70 Т · 50 USDT</button>
       </div>
       <label class="field">
-        <span class="field__label">Своя сумма (USDT)</span>
-        <input type="number" id="deposit-custom" class="field__input" min="1" step="0.01" placeholder="Например 25" />
+        <span class="field__label">Своя сумма оплаты (USDT)</span>
+        <input type="number" id="deposit-custom" class="field__input" min="1" step="0.01" placeholder="Например 15" />
       </label>
       <p id="deposit-error" class="field__error" hidden></p>
       <div class="overlay__actions">
@@ -151,62 +152,131 @@
         <div class="game-shop__brand">
           <div>
             <h2 id="shop-main-title" class="game-shop__title">Арсенал</h2>
-            <p class="game-shop__subtitle">Pixel Battle Store</p>
+            <p class="game-shop__subtitle">Тугры · тактика · бусты</p>
           </div>
           <div class="game-shop__balance" aria-live="polite">
             <span class="game-shop__balance-label">Баланс</span>
-            <span id="shop-display-balance" class="game-shop__balance-value">0.00</span>
-            <span class="game-shop__balance-label" style="opacity: 0.7">USDT</span>
+            <div class="game-shop__balance-main">
+              <span id="shop-display-balance" class="game-shop__balance-value">0</span>
+              <span id="shop-display-balance-unit" class="game-shop__balance-unit">Тугров</span>
+            </div>
+            <span id="shop-display-usdt-sub" class="game-shop__balance-sub">~0 USDT</span>
           </div>
         </div>
-        <div class="game-shop__tabs" role="tablist">
-          <button type="button" class="game-shop__tab is-active" role="tab" data-tab="coins" aria-selected="true">Монеты</button>
+        <div class="game-shop__tabs game-shop__tabs--quad" role="tablist">
+          <button type="button" class="game-shop__tab is-active" role="tab" data-tab="popular" aria-selected="true">Популярное</button>
           <button type="button" class="game-shop__tab" role="tab" data-tab="boosts" aria-selected="false">Бусты</button>
-          <button type="button" class="game-shop__tab" role="tab" data-tab="strike" aria-selected="false">Удар</button>
-          <button type="button" class="game-shop__tab" role="tab" data-tab="vip" aria-selected="false">VIP</button>
+          <button type="button" class="game-shop__tab" role="tab" data-tab="team" aria-selected="false">Командные</button>
+          <button type="button" class="game-shop__tab" role="tab" data-tab="topup" aria-selected="false">Пополнение</button>
         </div>
       </header>
 
       <div class="game-shop__body">
+        <section class="game-shop__starter-wrap" aria-label="Стартовый набор">
+          <div class="starter-pack">
+            <div class="starter-pack__aurora" aria-hidden="true"></div>
+            <div class="starter-pack__inner">
+              <div class="starter-pack__ribbon">
+                <span class="starter-pack__ribbon-tag starter-pack__ribbon-tag--hot">🔥 Лучшее предложение</span>
+                <span class="starter-pack__ribbon-tag starter-pack__ribbon-tag--pop">⭐ Популярно</span>
+              </div>
+              <h3 class="starter-pack__title">🔥 Стартовый набор</h3>
+              <p class="starter-pack__subtitle">Лучший старт для новых игроков</p>
+              <p class="starter-pack__hook">Стартуй быстрее и доминируй в ранней игре</p>
+              <ul class="starter-pack__rewards">
+                <li class="starter-pack__reward">
+                  <span class="starter-pack__ricon" aria-hidden="true">🪙</span>
+                  <span class="starter-pack__rtext"><strong>5000</strong> монет</span>
+                </li>
+                <li class="starter-pack__reward">
+                  <span class="starter-pack__ricon" aria-hidden="true">⚡</span>
+                  <span class="starter-pack__rtext"><strong>×2</strong> скорость прогресса на 1 час</span>
+                </li>
+                <li class="starter-pack__reward">
+                  <span class="starter-pack__ricon" aria-hidden="true">🛡️</span>
+                  <span class="starter-pack__rtext">Щит защиты на 30 минут</span>
+                </li>
+                <li class="starter-pack__reward">
+                  <span class="starter-pack__ricon" aria-hidden="true">💥</span>
+                  <span class="starter-pack__rtext"><strong>+20%</strong> к урону на 1 час</span>
+                </li>
+                <li class="starter-pack__reward starter-pack__reward--rare">
+                  <span class="starter-pack__ricon" aria-hidden="true">✨</span>
+                  <span class="starter-pack__rtext">1 случайный <strong>редкий</strong> предмет</span>
+                </li>
+              </ul>
+              <div class="starter-pack__cta-row">
+                <div class="starter-pack__price-block">
+                  <span class="starter-pack__price-old">35 Тугров</span>
+                  <span class="starter-pack__price-main">14 Тугров</span>
+                  <span class="starter-pack__price-sub">~2 USDT</span>
+                </div>
+                <button type="button" class="starter-pack__cta" id="shop-starter-cta">Купить за 14 Тугров</button>
+              </div>
+              <p class="starter-pack__urgency">Только для новых игроков</p>
+            </div>
+          </div>
+        </section>
+
         <p class="game-shop__hint" id="shop-stage-hint">—</p>
 
-        <div class="game-shop__panel" data-panel="coins" id="shop-panel-coins">
-          <div class="game-shop__coins-panel">
-            <div class="game-shop__coins-icon" aria-hidden="true">💎</div>
-            <p class="game-shop__coins-text">USDT — внутренняя валюта арены. Пополни баланс и открой все тактические опции.</p>
-            <button type="button" class="game-shop__deposit-btn" id="shop-open-deposit">Пополнить баланс</button>
-          </div>
-          <div class="game-shop__section-label" style="margin-top: 14px">Совет</div>
-          <div class="game-shop__card">
+        <div class="game-shop__panel" data-panel="popular" id="shop-panel-popular">
+          <p class="game-shop__section-label">Тактика линий</p>
+          <article class="game-shop__card game-shop__card--feature">
             <div class="game-shop__badges">
-              <span class="game-shop__badge game-shop__badge--deal">🔥 Лучший старт</span>
+              <span class="game-shop__badge game-shop__badge--hot">🔥 Лучшее предложение</span>
+              <span class="game-shop__badge game-shop__badge--limited">LIMITED</span>
             </div>
             <div class="game-shop__card-head">
-              <div class="game-shop__icon">📦</div>
+              <div class="game-shop__icon">✚</div>
               <div class="game-shop__card-text">
-                <h3 class="game-shop__card-title">Набор новичка</h3>
-                <p class="game-shop__card-desc">Первое пополнение + вкладка «Бусты» — быстрее втянуться в бой.</p>
+                <h3 class="game-shop__card-title">Тактический залп</h3>
+                <p class="game-shop__card-desc">Четыре направления — выбери сторону и тапни по карте.</p>
               </div>
             </div>
-            <p class="game-shop__card-desc" style="margin: 0; font-size: 0.65rem; opacity: 0.85">Демо-подсказка: реальные пакеты привязаны к балансу на сервере.</p>
-          </div>
+            <div class="game-shop__bundle-grid game-shop__bundle-grid--lines">
+              <button type="button" class="game-shop__line-btn shop-btn" id="shop-line-up" data-action="line" data-dir="up">
+                <span class="game-shop__line-arrow">↑</span>
+                <span class="game-shop__line-price">140 Тугров</span>
+                <span class="game-shop__line-usdt">~20 USDT</span>
+              </button>
+              <button type="button" class="game-shop__line-btn shop-btn" id="shop-line-down" data-action="line" data-dir="down">
+                <span class="game-shop__line-arrow">↓</span>
+                <span class="game-shop__line-price">140 Тугров</span>
+                <span class="game-shop__line-usdt">~20 USDT</span>
+              </button>
+              <button type="button" class="game-shop__line-btn shop-btn" id="shop-line-left" data-action="line" data-dir="left">
+                <span class="game-shop__line-arrow">←</span>
+                <span class="game-shop__line-price">140 Тугров</span>
+                <span class="game-shop__line-usdt">~20 USDT</span>
+              </button>
+              <button type="button" class="game-shop__line-btn shop-btn" id="shop-line-right" data-action="line" data-dir="right">
+                <span class="game-shop__line-arrow">→</span>
+                <span class="game-shop__line-price">140 Тугров</span>
+                <span class="game-shop__line-usdt">~20 USDT</span>
+              </button>
+            </div>
+          </article>
         </div>
 
         <div class="game-shop__panel" data-panel="boosts" id="shop-panel-boosts" hidden>
           <div class="game-shop__grid">
             <article class="game-shop__card">
               <div class="game-shop__badges">
-                <span class="game-shop__badge game-shop__badge--star">⭐ Топ</span>
+                <span class="game-shop__badge game-shop__badge--star">⭐ Популярно</span>
               </div>
               <div class="game-shop__card-head">
                 <div class="game-shop__icon">⚡</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Гипер-ускорение</h3>
-                  <p class="game-shop__card-desc">Личный темп на 10 мин — больше пикселей за тот же раунд.</p>
+                  <p class="game-shop__card-desc">Личный темп на 10 мин — больше пикселей за раунд.</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
-                <span class="game-shop__price">10 USDT</span>
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">70 Тугров</span>
+                  <span class="game-shop__price-usdt">~10 USDT</span>
+                </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-speed" data-action="speed">Купить</button>
               </div>
             </article>
@@ -219,11 +289,14 @@
                 <div class="game-shop__icon">🛡️</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Щит пикселя</h3>
-                  <p class="game-shop__card-desc">20 с защиты — затем тап по своей клетке на карте.</p>
+                  <p class="game-shop__card-desc">20 сек защиты — затем тап по своей клетке.</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
-                <span class="game-shop__price">3 USDT</span>
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">21 Тугр</span>
+                  <span class="game-shop__price-usdt">~3 USDT</span>
+                </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-shield-mode" data-action="shieldMode">Активировать</button>
               </div>
             </article>
@@ -240,41 +313,22 @@
                 </div>
               </div>
               <div class="game-shop__price-row">
-                <span class="game-shop__price">по уровню · USDT</span>
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">140 Тугров</span>
+                  <span class="game-shop__price-usdt">~20 USDT</span>
+                </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-upgrade" data-action="upgrade">Улучшить</button>
               </div>
             </article>
           </div>
         </div>
 
-        <div class="game-shop__panel" data-panel="strike" id="shop-panel-strike" hidden>
-          <p class="game-shop__section-label">Линии</p>
-          <div class="game-shop__card">
-            <div class="game-shop__badges">
-              <span class="game-shop__badge game-shop__badge--hot">🔥 Best deal</span>
-            </div>
-            <div class="game-shop__card-head">
-              <div class="game-shop__icon">✚</div>
-              <div class="game-shop__card-text">
-                <h3 class="game-shop__card-title">Тактический залп</h3>
-                <p class="game-shop__card-desc">Четыре направления — выбери сторону и тапни по карте. 20 USDT за линию.</p>
-              </div>
-            </div>
-            <div class="game-shop__bundle-grid">
-              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-up" data-action="line" data-dir="up">↑ 20 USDT</button>
-              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-down" data-action="line" data-dir="down">↓ 20 USDT</button>
-              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-left" data-action="line" data-dir="left">← 20 USDT</button>
-              <button type="button" class="game-shop__buy game-shop__buy--ghost shop-btn" id="shop-line-right" data-action="line" data-dir="right">→ 20 USDT</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="game-shop__panel" data-panel="vip" id="shop-panel-vip" hidden>
-          <p class="game-shop__section-label">Премиум-тактика</p>
+        <div class="game-shop__panel" data-panel="team" id="shop-panel-team" hidden>
+          <p class="game-shop__section-label">Командная тактика</p>
           <div class="game-shop__grid">
             <article class="game-shop__card game-shop__card--premium">
               <div class="game-shop__badges">
-                <span class="game-shop__badge game-shop__badge--star">⭐ Most popular</span>
+                <span class="game-shop__badge game-shop__badge--star">⭐ Популярно</span>
                 <span class="game-shop__badge game-shop__badge--limited">LIMITED</span>
               </div>
               <div class="game-shop__card-head">
@@ -285,12 +339,15 @@
                 </div>
               </div>
               <div class="game-shop__price-row">
-                <span class="game-shop__price">50 USDT</span>
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">350 Тугров</span>
+                  <span class="game-shop__price-usdt">~50 USDT</span>
+                </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-team-boost" data-action="teamBoost">В бой</button>
               </div>
             </article>
 
-            <article class="game-shop__card game-shop__card--premium">
+            <article class="game-shop__card game-shop__card--premium game-shop__card--elite">
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Рейд</span>
               </div>
@@ -302,7 +359,10 @@
                 </div>
               </div>
               <div class="game-shop__price-row">
-                <span class="game-shop__price">80 USDT</span>
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">560 Тугров</span>
+                  <span class="game-shop__price-usdt">~80 USDT</span>
+                </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-raid" data-action="raid">Запустить</button>
               </div>
             </article>
@@ -319,11 +379,50 @@
                 </div>
               </div>
               <div class="game-shop__price-row">
-                <span class="game-shop__price">70 USDT</span>
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">490 Тугров</span>
+                  <span class="game-shop__price-usdt">~70 USDT</span>
+                </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-zone-mode" data-action="zoneMode">Развернуть</button>
               </div>
             </article>
           </div>
+        </div>
+
+        <div class="game-shop__panel" data-panel="topup" id="shop-panel-topup" hidden>
+          <p class="game-shop__section-label">Пополнение тугров</p>
+          <p class="game-shop__topup-intro">1 USDT = 7 Тугров. Оплата в USDT — в игре видишь только тугры.</p>
+          <div class="game-shop__topup-grid">
+            <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="1" data-bonus="0">
+              <span class="game-shop__topup-tugry">7 Тугров</span>
+              <span class="game-shop__topup-usdt">1 USDT</span>
+            </button>
+            <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="5" data-bonus="3">
+              <span class="game-shop__topup-badge">+3 бонус</span>
+              <span class="game-shop__topup-tugry">35 Тугров</span>
+              <span class="game-shop__topup-bonus">+3 Т бонус</span>
+              <span class="game-shop__topup-usdt">5 USDT</span>
+            </button>
+            <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="10" data-bonus="8">
+              <span class="game-shop__topup-badge">+8 бонус</span>
+              <span class="game-shop__topup-tugry">70 Тугров</span>
+              <span class="game-shop__topup-bonus">+8 Т бонус</span>
+              <span class="game-shop__topup-usdt">10 USDT</span>
+            </button>
+            <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="20" data-bonus="20">
+              <span class="game-shop__topup-badge">+20 бонус</span>
+              <span class="game-shop__topup-tugry">140 Тугров</span>
+              <span class="game-shop__topup-bonus">+20 Т бонус</span>
+              <span class="game-shop__topup-usdt">20 USDT</span>
+            </button>
+            <button type="button" class="game-shop__topup-card game-shop__topup-card--best shop-topup-pack" data-amt="50" data-bonus="70">
+              <span class="game-shop__topup-badge game-shop__topup-badge--best">🔥 Лучшее</span>
+              <span class="game-shop__topup-tugry">350 Тугров</span>
+              <span class="game-shop__topup-bonus">+70 Т бонус</span>
+              <span class="game-shop__topup-usdt">50 USDT</span>
+            </button>
+          </div>
+          <button type="button" class="game-shop__deposit-btn" id="shop-open-deposit">Другая сумма (USDT)</button>
         </div>
 
         <p id="shop-effects" class="game-shop__effects"></p>
@@ -347,8 +446,8 @@
       <header class="toolbar">
         <div class="toolbar__title">Pixel Battle</div>
         <div class="toolbar__actions">
-          <span id="wallet-balance" class="toolbar__wallet" hidden title="Внутренний баланс (без вывода)">💰 0 USDT</span>
-          <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить баланс">Пополнить</button>
+          <span id="wallet-balance" class="toolbar__wallet" hidden title="Игровая валюта — Тугры">💰 0 Тугров</span>
+          <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить тугры (оплата USDT)">Тугры +</button>
           <button type="button" id="btn-shop" class="toolbar__btn" hidden title="Улучшения и бусты">Магазин</button>
           <span id="conn-status" class="toolbar__conn" title="Состояние сети" data-state="local">локально</span>
           <span id="round-timer" class="toolbar__round" hidden title="Время до конца текущего раунда"></span>
@@ -358,8 +457,10 @@
         </div>
       </header>
 
-      <main class="stage-wrap">
+      <main class="stage-wrap stage-wrap--alive">
         <canvas id="board" class="board" aria-label="Карта мира"></canvas>
+        <canvas id="board-vfx" class="board-vfx" aria-hidden="true"></canvas>
+        <div id="float-fx" class="float-fx" aria-hidden="true"></div>
       </main>
 
       <footer class="palette-bar">
