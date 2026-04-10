@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node server.js",
     "build-map": "node scripts/generate-map.mjs",
-    "downsample-regions": "node scripts/downsample-regions.mjs"
+    "downsample-regions": "node scripts/downsample-regions.mjs",
+    "stress": "node scripts/stress-concurrency-sim.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

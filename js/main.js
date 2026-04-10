@@ -1349,6 +1349,7 @@ function notifyPurchaseError(reason) {
     "mass capture cooldown": "Масс-захват: подождите перед повтором (~2 мин).",
     "cooldown not ready": "Сначала дождитесь обычного интервала между действиями.",
     "bad request": "Некорректный запрос.",
+    rate_limited: "Слишком частые покупки. Подождите несколько секунд.",
   };
   notifyReject(m[reason] || reason);
 }
