@@ -23,6 +23,7 @@ import {
   tournamentStage,
 } from "./lib/tournament-economy.js";
 import { WalletStore } from "./lib/wallet-store.js";
+import { createWalletDb } from "./lib/wallet-db.js";
 import {
   createNowpaymentInvoice,
   verifyNowpaymentsSignature,
@@ -39,7 +40,11 @@ const PORT = Number(process.env.PORT) || 3847;
 const WS_PATH = "/ws";
 
 const DATA_DIR = path.join(ROOT, "data");
-const walletStore = new WalletStore({ dataDir: DATA_DIR });
+/** @type {import("./lib/wallet-store.js").WalletStore | import("./lib/wallet-db.js").WalletDb} */
+const walletStore =
+  process.env.WALLET_BACKEND === "json"
+    ? new WalletStore({ dataDir: DATA_DIR })
+    : await createWalletDb(DATA_DIR);
 
 /** Пакеты пополнения: бонус в квантах (1 USDT = 7 квантов). Кредит USDT += bonusQuant/7. */
 const DEPOSIT_PACK_BONUS_QUANT = new Map([
