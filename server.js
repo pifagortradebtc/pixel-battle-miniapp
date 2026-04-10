@@ -1098,12 +1098,11 @@ async function handleApi(req, res) {
       res.end(JSON.stringify({ ok: false }));
       return;
     }
-    const playerKey = sanitizePlayerKey(body.playerKey);
     const amount = Number(body.amount);
     const bonusQuant = Number.isFinite(Number(body.bonusQuant ?? body.bonusTugry))
       ? Number(body.bonusQuant ?? body.bonusTugry) | 0
       : 0;
-    if (!playerKey || !Number.isFinite(amount) || amount < 1 || amount > MAX_DEPOSIT_USDT) {
+    if (!Number.isFinite(amount) || amount < 1 || amount > MAX_DEPOSIT_USDT) {
       res.writeHead(400);
       res.end(JSON.stringify({ ok: false, error: "bad request" }));
       return;
@@ -1113,6 +1112,8 @@ async function handleApi(req, res) {
       res.end(JSON.stringify({ ok: false, error: "bad bonus" }));
       return;
     }
+    /** В Mini App ключ берём только из подписанного initData (клиент мог отдать anon UUID, если initDataUnsafe ещё не был). */
+    let playerKey = "";
     if (TELEGRAM_BOT_TOKEN) {
       const initData = typeof body.initData === "string" ? body.initData : "";
       if (!initData.trim()) {
@@ -1128,9 +1129,12 @@ async function handleApi(req, res) {
         res.end(JSON.stringify({ ok: false, error: "bad initData" }));
         return;
       }
-      if (sanitizePlayerKey(`tg_${v.id}`) !== playerKey) {
-        res.writeHead(403);
-        res.end(JSON.stringify({ ok: false, error: "playerKey mismatch" }));
+      playerKey = sanitizePlayerKey(`tg_${v.id}`);
+    } else {
+      playerKey = sanitizePlayerKey(body.playerKey);
+      if (!playerKey) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "bad request" }));
         return;
       }
     }

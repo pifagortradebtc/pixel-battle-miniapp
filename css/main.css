@@ -166,11 +166,12 @@ body {
   right: 0;
   top: var(--safe-top);
   flex-shrink: 0;
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: flex-start;
-  justify-content: space-between;
+  /* grid: правая колонка (кнопки) не сжимается ниже контента — иначе «Магазин» обрезался слева */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 8px;
+  column-gap: 10px;
   min-height: var(--toolbar-h);
   padding: 8px calc(10px + env(safe-area-inset-right, 0px)) 8px calc(10px + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--hud-border);
@@ -180,6 +181,7 @@ body {
   pointer-events: auto;
   min-width: 0;
   box-sizing: border-box;
+  overflow: visible;
 }
 
 .toolbar__lead {
@@ -188,9 +190,9 @@ body {
   align-items: flex-start;
   justify-content: flex-start;
   gap: 4px;
-  flex: 1 1 58%;
   min-width: 0;
-  max-width: min(76vw, 340px);
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .toolbar__round--lead {
@@ -244,17 +246,22 @@ body {
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 6px;
-  flex: 0 1 42%;
-  min-width: 0;
   justify-content: flex-end;
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior-x: contain;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: min-content;
+  max-width: 100%;
+  overflow: visible;
   padding-top: 1px;
   padding-bottom: 1px;
-  scrollbar-width: thin;
+}
+
+.toolbar__actions .toolbar__btn,
+.toolbar__actions .toolbar__discussion,
+.toolbar__actions .toolbar__conn,
+.toolbar__actions .toolbar__spectator,
+.toolbar__actions .toolbar__cooldown {
+  flex-shrink: 0;
 }
 
 .toolbar__conn {
@@ -284,6 +291,8 @@ body {
   padding: 4px 8px;
   border-radius: 7px;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: transform 0.15s ease, box-shadow 0.2s ease, filter 0.2s ease, opacity 0.15s ease;
 }
 
@@ -345,19 +354,8 @@ body {
   opacity: 0.88;
 }
 
+/* Блок «Снова» в нижней панели (горизонтальный скролл) */
 .quick-buy-rail {
-  /* fixed: не режется overflow у .app__main, стабильно на iPhone / Telegram WebView */
-  position: fixed;
-  z-index: 18;
-  right: max(8px, env(safe-area-inset-right, 0px));
-  top: calc(var(--safe-top) + var(--toolbar-h) + 4px);
-  max-height: min(52vh, calc(100dvh - var(--safe-top) - var(--toolbar-h) - 120px));
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-  width: min(88px, calc(100vw - 16px));
-  max-width: 92px;
   pointer-events: auto;
   isolation: isolate;
   -webkit-transform: translateZ(0);
@@ -368,43 +366,64 @@ body {
   display: none !important;
 }
 
+.quick-buy-rail--bottom {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: min(48%, 260px);
+  justify-content: flex-end;
+}
+
 .quick-buy-rail__caption {
-  font-size: 0.52rem;
+  font-size: 0.5rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: color-mix(in srgb, var(--tg-hint) 88%, transparent);
   text-align: center;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+  flex-shrink: 0;
+  line-height: 1.15;
+  max-width: 2.6em;
 }
 
 .quick-buy-rail__list {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 5px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
   padding: 2px 0;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 52px;
+  align-items: stretch;
 }
 
 .quick-buy-rail__btn {
   appearance: none;
   border: 1px solid color-mix(in srgb, var(--tg-hint) 38%, transparent);
-  border-radius: 12px;
+  border-radius: 8px;
   background: rgba(0, 0, 0, 0.38);
   color: var(--tg-text);
-  padding: 6px 4px 8px;
+  padding: 3px 3px 4px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  min-height: 44px;
+  gap: 1px;
+  min-height: 0;
+  min-width: 52px;
+  max-width: 64px;
+  flex-shrink: 0;
   transition: transform 0.12s ease, filter 0.15s ease, opacity 0.15s ease, box-shadow 0.2s ease;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
 }
 
 .quick-buy-rail__btn:hover:not(:disabled) {
@@ -431,16 +450,16 @@ body {
 .quick-buy-rail__orbit {
   position: absolute;
   left: 50%;
-  top: 2px;
-  width: 56px;
-  height: 56px;
-  margin-left: -28px;
+  top: 1px;
+  width: 44px;
+  height: 44px;
+  margin-left: -22px;
   pointer-events: none;
 }
 
 .quick-buy-rail__svg {
-  width: 56px;
-  height: 56px;
+  width: 44px;
+  height: 44px;
   display: block;
 }
 
@@ -474,14 +493,14 @@ body {
 .quick-buy-rail__orbit-inner {
   position: relative;
   z-index: 1;
-  width: 56px;
-  min-height: 56px;
+  width: 44px;
+  min-height: 44px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1px;
-  padding: 4px 2px;
+  gap: 0;
+  padding: 2px 1px;
   box-sizing: border-box;
   text-align: center;
 }
@@ -504,18 +523,18 @@ body {
 }
 
 .quick-buy-rail__label {
-  font-size: 0.58rem;
+  font-size: 0.5rem;
   font-weight: 700;
-  line-height: 1.1;
+  line-height: 1.05;
   text-align: center;
 }
 
 .quick-buy-rail__price {
-  font-size: 0.48rem;
+  font-size: 0.42rem;
   font-weight: 600;
   color: color-mix(in srgb, #fbbf24 90%, var(--tg-text));
   text-align: center;
-  line-height: 1.1;
+  line-height: 1.05;
 }
 
 .stage-wrap {
@@ -543,8 +562,8 @@ body {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
-  padding: 6px 10px calc(6px + env(safe-area-inset-bottom, 0px));
+  gap: 0;
+  padding: 4px 8px calc(4px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--hud-border);
   background: var(--hud-bg);
   backdrop-filter: blur(10px);
@@ -552,10 +571,21 @@ body {
   pointer-events: auto;
 }
 
-.palette-bar__row {
+.palette-bar__inner {
   display: flex;
-  justify-content: center;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   width: 100%;
+  min-width: 0;
+}
+
+.palette-bar__lead {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
 }
 
 .palette-trigger {
@@ -572,13 +602,23 @@ body {
   transition: transform 0.12s ease, box-shadow 0.15s ease;
 }
 
+.palette-trigger--compact {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 6px;
+  border-width: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tg-button) 50%, transparent), 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
 .palette-trigger:active {
   transform: scale(0.96);
 }
 
 .palette-trigger:focus-visible {
   outline: 2px solid var(--tg-button);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
 
 .palette {
@@ -727,11 +767,20 @@ body {
 .team-badge {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   flex-wrap: wrap;
-  gap: 4px 8px;
-  margin-bottom: 6px;
-  font-size: 0.68rem;
+  gap: 4px 6px;
+  margin-bottom: 0;
+  font-size: 0.65rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.team-badge--palette-only .team-badge__label,
+.team-badge--palette-only .team-badge__emoji,
+.team-badge--palette-only .team-badge__name,
+.team-badge--palette-only .team-badge__count {
+  display: none !important;
 }
 
 .team-badge__label {
@@ -741,6 +790,10 @@ body {
 .team-badge__name {
   font-weight: 600;
   color: var(--tg-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: min(42vw, 140px);
 }
 
 .team-badge__count {

@@ -42,10 +42,36 @@ const DEPOSIT_PAY_CURRENCY = "usdtbsc";
 /** Если localStorage недоступен — один стабильный ключ на сессию страницы */
 let cachedAnonPlayerKey = null;
 
+/**
+ * Без проверки подписи — только чтение user.id из строки initData (как на сервере после verify).
+ * Нужно, когда Telegram.WebApp.initDataUnsafe ещё пуст, а initData уже есть (часто Desktop).
+ */
+function parseTelegramUserIdFromInitDataString(initData) {
+  if (typeof initData !== "string" || !initData.trim()) return null;
+  try {
+    const params = new URLSearchParams(initData);
+    const userStr = params.get("user");
+    if (!userStr) return null;
+    const user = JSON.parse(userStr);
+    if (!user || user.id == null) return null;
+    const id = Number(user.id);
+    return Number.isFinite(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 function getOrCreatePlayerKey() {
   try {
     const u = window.Telegram?.WebApp?.initDataUnsafe?.user;
     if (u && u.id != null) return `tg_${u.id}`;
+  } catch {
+    /* ignore */
+  }
+  try {
+    const raw = window.Telegram?.WebApp?.initData;
+    const id = parseTelegramUserIdFromInitDataString(typeof raw === "string" ? raw : "");
+    if (id != null) return `tg_${id}`;
   } catch {
     /* ignore */
   }
@@ -624,7 +650,12 @@ function setFooterMode() {
   const showPalette =
     localMode || (online && joined && canPickOnlineDrawColor() && !spectatorMode);
   if (paletteTriggerBtn) paletteTriggerBtn.hidden = !showPalette;
-  teamBadge.hidden = !online || !joined;
+  /* Локально без команды: показываем только компактный квадрат цвета (не прячем весь блок из‑за hidden team-badge). */
+  const showTeamPaletteOnly = localMode && showPalette;
+  if (teamBadge) {
+    teamBadge.classList.toggle("team-badge--palette-only", showTeamPaletteOnly);
+    teamBadge.hidden = showTeamPaletteOnly ? false : !online || !joined;
+  }
   if (spectatorBadgeEl) {
     spectatorBadgeEl.hidden = !online || !spectatorMode;
   }
@@ -3463,6 +3494,9 @@ function setupGestures() {
   let pinchStartScale = 1;
   /** @type {{ x: number, y: number, t: number, ox: number, oy: number, panning: boolean } | null} */
   let oneFinger = null;
+  /** Десктоп / мышь: панорама и тап (touch на canvas не даёт mousedown для пальца) */
+  /** @type {{ x: number, y: number, t: number, ox: number, oy: number, panning: boolean } | null} */
+  let mousePan = null;
 
   function dist(t1, t2) {
     const dx = t1.clientX - t2.clientX;
@@ -3563,13 +3597,54 @@ function setupGestures() {
     schedulePersist();
   });
 
-  canvas.addEventListener("click", (e) => {
-    if ("ontouchstart" in window) return;
-    const rect = canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    const { gx, gy } = screenToGrid(sx, sy);
-    placePixel(gx, gy);
+  function onMouseMove(e) {
+    if (!mousePan) return;
+    const dx = e.clientX - mousePan.x;
+    const dy = e.clientY - mousePan.y;
+    if (Math.hypot(dx, dy) > 28) mousePan.panning = true;
+    if (mousePan.panning) {
+      offsetX = mousePan.ox + dx;
+      offsetY = mousePan.oy + dy;
+      draw();
+    }
+  }
+
+  function onMouseUp(e) {
+    if (!mousePan) return;
+    const dx = e.clientX - mousePan.x;
+    const dy = e.clientY - mousePan.y;
+    const dt = Date.now() - mousePan.t;
+    const move = Math.hypot(dx, dy);
+    const wasPanning = mousePan.panning;
+    mousePan = null;
+    window.removeEventListener("mousemove", onMouseMove);
+    window.removeEventListener("mouseup", onMouseUp);
+    if (wasPanning) {
+      schedulePersist();
+      return;
+    }
+    if (move < 32 && dt < 750) {
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const { gx, gy } = screenToGrid(sx, sy);
+      placePixel(gx, gy);
+    }
+  }
+
+  canvas.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    if (mousePan) return;
+    mousePan = {
+      x: e.clientX,
+      y: e.clientY,
+      t: Date.now(),
+      ox: offsetX,
+      oy: offsetY,
+      panning: false,
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
   });
 
   canvas.addEventListener(
