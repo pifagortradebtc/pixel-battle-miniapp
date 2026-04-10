@@ -1307,6 +1307,9 @@ function onMeta(msg) {
   });
 }
 
+/** Сообщение для наблюдателей и не прошедших отбор в раунд (сервер: playRejected spectator / not_eligible). */
+const MSG_WATCH_ONLY = "Остались сильнейшие, просто наблюдайте.";
+
 function notifyReject(reason) {
   const map = {
     out_of_bounds: "Сюда нельзя (вне карты).",
@@ -1314,8 +1317,8 @@ function notifyReject(reason) {
     "cooldown not ready": "Интервал между действиями: подождите до следующего хода.",
     "pixel is shielded": "Пиксель под щитом.",
     no_team: "Сначала выберите команду.",
-    spectator: "Режим наблюдения: пиксели ставить нельзя.",
-    not_eligible: "Вы не прошли в этот раунд турнира.",
+    spectator: MSG_WATCH_ONLY,
+    not_eligible: MSG_WATCH_ONLY,
     need_telegram: "Откройте игру из Telegram Mini App (нужна подпись initData).",
     rate_limited: "Слишком много действий подряд. Подождите секунду.",
     same_cell: "Для линии выберите другую клетку — так задаётся направление.",
@@ -2560,9 +2563,8 @@ function connectWs() {
       }
       if (msg.reason === "not_eligible") {
         const tg = window.Telegram?.WebApp;
-        const text = "Этот аккаунт не допущен в текущий раунд турнира.";
-        if (typeof tg?.showAlert === "function") tg.showAlert(text);
-        else if (typeof window.alert === "function") window.alert(text);
+        if (typeof tg?.showAlert === "function") tg.showAlert(MSG_WATCH_ONLY);
+        else if (typeof window.alert === "function") window.alert(MSG_WATCH_ONLY);
       }
       if (msg.reason === "rate") {
         const tg = window.Telegram?.WebApp;
@@ -2579,8 +2581,12 @@ function connectWs() {
       return;
     }
     if (msg.type === "playRejected") {
-      if (msg.reason === "spectator") spectatorMode = true;
-      notifyReject(msg.reason === "spectator" ? "spectator" : msg.reason || "");
+      if (msg.reason === "spectator" || msg.reason === "not_eligible") spectatorMode = true;
+      notifyReject(
+        msg.reason === "spectator" || msg.reason === "not_eligible"
+          ? msg.reason
+          : msg.reason || ""
+      );
       setFooterMode();
       return;
     }
