@@ -1248,11 +1248,22 @@ async function telegramPollLoop() {
         if (!msg || typeof msg.text !== "string") continue;
         const uid = msg.from?.id;
         if (uid == null || !TELEGRAM_ADMIN_IDS.has(uid)) continue;
+        const chatId = msg.chat.id;
         let t = String(msg.text).trim();
-        t = t.replace(/^\/go\b/i, "go").replace(/^гол\s*/i, "go ");
+        const restartNorm = t
+          .toLowerCase()
+          .replace(/^\/+/, "")
+          .replace(/\s+/g, " ");
+        if (restartNorm === "рестарт" || restartNorm === "restart") {
+          await telegramSendMessage(chatId, "Перезапуск приложения…");
+          setTimeout(() => process.exit(0), 400);
+          continue;
+        }
+        t = t.replace(/^\/go\b/i, "go");
+        t = t.replace(/^гол(\s+)/i, "go$1").replace(/^гол(\d)/i, "go $1");
+        t = t.replace(/^го(\s+)/iu, "go$1").replace(/^го(\d)/iu, "go $1");
         const tl = t.toLowerCase();
         if (!tl.startsWith("go")) continue;
-        const chatId = msg.chat.id;
         const rest = t.slice(2).trim();
         let hours = 100;
         if (rest.length) {
@@ -1260,7 +1271,7 @@ async function telegramPollLoop() {
           if (!Number.isFinite(n) || n <= 0) {
             await telegramSendMessage(
               chatId,
-              "Укажите положительное число часов: go 100, go 1 или go 0.01 (латиница go или «гол»)."
+              "Укажите положительное число часов: go 100, го 50, го 0.1 (латиница go, кириллица го или «гол»)."
             );
             continue;
           }
@@ -1291,7 +1302,7 @@ server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
   if (WAIT_FOR_TELEGRAM_GO) {
     console.log(
-      'Первый раунд: в личку боту — «go», «go 100» (часов), «go 0.01» или «гол 1» (кириллица вместо go).'
+      'Первый раунд: в личку боту — «go», «го», «гол» + часы: go 100, го 50, го 0.1; «рестарт» — перезапуск процесса (Render поднимет снова).'
     );
     fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`).catch(
       () => {}
