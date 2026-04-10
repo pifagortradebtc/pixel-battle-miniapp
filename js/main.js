@@ -148,6 +148,8 @@ let lastPlaceAt = 0;
 let persistTimer = null;
 let ws = null;
 let reconnectTimer = null;
+/** Если сокет завис в CONNECTING — закрыть и дать сработать переподключению */
+let connectingHangTimer = null;
 
 /** Онлайн-режим: есть URL WebSocket */
 let wantOnline = false;
@@ -227,7 +229,7 @@ function syncWelcomeForRound() {
 
 function countryColor(regionId) {
   if (regionId === 0) return "#071018";
-  if (regionId === 1) return "#143d52";
+  if (regionId === 1) return `hsl(38 32% 30%)`;
   const h = ((regionId - 2) * 53) % 360;
   return `hsl(${h} 36% 30%)`;
 }
@@ -1091,7 +1093,7 @@ function onMeta(msg) {
 
 function notifyReject(reason) {
   const map = {
-    ocean: "Сюда нельзя (океан, река или вне карты).",
+    out_of_bounds: "Сюда нельзя (вне карты).",
     cooldown: "Слишком часто.",
     no_team: "Сначала выберите команду.",
     spectator: "Режим наблюдения: пиксели ставить нельзя.",
@@ -1124,6 +1126,8 @@ function connectWs() {
   }
 
   setConnState("connecting", "подключение…");
+  clearTimeout(connectingHangTimer);
+  connectingHangTimer = null;
   try {
     ws = new WebSocket(url);
   } catch {
@@ -1132,7 +1136,20 @@ function connectWs() {
     return;
   }
 
+  connectingHangTimer = setTimeout(() => {
+    connectingHangTimer = null;
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }, 15000);
+
   ws.addEventListener("open", () => {
+    clearTimeout(connectingHangTimer);
+    connectingHangTimer = null;
     lastClaimEligibilityAt = 0;
     setConnState("online", "онлайн");
     const sess = loadOnlineSession();
@@ -1162,6 +1179,7 @@ function connectWs() {
     } catch {
       return;
     }
+    if (!msg || typeof msg !== "object") return;
 
     if (msg.type === "gameEnded") {
       try {
@@ -1476,6 +1494,8 @@ function connectWs() {
   });
 
   ws.addEventListener("close", () => {
+    clearTimeout(connectingHangTimer);
+    connectingHangTimer = null;
     ws = null;
     const sess = loadOnlineSession();
     myTeamId = sess?.teamId ?? null;
@@ -1492,8 +1512,11 @@ function connectWs() {
 }
 
 function sendPixelOnline(gx, gy) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
     ws.send(JSON.stringify({ type: "pixel", x: gx, y: gy }));
+  } catch {
+    /* буфер/закрытие — не роняем UI */
   }
 }
 
@@ -1626,14 +1649,9 @@ function draw() {
 }
 
 function placePixel(gx, gy) {
-  if (gx < 0 || gx >= gridW || gy < 0 || gy >= gridH) return;
-
-  if (regionCells) {
-    const idx = regionCells[gy * gridW + gx];
-    if (idx < 2) {
-      notifyReject("ocean");
-      return;
-    }
+  if (gx < 0 || gx >= gridW || gy < 0 || gy >= gridH) {
+    notifyReject("out_of_bounds");
+    return;
   }
 
   const online = wantOnline && getWsUrl();

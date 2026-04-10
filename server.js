@@ -23,8 +23,10 @@ const ROUND3_DIV = 3;
 let gridW = BASE_GRID;
 let gridH = BASE_GRID;
 const COOLDOWN_MS = 0;
-/** Длительность раунда: 100 часов */
+/** Длительность раунда по умолчанию (100 ч); фактическое значение — roundDurationMs (задаётся «go 12» и т.д.) */
 const ROUND_MS = 100 * 60 * 60 * 1000;
+/** Длина текущего раунда в мс (одинакова для всех раундов после старта) */
+let roundDurationMs = ROUND_MS;
 const MAX_PER_TEAM_FIRST = 200;
 const MAX_PER_TEAM_NEXT = 10;
 /** Финальный раунд (команды по 2 человека) */
@@ -207,6 +209,7 @@ function saveRoundState() {
       JSON.stringify({
         roundIndex,
         roundStartMs,
+        roundDurationMs,
         roundTimerStarted,
         eligibleTokens: [...eligibleTokenSet],
         gameFinished,
@@ -225,6 +228,11 @@ function loadRoundState() {
       const j = JSON.parse(fs.readFileSync(ROUND_STATE_PATH, "utf8"));
       if (typeof j.roundIndex === "number") roundIndex = j.roundIndex;
       if (typeof j.roundStartMs === "number") roundStartMs = j.roundStartMs;
+      if (typeof j.roundDurationMs === "number" && j.roundDurationMs >= 1000 && j.roundDurationMs <= 8760 * 3600000) {
+        roundDurationMs = j.roundDurationMs;
+      } else {
+        roundDurationMs = ROUND_MS;
+      }
       if (typeof j.roundTimerStarted === "boolean") {
         roundTimerStarted = j.roundTimerStarted;
       } else {
@@ -250,6 +258,7 @@ function loadRoundState() {
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
+      roundDurationMs = ROUND_MS;
       eligibleTokenSet = new Set();
       gameFinished = false;
       winnerTokensByPlayerKey = {};
@@ -260,6 +269,7 @@ function loadRoundState() {
     console.warn("round-state load:", e.message);
     roundIndex = 0;
     roundStartMs = Date.now();
+    roundDurationMs = ROUND_MS;
     eligibleTokenSet = new Set();
     gameFinished = false;
     winnerTokensByPlayerKey = {};
@@ -297,9 +307,9 @@ try {
   console.warn("Нет data/regions-320.json — npm run build-map", e.message);
 }
 
-/** @type {Uint8Array | null} регион: 0 океан, 1 река, ≥2 суша */
+/** @type {Uint8Array | null} регион: 0 океан, 1 река, ≥2 — регионы (для справки; закрасить можно любую клетку сетки). */
 let landGrid = null;
-/** Все клетки суши — знаменатель для «% территории». */
+/** Знаменатель для «% территории» — все клетки текущей сетки (w×h). */
 let landPixelsTotal = BASE_GRID * BASE_GRID;
 
 /** Размер стороны сетки по индексу раунда (0: 320, 1: 64, 2: 21). */
@@ -331,11 +341,8 @@ function rebuildLandFromRound(ri) {
     }
   }
   applyRoundShapeMask(ri, landGrid, gridW, gridH);
-  let n = 0;
-  for (let i = 0; i < landGrid.length; i++) {
-    if (landGrid[i] >= 2) n++;
-  }
-  landPixelsTotal = n > 0 ? n : gridW * gridH;
+  /** Знаменатель % территории: все клетки сетки (океан и реки тоже можно закрашивать). */
+  landPixelsTotal = gridW * gridH;
 }
 
 /**
@@ -369,13 +376,6 @@ function applyRoundShapeMask(ri, buf, w, h) {
   }
 }
 
-/** 0 — океан, 1 — река, ≥2 — суша (регион). Рисовать можно только на суше. */
-function isLand(x, y) {
-  if (!landGrid) return true;
-  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
-  return landGrid[y * gridW + x] >= 2;
-}
-
 /** @type {Map<string, number>} key "x,y" → teamId */
 const pixels = new Map();
 
@@ -387,12 +387,6 @@ function pixelTeam(val) {
 const lastPlace = new WeakMap();
 /** @type {Map<number, number>} teamId -> число игроков */
 const teamPlayerCounts = new Map();
-
-/** Любая клетка суши; соседство с своими пикселями не требуется. */
-function canPlace(_teamId, x, y) {
-  if (!isLand(x, y)) return "ocean";
-  return "ok";
-}
 
 loadDynamicTeams();
 loadRoundState();
@@ -440,11 +434,27 @@ function fullPayload() {
   return JSON.stringify({ type: "full", pixels: list });
 }
 
+/** Безопасная отправка одному клиенту (не роняет процесс при закрытом/битом сокете). */
+function safeSend(ws, data) {
+  if (!ws || ws.readyState !== 1) return false;
+  try {
+    const raw = typeof data === "string" ? data : JSON.stringify(data);
+    ws.send(raw);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function broadcast(obj) {
   const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
   for (const client of wss.clients) {
     if (client.readyState !== 1) continue;
-    client.send(raw);
+    try {
+      client.send(raw);
+    } catch {
+      /* сокет закрыт при отправке */
+    }
   }
 }
 
@@ -513,11 +523,11 @@ function broadcastStatsImmediate() {
 
 function assertCanPlay(ws) {
   if (gameFinished) {
-    ws.send(JSON.stringify({ type: "playRejected", reason: "spectator" }));
+    safeSend(ws, { type: "playRejected", reason: "spectator" });
     return false;
   }
   if (!ws.eligible) {
-    ws.send(JSON.stringify({ type: "playRejected", reason: "spectator" }));
+    safeSend(ws, { type: "playRejected", reason: "spectator" });
     return false;
   }
   return true;
@@ -525,9 +535,9 @@ function assertCanPlay(ws) {
 
 /** null — первый раунд ещё не запущен командой «go» в Telegram */
 function roundEndsAtForMeta() {
-  if (gameFinished) return roundStartMs + ROUND_MS;
+  if (gameFinished) return roundStartMs + roundDurationMs;
   if (roundIndex === 0 && !roundTimerStarted) return null;
-  return roundStartMs + ROUND_MS;
+  return roundStartMs + roundDurationMs;
 }
 
 function sendConnectionMeta(ws) {
@@ -535,19 +545,17 @@ function sendConnectionMeta(ws) {
   for (const [id, c] of teamPlayerCounts) {
     teamCountsObj[id] = c;
   }
-  ws.send(
-    JSON.stringify({
-      type: "meta",
-      teams: teamsForMeta(),
-      teamCounts: teamCountsObj,
-      maxPerTeam: getMaxPerTeam(),
-      grid: { w: gridW, h: gridH },
-      roundIndex,
-      roundEndsAt: roundEndsAtForMeta(),
-      eligible: !!ws.eligible,
-      gameFinished: !!gameFinished,
-    })
-  );
+  safeSend(ws, {
+    type: "meta",
+    teams: teamsForMeta(),
+    teamCounts: teamCountsObj,
+    maxPerTeam: getMaxPerTeam(),
+    grid: { w: gridW, h: gridH },
+    roundIndex,
+    roundEndsAt: roundEndsAtForMeta(),
+    eligible: !!ws.eligible,
+    gameFinished: !!gameFinished,
+  });
 }
 
 function finalizeThirdRound(winnerRow) {
@@ -555,7 +563,8 @@ function finalizeThirdRound(winnerRow) {
   try {
     const winnerTeamId = winnerRow.teamId;
     const winningTeamName = winnerRow.name || "";
-    const pct = winnerRow.percent;
+    const pct =
+      typeof winnerRow.percent === "number" && Number.isFinite(winnerRow.percent) ? winnerRow.percent : 0;
     const winnerKeysSnapshot = teamMemberKeys.has(winnerTeamId)
       ? new Set(teamMemberKeys.get(winnerTeamId))
       : new Set();
@@ -609,7 +618,7 @@ function maybeEndRound() {
   if (roundEnding) return;
   if (gameFinished) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
-  if (Date.now() < roundStartMs + ROUND_MS) return;
+  if (Date.now() < roundStartMs + roundDurationMs) return;
   const stats = buildStatsPayload();
   const rows = stats.rows || [];
   if (rows.length === 0) {
@@ -619,7 +628,13 @@ function maybeEndRound() {
   }
 
   if (roundIndex >= 2) {
-    finalizeThirdRound(rows[0]);
+    const top = rows[0];
+    if (!top || typeof top.teamId !== "number") {
+      roundStartMs = Date.now();
+      saveRoundState();
+      return;
+    }
+    finalizeThirdRound(top);
     return;
   }
 
@@ -688,7 +703,7 @@ function maybeEndRound() {
       roundIndex,
       winnerTeamId,
       winnerName: winningTeamName,
-      roundEndsAt: roundStartMs + ROUND_MS,
+      roundEndsAt: roundStartMs + roundDurationMs,
       maxPerTeam: getMaxPerTeam(),
       grid: { w: gridW, h: gridH },
     });
@@ -697,13 +712,11 @@ function maybeEndRound() {
       if (client.readyState !== 1) continue;
       const tok = winnerTokenByClient.get(client);
       if (tok) {
-        client.send(
-          JSON.stringify({
-            type: "roundWinnerPass",
-            token: tok,
-            roundIndex,
-          })
-        );
+        safeSend(client, {
+          type: "roundWinnerPass",
+          token: tok,
+          roundIndex,
+        });
       }
     }
 
@@ -728,7 +741,7 @@ wss.on("connection", (ws) => {
   ws.eliminated = gameFinished || roundIndex !== 0;
 
   sendConnectionMeta(ws);
-  ws.send(fullPayload());
+  safeSend(ws, fullPayload());
   broadcastStatsImmediate();
 
   ws.on("message", (data) => {
@@ -740,6 +753,7 @@ wss.on("connection", (ws) => {
     } catch {
       return;
     }
+    if (!msg || typeof msg !== "object") return;
 
     maybeEndRound();
 
@@ -750,7 +764,7 @@ wss.on("connection", (ws) => {
 
     if (msg.type === "claimEligibility") {
       if (gameFinished) {
-        ws.send(JSON.stringify({ type: "claimError", reason: "invalid" }));
+        safeSend(ws,{ type: "claimError", reason: "invalid" });
         return;
       }
       rememberPlayerProfile(ws, msg);
@@ -766,11 +780,11 @@ wss.on("connection", (ws) => {
       if (t && eligibleTokenSet.has(t)) {
         ws.eligible = true;
         ws.eliminated = false;
-        ws.send(JSON.stringify({ type: "claimedOk" }));
-        ws.send(JSON.stringify({ type: "roundWinnerPass", token: t, roundIndex }));
+        safeSend(ws,{ type: "claimedOk" });
+        safeSend(ws,{ type: "roundWinnerPass", token: t, roundIndex });
         sendConnectionMeta(ws);
       } else if (explicitToken) {
-        ws.send(JSON.stringify({ type: "claimError", reason: "invalid" }));
+        safeSend(ws,{ type: "claimError", reason: "invalid" });
       }
       return;
     }
@@ -778,38 +792,38 @@ wss.on("connection", (ws) => {
     if (msg.type === "updateTeam") {
       if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
-        ws.send(JSON.stringify({ type: "updateTeamError", reason: "no_team" }));
+        safeSend(ws,{ type: "updateTeamError", reason: "no_team" });
         return;
       }
       const prev = lastTeamUpdate.get(ws) || 0;
       if (Date.now() - prev < 5000) {
-        ws.send(JSON.stringify({ type: "updateTeamError", reason: "rate" }));
+        safeSend(ws,{ type: "updateTeamError", reason: "rate" });
         return;
       }
       const name = sanitizeTeamName(msg.name);
       const emoji = sanitizeTeamEmoji(msg.emoji);
       if (!name) {
-        ws.send(JSON.stringify({ type: "updateTeamError", reason: "name" }));
+        safeSend(ws,{ type: "updateTeamError", reason: "name" });
         return;
       }
       if (!emoji) {
-        ws.send(JSON.stringify({ type: "updateTeamError", reason: "emoji" }));
+        safeSend(ws,{ type: "updateTeamError", reason: "emoji" });
         return;
       }
       const tid = ws.teamId;
       const dt = dynamicTeams.find((x) => x.id === tid);
       if (!dt) {
-        ws.send(JSON.stringify({ type: "updateTeamError", reason: "no_team" }));
+        safeSend(ws,{ type: "updateTeamError", reason: "no_team" });
         return;
       }
       if (dt.solo) {
-        ws.send(JSON.stringify({ type: "updateTeamError", reason: "solo" }));
+        safeSend(ws,{ type: "updateTeamError", reason: "solo" });
         return;
       }
       const sent = typeof msg.editToken === "string" ? msg.editToken.trim() : "";
       if (dt.editToken) {
         if (sent !== dt.editToken) {
-          ws.send(JSON.stringify({ type: "updateTeamError", reason: "not_owner" }));
+          safeSend(ws,{ type: "updateTeamError", reason: "not_owner" });
           return;
         }
       }
@@ -833,7 +847,7 @@ wss.on("connection", (ws) => {
     if (msg.type === "setTeamColor") {
       if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
-        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "no_team" }));
+        safeSend(ws,{ type: "setTeamColorError", reason: "no_team" });
         return;
       }
       const prevC = lastColorOnlySet.get(ws) || 0;
@@ -841,17 +855,17 @@ wss.on("connection", (ws) => {
       const tid = ws.teamId;
       const dt = dynamicTeams.find((x) => x.id === tid);
       if (!dt || dt.solo) {
-        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "solo" }));
+        safeSend(ws,{ type: "setTeamColorError", reason: "solo" });
         return;
       }
       const sent = typeof msg.editToken === "string" ? msg.editToken.trim() : "";
       if (dt.editToken && sent !== dt.editToken) {
-        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "not_owner" }));
+        safeSend(ws,{ type: "setTeamColorError", reason: "not_owner" });
         return;
       }
       const color = sanitizeHexColor(msg.color);
       if (!color) {
-        ws.send(JSON.stringify({ type: "setTeamColorError", reason: "color" }));
+        safeSend(ws,{ type: "setTeamColorError", reason: "color" });
         return;
       }
       dt.color = color;
@@ -872,7 +886,7 @@ wss.on("connection", (ws) => {
     if (msg.type === "soloSetColor") {
       if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
-        ws.send(JSON.stringify({ type: "soloColorError", reason: "no_team" }));
+        safeSend(ws,{ type: "soloColorError", reason: "no_team" });
         return;
       }
       const prevC = lastColorOnlySet.get(ws) || 0;
@@ -881,12 +895,12 @@ wss.on("connection", (ws) => {
       const dt = dynamicTeams.find((x) => x.id === tid);
       const sent = typeof msg.resumeToken === "string" ? msg.resumeToken.trim() : "";
       if (!dt || !dt.solo || !dt.soloResumeToken || sent !== dt.soloResumeToken) {
-        ws.send(JSON.stringify({ type: "soloColorError", reason: "invalid" }));
+        safeSend(ws,{ type: "soloColorError", reason: "invalid" });
         return;
       }
       const color = sanitizeHexColor(msg.color);
       if (!color) {
-        ws.send(JSON.stringify({ type: "soloColorError", reason: "color" }));
+        safeSend(ws,{ type: "soloColorError", reason: "color" });
         return;
       }
       dt.color = color;
@@ -908,18 +922,18 @@ wss.on("connection", (ws) => {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
       if (ws.teamId != null) {
-        ws.send(JSON.stringify({ type: "createTeamError", reason: "already" }));
+        safeSend(ws,{ type: "createTeamError", reason: "already" });
         return;
       }
       const name = sanitizeTeamName(msg.name);
       const emoji = sanitizeTeamEmoji(msg.emoji);
       const color = sanitizeHexColor(msg.color);
       if (!name || !emoji || !color) {
-        ws.send(JSON.stringify({ type: "createTeamError", reason: "fields" }));
+        safeSend(ws,{ type: "createTeamError", reason: "fields" });
         return;
       }
       if (nextTeamId > 255) {
-        ws.send(JSON.stringify({ type: "createTeamError", reason: "limit" }));
+        safeSend(ws,{ type: "createTeamError", reason: "limit" });
         return;
       }
       const id = nextTeamId++;
@@ -930,16 +944,14 @@ wss.on("connection", (ws) => {
       teamPlayerCounts.set(id, 1);
       if (ws.playerKey) addTeamMemberKey(id, ws.playerKey);
       const team = { id, name, emoji, color, solo: false };
-      ws.send(
-        JSON.stringify({
-          type: "created",
-          teamId: id,
-          team,
-          editToken,
-          teams: teamsForMeta(),
-          teamCounts: Object.fromEntries(teamPlayerCounts),
-        })
-      );
+      safeSend(ws, {
+        type: "created",
+        teamId: id,
+        team,
+        editToken,
+        teams: teamsForMeta(),
+        teamCounts: Object.fromEntries(teamPlayerCounts),
+      });
       broadcast({ type: "teamsFull", teams: teamsForMeta() });
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
@@ -950,21 +962,21 @@ wss.on("connection", (ws) => {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
       if (roundIndex >= 2) {
-        ws.send(JSON.stringify({ type: "soloError", reason: "round" }));
+        safeSend(ws,{ type: "soloError", reason: "round" });
         return;
       }
       if (ws.teamId != null) {
-        ws.send(JSON.stringify({ type: "soloError", reason: "already" }));
+        safeSend(ws,{ type: "soloError", reason: "already" });
         return;
       }
       const name = sanitizeTeamName(msg.name);
       const color = sanitizeHexColor(msg.color);
       if (!name || !color) {
-        ws.send(JSON.stringify({ type: "soloError", reason: "fields" }));
+        safeSend(ws,{ type: "soloError", reason: "fields" });
         return;
       }
       if (nextTeamId > 255) {
-        ws.send(JSON.stringify({ type: "soloError", reason: "limit" }));
+        safeSend(ws,{ type: "soloError", reason: "limit" });
         return;
       }
       const id = nextTeamId++;
@@ -976,16 +988,14 @@ wss.on("connection", (ws) => {
       teamPlayerCounts.set(id, 1);
       if (ws.playerKey) addTeamMemberKey(id, ws.playerKey);
       const team = { id, name, emoji, color, solo: true };
-      ws.send(
-        JSON.stringify({
-          type: "soloJoined",
-          teamId: id,
-          team,
-          resumeToken: soloResumeToken,
-          teams: teamsForMeta(),
-          teamCounts: Object.fromEntries(teamPlayerCounts),
-        })
-      );
+      safeSend(ws, {
+        type: "soloJoined",
+        teamId: id,
+        team,
+        resumeToken: soloResumeToken,
+        teams: teamsForMeta(),
+        teamCounts: Object.fromEntries(teamPlayerCounts),
+      });
       broadcast({ type: "teamsFull", teams: teamsForMeta() });
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
@@ -996,23 +1006,23 @@ wss.on("connection", (ws) => {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
       if (roundIndex >= 2) {
-        ws.send(JSON.stringify({ type: "soloResumeError", reason: "round" }));
+        safeSend(ws,{ type: "soloResumeError", reason: "round" });
         return;
       }
       if (ws.teamId != null) {
-        ws.send(JSON.stringify({ type: "soloResumeError", reason: "already" }));
+        safeSend(ws,{ type: "soloResumeError", reason: "already" });
         return;
       }
       const tid = Number(msg.teamId) | 0;
       const sent = typeof msg.resumeToken === "string" ? msg.resumeToken.trim() : "";
       const dt = dynamicTeams.find((t) => t.id === tid);
       if (!dt || !dt.solo || !dt.soloResumeToken || sent !== dt.soloResumeToken) {
-        ws.send(JSON.stringify({ type: "soloResumeError", reason: "invalid" }));
+        safeSend(ws,{ type: "soloResumeError", reason: "invalid" });
         return;
       }
       const cur = teamPlayerCounts.get(tid) || 0;
       if (cur >= getMaxPerTeam()) {
-        ws.send(JSON.stringify({ type: "soloResumeError", reason: "full" }));
+        safeSend(ws,{ type: "soloResumeError", reason: "full" });
         return;
       }
       ws.teamId = tid;
@@ -1025,16 +1035,14 @@ wss.on("connection", (ws) => {
         color: dt.color,
         solo: true,
       };
-      ws.send(
-        JSON.stringify({
-          type: "soloJoined",
-          teamId: tid,
-          team,
-          resumeToken: dt.soloResumeToken,
-          teams: teamsForMeta(),
-          teamCounts: Object.fromEntries(teamPlayerCounts),
-        })
-      );
+      safeSend(ws, {
+        type: "soloJoined",
+        teamId: tid,
+        team,
+        resumeToken: dt.soloResumeToken,
+        teams: teamsForMeta(),
+        teamCounts: Object.fromEntries(teamPlayerCounts),
+      });
       broadcast({ type: "teamsFull", teams: teamsForMeta() });
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
@@ -1047,27 +1055,27 @@ wss.on("connection", (ws) => {
       const tid = Number(msg.teamId) | 0;
       const valid = validTeamId(tid);
       if (!valid) {
-        ws.send(JSON.stringify({ type: "joinError", reason: "team" }));
+        safeSend(ws,{ type: "joinError", reason: "team" });
         return;
       }
       const dtJoin = dynamicTeams.find((t) => t.id === tid);
       if (!dtJoin || dtJoin.solo) {
-        ws.send(JSON.stringify({ type: "joinError", reason: "team" }));
+        safeSend(ws,{ type: "joinError", reason: "team" });
         return;
       }
       if (ws.teamId != null) {
-        ws.send(JSON.stringify({ type: "joinError", reason: "already" }));
+        safeSend(ws,{ type: "joinError", reason: "already" });
         return;
       }
       const cur = teamPlayerCounts.get(tid) || 0;
       if (cur >= getMaxPerTeam()) {
-        ws.send(JSON.stringify({ type: "joinError", reason: "full" }));
+        safeSend(ws,{ type: "joinError", reason: "full" });
         return;
       }
       ws.teamId = tid;
       teamPlayerCounts.set(tid, cur + 1);
       if (ws.playerKey) addTeamMemberKey(tid, ws.playerKey);
-      ws.send(JSON.stringify({ type: "joined", teamId: tid }));
+      safeSend(ws,{ type: "joined", teamId: tid });
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
       return;
@@ -1076,7 +1084,7 @@ wss.on("connection", (ws) => {
     if (msg.type === "leaveTeam") {
       attachPlayerKey(ws, msg);
       if (ws.teamId == null) {
-        ws.send(JSON.stringify({ type: "leaveError", reason: "no_team" }));
+        safeSend(ws,{ type: "leaveError", reason: "no_team" });
         return;
       }
       const tid = ws.teamId;
@@ -1084,7 +1092,7 @@ wss.on("connection", (ws) => {
       const c = teamPlayerCounts.get(tid) ?? 0;
       teamPlayerCounts.set(tid, Math.max(0, c - 1));
       ws.teamId = null;
-      ws.send(JSON.stringify({ type: "left" }));
+      safeSend(ws,{ type: "left" });
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
       return;
@@ -1093,24 +1101,21 @@ wss.on("connection", (ws) => {
     if (msg.type === "pixel") {
       if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
-        ws.send(JSON.stringify({ type: "pixelReject", reason: "no_team" }));
+        safeSend(ws,{ type: "pixelReject", reason: "no_team" });
         return;
       }
       const x = msg.x | 0;
       const y = msg.y | 0;
       const teamId = ws.teamId;
-      if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
-
-      const rule = canPlace(teamId, x, y);
-      if (rule === "ocean") {
-        ws.send(JSON.stringify({ type: "pixelReject", reason: "ocean" }));
+      if (x < 0 || x >= gridW || y < 0 || y >= gridH) {
+        safeSend(ws, { type: "pixelReject", reason: "out_of_bounds" });
         return;
       }
 
       const now = Date.now();
       const last = lastPlace.get(ws) || 0;
       if (COOLDOWN_MS > 0 && now - last < COOLDOWN_MS) {
-        ws.send(JSON.stringify({ type: "pixelReject", reason: "cooldown" }));
+        safeSend(ws,{ type: "pixelReject", reason: "cooldown" });
         return;
       }
       lastPlace.set(ws, now);
@@ -1191,10 +1196,19 @@ async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, pct) {
   }
 }
 
-function startRoundOneTimer() {
+/**
+ * @param {number} [durationHours] положительное число часов (0.01 = 36 с); без аргумента — 100 ч
+ */
+function startRoundOneTimer(durationHours) {
   if (gameFinished) return { ok: false, reason: "game_finished" };
   if (roundIndex !== 0) return { ok: false, reason: "not_round_first" };
   if (roundTimerStarted) return { ok: false, reason: "already_started" };
+  let ms = ROUND_MS;
+  if (typeof durationHours === "number" && Number.isFinite(durationHours) && durationHours > 0) {
+    ms = Math.round(durationHours * 60 * 60 * 1000);
+    ms = Math.min(Math.max(ms, 1000), 8760 * 60 * 60 * 1000);
+  }
+  roundDurationMs = ms;
   roundTimerStarted = true;
   roundStartMs = Date.now();
   saveRoundState();
@@ -1203,7 +1217,7 @@ function startRoundOneTimer() {
     sendConnectionMeta(client);
   }
   broadcastStatsImmediate();
-  return { ok: true };
+  return { ok: true, durationMs: ms };
 }
 
 async function telegramSendMessage(chatId, text) {
@@ -1234,13 +1248,29 @@ async function telegramPollLoop() {
         if (!msg || typeof msg.text !== "string") continue;
         const uid = msg.from?.id;
         if (uid == null || !TELEGRAM_ADMIN_IDS.has(uid)) continue;
-        const text = String(msg.text).trim().toLowerCase();
-        if (text !== "go") continue;
+        let t = String(msg.text).trim();
+        t = t.replace(/^\/go\b/i, "go").replace(/^гол\s*/i, "go ");
+        const tl = t.toLowerCase();
+        if (!tl.startsWith("go")) continue;
         const chatId = msg.chat.id;
-        const result = startRoundOneTimer();
+        const rest = t.slice(2).trim();
+        let hours = 100;
+        if (rest.length) {
+          const n = parseFloat(rest.replace(",", "."));
+          if (!Number.isFinite(n) || n <= 0) {
+            await telegramSendMessage(
+              chatId,
+              "Укажите положительное число часов: go 100, go 1 или go 0.01 (латиница go или «гол»)."
+            );
+            continue;
+          }
+          hours = n;
+        }
+        const result = startRoundOneTimer(hours);
         let reply;
         if (result.ok) {
-          reply = `Первый раунд: таймер 100 ч запущен. Начало отсчёта: ${new Date(roundStartMs).toISOString()}`;
+          const h = (result.durationMs ?? roundDurationMs) / 3600000;
+          reply = `Первый раунд: таймер ${h} ч. Старт: ${new Date(roundStartMs).toISOString()}`;
         } else if (result.reason === "already_started") {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {
@@ -1261,7 +1291,7 @@ server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
   if (WAIT_FOR_TELEGRAM_GO) {
     console.log(
-      "Первый раунд: отправьте боту в личку сообщение «go» (латиницей, слитно), чтобы запустить таймер 100 ч."
+      'Первый раунд: в личку боту — «go», «go 100» (часов), «go 0.01» или «гол 1» (кириллица вместо go).'
     );
     fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`).catch(
       () => {}
