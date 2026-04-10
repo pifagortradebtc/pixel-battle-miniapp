@@ -2497,8 +2497,8 @@ function connectWs() {
       spectatorMode = true;
       gameFinishedMeta = true;
       lastMyTeamPercent = null;
-      const gw = typeof msg.grid?.w === "number" ? msg.grid.w : 21;
-      const gh = typeof msg.grid?.h === "number" ? msg.grid.h : 21;
+      const gw = typeof msg.grid?.w === "number" ? msg.grid.w : 64;
+      const gh = typeof msg.grid?.h === "number" ? msg.grid.h : 64;
       applyGridFromServer(gw, gh).then(() => {
         const tg = window.Telegram?.WebApp;
         const p = typeof msg.percent === "number" ? formatPercent(msg.percent) : "—";

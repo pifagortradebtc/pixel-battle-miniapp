@@ -69,7 +69,7 @@ function main() {
   );
   console.log("written", p640, cells640.length);
 
-  for (const w of [21, 15]) {
+  for (const w of [160, 64]) {
     const cells = downsample(src, w);
     const outPath = path.join(root, "data", `regions-${w}.json`);
     fs.writeFileSync(

@@ -119,8 +119,8 @@ const BASE_GRID = 320;
 /** Сторона сетки по раунду: 0 массовый, 1 полуфинал, 2 финал команд, 3 дуэль. */
 const GRID_SIZE_MASS = 640;
 const GRID_SIZE_SEMI = 320;
-const GRID_SIZE_FINAL_TEAMS = 21;
-const GRID_SIZE_DUEL = 15;
+const GRID_SIZE_FINAL_TEAMS = 160;
+const GRID_SIZE_DUEL = 64;
 let gridW = GRID_SIZE_MASS;
 let gridH = GRID_SIZE_MASS;
 /** @deprecated используйте getCurrentCooldownMs для игрока */
@@ -139,7 +139,7 @@ const MAX_TEAMS_SEMI = 20;
 const MAX_TEAMS_FINAL = 5;
 /**
  * После полуфинала (конец раунда с индексом 1, на карте 320×320, в команде до 10 чел.)
- * в следующий раунд (21×21, в команде до 2 чел.) проходят только первые N игроков победившей команды.
+ * в следующий раунд (финал команд, в команде до 2 чел.) проходят только первые N игроков победившей команды.
  * Порядок — порядок добавления ключей в Set участников команды на сервере.
  */
 const MAX_PLAYERS_ADVANCING_FROM_SEMI = 10;
@@ -693,7 +693,7 @@ function gridSizeForRoundIndex(ri) {
   return GRID_SIZE_DUEL;
 }
 
-/** @param {number} ri — размеры: массовый 640, полуфинал 320, финал команд 21, дуэль 15 */
+/** @param {number} ri — размеры: массовый 640, полуфинал 320, финал команд 160, дуэль 64 */
 function rebuildLandFromRound(ri) {
   const w = gridSizeForRoundIndex(ri);
   const h = w;
