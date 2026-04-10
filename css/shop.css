@@ -222,6 +222,34 @@
   }
 }
 
+.game-shop__energy-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+@media (min-width: 380px) {
+  .game-shop__energy-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
+
+.game-shop__card--energy {
+  padding: 10px 10px 8px;
+}
+
+.game-shop__card--energy .game-shop__card-title {
+  font-size: 0.95rem;
+  margin: 0 0 4px;
+}
+
+.game-shop__card--energy .game-shop__card-desc {
+  font-size: 0.75rem;
+  margin: 0 0 8px;
+  opacity: 0.85;
+}
+
 .game-shop__card {
   position: relative;
   display: flex;
@@ -956,6 +984,20 @@
   flex: 1 1 calc(50% - 6px);
   min-width: 0;
   font-size: 0.6rem;
+  padding: 9px 4px;
+  letter-spacing: 0.02em;
+}
+
+.game-shop__tabs--six {
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 6px;
+}
+
+.game-shop__tabs--six .game-shop__tab {
+  flex: 1 1 calc(33.33% - 4px);
+  min-width: 0;
+  font-size: 0.58rem;
   padding: 9px 4px;
   letter-spacing: 0.02em;
 }

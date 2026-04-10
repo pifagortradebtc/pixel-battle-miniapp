@@ -57,16 +57,32 @@ export function createBoardVfx(canvas) {
     burst(gx, gy, color, transform, 10);
   }
 
+  const DIR8 = [
+    [1, 0],
+    [1, -1],
+    [0, -1],
+    [-1, -1],
+    [-1, 0],
+    [-1, 1],
+    [0, 1],
+    [1, 1],
+  ];
+
   function lineBeam(gx, gy, dir, color, transform, cells = 5) {
     const { r, g, b } = hexToRgb(color);
-    const d =
-      dir === "up"
-        ? [0, -1]
-        : dir === "down"
-          ? [0, 1]
-          : dir === "left"
-            ? [-1, 0]
-            : [1, 0];
+    let d;
+    if (typeof dir === "number" && dir >= 0 && dir <= 7) {
+      d = DIR8[dir | 0];
+    } else {
+      d =
+        dir === "up"
+          ? [0, -1]
+          : dir === "down"
+            ? [0, 1]
+            : dir === "left"
+              ? [-1, 0]
+              : [1, 0];
+    }
     const c = transform.BASE_CELL * transform.scale;
     const x0 = transform.offsetX + gx * c + c * 0.5;
     const y0 = transform.offsetY + gy * c + c * 0.5;
@@ -124,19 +140,24 @@ export function createBoardVfx(canvas) {
     burst(gx, gy, color, transform, 8);
   }
 
-  function zoneFlash(gx, gy, color, transform) {
+  /**
+   * @param {number} [sizeCells] — сторона квадрата в клетках (4 = зона 4×4, 5 = масс-захват 5×5)
+   */
+  function zoneFlash(gx, gy, color, transform, sizeCells = 4) {
+    const n = Math.max(2, Math.min(16, sizeCells | 0));
     const c = transform.BASE_CELL * transform.scale;
     const x = transform.offsetX + gx * c;
     const y = transform.offsetY + gy * c;
     const { r, g, b } = hexToRgb(color);
+    const side = c * n;
     zoneFlashes.push({
       t0: performance.now(),
       x,
       y,
-      cell: c * 4,
-      color: `rgba(${r},${g},${b},0.35)`,
+      cell: side,
+      color: `rgba(${r},${g},${b},${n >= 5 ? 0.28 : 0.35})`,
     });
-    shockwaveScreen(x + c * 2, y + c * 2, color);
+    shockwaveScreen(x + side * 0.5, y + side * 0.5, color);
   }
 
   function gridToScreen(gx, gy, t) {

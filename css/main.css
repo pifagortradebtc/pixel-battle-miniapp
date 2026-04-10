@@ -534,6 +534,85 @@ body {
   max-width: 420px;
 }
 
+/* —— Welcome: Telegram-style «Запустить игру» + неон арсенала —— */
+.welcome-card.welcome-card {
+  padding: 16px 14px;
+}
+
+.welcome-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.welcome-hero[hidden] {
+  display: none !important;
+}
+
+.welcome-form[hidden] {
+  display: none !important;
+}
+
+.tg-promo-bubble {
+  width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #182533;
+  color: #ffffff;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.tg-miniapp-start {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 14px 44px 14px 20px;
+  border: none;
+  border-radius: 12px;
+  background: #242f3d;
+  color: #ffffff;
+  font-size: 1rem;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  text-align: center;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease;
+}
+
+.tg-miniapp-start:hover {
+  background: #2a3a4d;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.09);
+}
+
+.tg-miniapp-start:active {
+  transform: scale(0.992);
+  background: #1f2a38;
+}
+
+.tg-miniapp-start__corner-icon {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: rgba(255, 255, 255, 0.92);
+  pointer-events: none;
+}
+
+.tg-miniapp-start__label {
+  display: block;
+}
+
 .field {
   display: block;
   margin-bottom: 12px;
@@ -743,7 +822,8 @@ body {
   transform: translate(-50%, -200%) scale(0.88);
 }
 
-.app.fx-speed::after {
+.app.fx-speed::after,
+.app.fx-recovery::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -819,6 +899,81 @@ body {
   }
 }
 
+.event-banner {
+  position: fixed;
+  z-index: 50;
+  left: 0;
+  right: 0;
+  top: 0;
+  padding: calc(var(--safe-top) + 4px) 10px 6px;
+  text-align: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #fef3c7;
+  background: linear-gradient(90deg, rgba(180, 83, 9, 0.92), rgba(217, 119, 6, 0.88), rgba(180, 83, 9, 0.92));
+  border-bottom: 1px solid rgba(251, 191, 36, 0.35);
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.event-banner[hidden] {
+  display: none !important;
+}
+
+.toolbar-energy {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+  min-width: 56px;
+  max-width: 88px;
+}
+
+.toolbar-energy__label {
+  font-size: 0.58rem;
+  font-weight: 700;
+  color: var(--tg-hint);
+  letter-spacing: 0.02em;
+}
+
+.toolbar-energy__track {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.toolbar-energy__fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #22c55e, #4ade80);
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.45);
+  transition: width 0.35s ease-out;
+}
+
+.crisis-overlay__card {
+  max-width: 360px;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  box-shadow: 0 0 24px rgba(239, 68, 68, 0.2);
+}
+
+.crisis-overlay__title {
+  color: #fecaca;
+}
+
+.crisis-overlay__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.crisis-overlay__dismiss {
+  margin-top: 10px;
+  width: 100%;
+}
+
 .fx-btn-press {
   animation: fx-btn-pop 0.22s ease-out;
 }
@@ -842,6 +997,7 @@ body {
   }
 
   .app.fx-speed::after,
+  .app.fx-recovery::after,
   .app.fx-flash::after {
     animation: none;
     opacity: 0;
