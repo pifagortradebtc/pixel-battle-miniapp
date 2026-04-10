@@ -133,10 +133,6 @@ const MAX_PER_TEAM_FIRST = 200;
 const MAX_PER_TEAM_NEXT = 10;
 /** Финальный раунд (команды по 2 человека) */
 const MAX_PER_TEAM_FINAL = 2;
-/** Полуфинал: до 20 команд по 10 человек (все 200 победителей массового). */
-const MAX_TEAMS_SEMI = 20;
-/** Финал команд: 10 допущенных игроков — не более 5 команд по 2 человека. */
-const MAX_TEAMS_FINAL = 5;
 /**
  * После полуфинала (конец раунда с индексом 1, на карте 320×320, в команде до 10 чел.)
  * в следующий раунд (финал команд, в команде до 2 чел.) проходят только первые N игроков победившей команды.
@@ -352,6 +348,12 @@ function attachPlayerKey(ws, msg) {
   if (pk) ws.playerKey = pk;
 }
 
+/**
+ * В следующий раунд попадают только игроки из **победившей команды** прошлого раунда
+ * (`teamId` — лидер по % территории в `maybeEndRound` / `advanceToDuelRound`).
+ * Остальные получают `not_eligible` / наблюдателей. Лимит «сколько команд» не задаётся отдельно:
+ * его ограничивают число допущенных ключей и `getMaxPerTeam()` (10 в полуфинале, 2 в финале команд).
+ */
 function setEligibleKeysFromWinnerTeam(teamId, maxKeys) {
   const raw = [...(teamMemberKeys.get(teamId) || [])].map(sanitizePlayerKey).filter(Boolean);
   if (typeof maxKeys === "number" && maxKeys > 0) {
@@ -553,10 +555,6 @@ function saveDynamicTeams() {
 
 function validTeamId(teamId) {
   return dynamicTeams.some((t) => t.id === teamId);
-}
-
-function countPublicTeams() {
-  return dynamicTeams.filter((t) => !t.solo).length;
 }
 
 function getMaxPerTeam() {
@@ -1837,14 +1835,6 @@ wss.on("connection", (ws, req) => {
       const color = sanitizeHexColor(msg.color);
       if (!name || !emoji || !color) {
         safeSend(ws,{ type: "createTeamError", reason: "fields" });
-        return;
-      }
-      if (roundIndex === 1 && countPublicTeams() >= MAX_TEAMS_SEMI) {
-        safeSend(ws, { type: "createTeamError", reason: "max_teams" });
-        return;
-      }
-      if (roundIndex === 2 && countPublicTeams() >= MAX_TEAMS_FINAL) {
-        safeSend(ws, { type: "createTeamError", reason: "max_teams" });
         return;
       }
       if (nextTeamId > 255) {
