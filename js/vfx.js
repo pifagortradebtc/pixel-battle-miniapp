@@ -170,9 +170,14 @@ export function createBoardVfx(canvas) {
   }
 
   function render(now, transform) {
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    ctx.clearRect(0, 0, w, h);
+    /* Полное стирание в координатах bitmap: при scale(dpr) clearRect(clientW, clientH)
+       иногда не покрывает все пиксели буфера — полупрозрачные VFX «залипают». */
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "transparent";
 
     ripples = ripples.filter((rp) => {
       const age = now - rp.t0;

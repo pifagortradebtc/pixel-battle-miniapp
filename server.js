@@ -20,8 +20,7 @@ import {
   stageAllows,
   tournamentStage,
 } from "./lib/tournament-economy.js";
-import { WalletStore } from "./lib/wallet-store.js";
-import { createWalletDb } from "./lib/wallet-db.js";
+import { createWalletBackend } from "./lib/wallet-backend.js";
 import {
   createNowpaymentInvoice,
   verifyNowpaymentsSignature,
@@ -38,11 +37,8 @@ const PORT = Number(process.env.PORT) || 3847;
 const WS_PATH = "/ws";
 
 const DATA_DIR = path.join(ROOT, "data");
-/** @type {import("./lib/wallet-store.js").WalletStore | import("./lib/wallet-db.js").WalletDb} */
-const walletStore =
-  process.env.WALLET_BACKEND === "json"
-    ? new WalletStore({ dataDir: DATA_DIR })
-    : await createWalletDb(DATA_DIR);
+/** @type {Awaited<ReturnType<typeof createWalletBackend>>} */
+const walletStore = await createWalletBackend(DATA_DIR);
 
 /** Пакеты пополнения: бонус в квантах (1 USDT = 7 квантов). Кредит USDT += bonusQuant/7. */
 const DEPOSIT_PACK_BONUS_QUANT = new Map([
@@ -92,6 +88,18 @@ const wsJoinLimiter = new SlidingWindowRateLimiter();
 /** Покупки по WebSocket: защита от спама кликов / мультивкладок (на ключ игрока). */
 const wsPurchaseLimiter = new SlidingWindowRateLimiter();
 const WS_PURCHASE_PER_10S = Math.min(40, Math.max(4, Number(process.env.WS_PURCHASE_PER_10S) || 12));
+
+/** Redis Pub/Sub: общий канал для нескольких инстансов (Render scale). Пусто — режим один процесс. */
+const REDIS_URL = (process.env.REDIS_URL || "").trim();
+const REDIS_GAME_CHANNEL = (process.env.REDIS_GAME_CHANNEL || "pixel-battle:game").trim();
+
+function isClusterLeader() {
+  if (!REDIS_URL) return true;
+  return /^true$/i.test(String(process.env.CLUSTER_LEADER || "").trim());
+}
+
+/** @type {((raw: string) => void | Promise<void>) | null} */
+let redisGamePublish = null;
 
 /** @type {Map<string, number>} IP → число активных WS (best-effort). */
 const activeWsByIp = new Map();
@@ -410,7 +418,7 @@ function applyEligibilityFromServerState(ws) {
 }
 
 /** Сохраняет Telegram id/username для финального отчёта; при валидном initData жёстко привязывает playerKey к tg_<id>. */
-function rememberPlayerProfile(ws, msg) {
+async function rememberPlayerProfile(ws, msg) {
   const initData = typeof msg?.initData === "string" ? msg.initData : "";
   if (TELEGRAM_BOT_TOKEN && initData) {
     const v = verifyTelegramWebAppInitData(initData, TELEGRAM_BOT_TOKEN, {
@@ -456,10 +464,10 @@ function rememberPlayerProfile(ws, msg) {
     if (typeof invTg === "number" && invTg > 0 && Number.isFinite(invTg)) {
       const refPk = sanitizePlayerKey(`tg_${Math.floor(invTg)}`);
       if (refPk && refPk !== pkInvite) {
-        const eu = walletStore.getOrCreateUser(pkInvite);
+        const eu = await walletStore.getOrCreateUser(pkInvite);
         if (!eu.invitedByPlayerKey) {
           eu.invitedByPlayerKey = refPk;
-          walletStore.save();
+          await walletStore.save();
         }
       }
     }
@@ -893,9 +901,9 @@ function fullPayload() {
   return JSON.stringify({ type: "full", pixels: list, pixelFormat: "v2" });
 }
 
-function buildWalletPayload(ws) {
+async function buildWalletPayload(ws) {
   const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
-  const u = walletStore.getOrCreateUser(pk);
+  const u = await walletStore.getOrCreateUser(pk);
   const now = Date.now();
   const st = tournamentStage(roundIndex, gameFinished);
   const tid = ws.teamId | 0;
@@ -944,14 +952,142 @@ function safeSend(ws, data) {
   }
 }
 
-function broadcast(obj) {
-  const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
+function applyFullMessageToPixelsCluster(msg) {
+  pixels.clear();
+  const list = Array.isArray(msg.pixels) ? msg.pixels : [];
+  const fmt = msg.pixelFormat;
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    if (!Array.isArray(p) || p.length < 3) continue;
+    const x = p[0] | 0;
+    const y = p[1] | 0;
+    if (fmt === "v2" && p.length >= 5) {
+      const t = p[2] | 0;
+      const opk = String(p[3] || "").slice(0, 128);
+      const sh = Number(p[4]) || 0;
+      pixels.set(`${x},${y}`, { teamId: t, ownerPlayerKey: opk, shieldedUntil: sh });
+    } else {
+      pixels.set(`${x},${y}`, { teamId: p[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
+    }
+  }
+}
+
+/**
+ * Применить игровое событие с другого инстанса (после Redis) — держим pixels/команды в памяти в синхроне.
+ * Персональные wallet / meta по-прежнему только на том инстансе, куда пришёл WS.
+ */
+function applyClusterGameReplication(msg) {
+  if (!msg || typeof msg !== "object" || typeof msg.type !== "string") return;
+  switch (msg.type) {
+    case "pixel": {
+      const x = msg.x | 0;
+      const y = msg.y | 0;
+      if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
+      pixels.set(`${x},${y}`, {
+        teamId: msg.t | 0,
+        ownerPlayerKey: String(msg.ownerPlayerKey || "").slice(0, 128),
+        shieldedUntil: Number(msg.shieldedUntil) || 0,
+      });
+      return;
+    }
+    case "full":
+      applyFullMessageToPixelsCluster(msg);
+      return;
+    case "teamsFull":
+      if (Array.isArray(msg.teams)) {
+        dynamicTeams = msg.teams.map((t) => ({
+          id: t.id | 0,
+          name: sanitizeTeamName(t.name),
+          emoji: sanitizeTeamEmoji(t.emoji),
+          color: sanitizeHexColor(t.color) || "#888888",
+          solo: !!t.solo,
+          editToken: typeof t.editToken === "string" ? t.editToken.slice(0, 128) : undefined,
+          soloResumeToken: typeof t.soloResumeToken === "string" ? t.soloResumeToken.slice(0, 128) : undefined,
+        }));
+        const maxId = dynamicTeams.reduce((m, t) => Math.max(m, t.id || 0), 0);
+        nextTeamId = Math.max(nextTeamId, maxId + 1);
+        saveDynamicTeams();
+      }
+      return;
+    case "counts":
+      if (msg.teamCounts && typeof msg.teamCounts === "object") {
+        teamPlayerCounts.clear();
+        for (const k of Object.keys(msg.teamCounts)) {
+          teamPlayerCounts.set(Number(k), Number(msg.teamCounts[k]) | 0);
+        }
+      }
+      return;
+    case "globalEvent":
+      if (msg.active === false) {
+        globalEventUntil = 0;
+        globalEventKind = null;
+      } else {
+        globalEventUntil = Number(msg.until) || 0;
+        globalEventKind = msg.kind != null ? String(msg.kind) : null;
+      }
+      return;
+    case "teamDisplay": {
+      const tid = msg.teamId | 0;
+      const dt = dynamicTeams.find((x) => x.id === tid);
+      if (dt) {
+        dt.name = sanitizeTeamName(msg.name);
+        dt.emoji = sanitizeTeamEmoji(msg.emoji);
+        const nc = sanitizeHexColor(msg.color);
+        if (nc) dt.color = nc;
+        saveDynamicTeams();
+      }
+      return;
+    }
+    case "teamEffect":
+      if (msg.kind === "teamRecovery" && typeof msg.teamId === "number") {
+        const fx = getTeamFx(msg.teamId);
+        fx.teamRecoveryUntil = Number(msg.until) || 0;
+        fx.teamRecoverySec = Number(msg.teamRecoverySec) || 20;
+      }
+      return;
+    case "roundEnded":
+    case "gameEnded":
+      try {
+        loadRoundState();
+        loadDynamicTeams();
+        clearTeamEffectsMap();
+        teamMemberKeys.clear();
+        teamPlayerCounts.clear();
+        pixels.clear();
+        if (gameFinished) rebuildLandFromRound(Math.min(Math.max(roundIndex, 2), 3));
+        else rebuildLandFromRound(roundIndex);
+      } catch (e) {
+        console.warn("[cluster] round sync:", e.message);
+      }
+      return;
+    case "stats":
+    case "purchaseVfx":
+      return;
+    default:
+      return;
+  }
+}
+
+function broadcastToWebSocketClients(raw) {
   for (const client of wss.clients) {
     if (client.readyState !== 1) continue;
     try {
       client.send(raw);
     } catch {
       /* сокет закрыт при отправке */
+    }
+  }
+}
+
+function broadcast(obj) {
+  const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
+  broadcastToWebSocketClients(raw);
+  if (redisGamePublish) {
+    try {
+      const out = redisGamePublish(raw);
+      if (out && typeof out.then === "function") out.catch((e) => console.warn("[redis publish]", e.message));
+    } catch (e) {
+      console.warn("[redis publish]", e.message);
     }
   }
 }
@@ -1056,7 +1192,7 @@ async function handleApi(req, res) {
         extraUsdt = Math.round((bonusQuant / 7) * 1e6) / 1e6;
       }
     }
-    const dep = walletStore.finalizeDeposit(npId, playerKey, creditUsdt + extraUsdt, {
+    const dep = await walletStore.finalizeDeposit(npId, playerKey, creditUsdt + extraUsdt, {
       txHash: String(body.outcome_hash || ""),
     });
     res.writeHead(200);
@@ -1210,10 +1346,10 @@ setInterval(() => {
   wsPurchaseLimiter.prune();
 }, 120000);
 
-function broadcastWalletToAll() {
+async function broadcastWalletToAll() {
   for (const client of wss.clients) {
     if (client.readyState !== 1) continue;
-    safeSend(client, buildWalletPayload(client));
+    safeSend(client, await buildWalletPayload(client));
   }
 }
 
@@ -1223,11 +1359,12 @@ function scheduleBroadcastWalletDebounced() {
   if (walletBroadcastTimer) return;
   walletBroadcastTimer = setTimeout(() => {
     walletBroadcastTimer = null;
-    broadcastWalletToAll();
+    void broadcastWalletToAll();
   }, 50);
 }
 
 function pollGlobalEvents() {
+  if (!isClusterLeader()) return;
   const now = Date.now();
   if (globalEventUntil > 0 && globalEventUntil <= now) {
     globalEventUntil = 0;
@@ -1339,7 +1476,7 @@ function roundEndsAtForMeta() {
   return roundStartMs + roundDurationMs;
 }
 
-function sendConnectionMeta(ws) {
+async function sendConnectionMeta(ws) {
   const teamCountsObj = {};
   for (const [id, c] of teamPlayerCounts) {
     teamCountsObj[id] = c;
@@ -1357,11 +1494,11 @@ function sendConnectionMeta(ws) {
     tournamentStage: tournamentStage(roundIndex, gameFinished),
     discussionChatUrl: getDiscussionChatUrlForClient(),
   });
-  safeSend(ws, buildWalletPayload(ws));
+  safeSend(ws, await buildWalletPayload(ws));
 }
 
 /** Финал: победитель дуэли 1v1 — игра окончена. */
-function finalizeGameEnd(winnerRow) {
+async function finalizeGameEnd(winnerRow) {
   roundEnding = true;
   try {
     const winnerTeamId = winnerRow.teamId;
@@ -1408,17 +1545,18 @@ function finalizeGameEnd(winnerRow) {
     broadcast({ type: "teamsFull", teams: teamsForMeta() });
     broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
     broadcastStatsImmediate();
-    for (const client of wss.clients) {
-      if (client.readyState !== 1) continue;
-      sendConnectionMeta(client);
-    }
+    await Promise.all(
+      [...wss.clients]
+        .filter((c) => c.readyState === 1)
+        .map((c) => sendConnectionMeta(c))
+    );
   } finally {
     roundEnding = false;
   }
 }
 
 /** После раунда «5×2» — только 2 участника победившей команды переходят в дуэль 1v1 (тот же размер карты). */
-function advanceToDuelRound(winnerRow) {
+async function advanceToDuelRound(winnerRow) {
   roundEnding = true;
   try {
     const winnerTeamId = winnerRow.teamId;
@@ -1492,16 +1630,18 @@ function advanceToDuelRound(winnerRow) {
     broadcast({ type: "teamsFull", teams: teamsForMeta() });
     broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
     broadcastStatsImmediate();
-    for (const client of wss.clients) {
-      if (client.readyState !== 1) continue;
-      sendConnectionMeta(client);
-    }
+    await Promise.all(
+      [...wss.clients]
+        .filter((c) => c.readyState === 1)
+        .map((c) => sendConnectionMeta(c))
+    );
   } finally {
     roundEnding = false;
   }
 }
 
-function maybeEndRound() {
+async function runMaybeEndRound() {
+  if (!isClusterLeader()) return;
   if (roundEnding) return;
   if (gameFinished) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
@@ -1521,7 +1661,7 @@ function maybeEndRound() {
       saveRoundState();
       return;
     }
-    finalizeGameEnd(top);
+    await finalizeGameEnd(top);
     return;
   }
   if (roundIndex === 2) {
@@ -1531,7 +1671,7 @@ function maybeEndRound() {
       saveRoundState();
       return;
     }
-    advanceToDuelRound(top);
+    await advanceToDuelRound(top);
     return;
   }
 
@@ -1613,13 +1753,18 @@ function maybeEndRound() {
     broadcast({ type: "teamsFull", teams: teamsForMeta() });
     broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
     broadcastStatsImmediate();
-    for (const client of wss.clients) {
-      if (client.readyState !== 1) continue;
-      sendConnectionMeta(client);
-    }
+    await Promise.all(
+      [...wss.clients]
+        .filter((c) => c.readyState === 1)
+        .map((c) => sendConnectionMeta(c))
+    );
   } finally {
     roundEnding = false;
   }
+}
+
+function maybeEndRound() {
+  void runMaybeEndRound();
 }
 
 setInterval(() => maybeEndRound(), 30000);
@@ -1635,11 +1780,14 @@ wss.on("connection", (ws, req) => {
   ws.eligible = !gameFinished && roundIndex === 0;
   ws.eliminated = gameFinished || roundIndex !== 0;
 
-  sendConnectionMeta(ws);
-  safeSend(ws, fullPayload());
-  broadcastStatsImmediate();
+  void (async () => {
+    await sendConnectionMeta(ws);
+    safeSend(ws, fullPayload());
+    broadcastStatsImmediate();
+  })();
 
   ws.on("message", (data) => {
+    void (async () => {
     if (!wsMsgLimiter.allow(`m:${ws._connId}`, WS_MSG_PER_SEC, 1000)) {
       try {
         ws.close(1008, "rate");
@@ -1661,9 +1809,9 @@ wss.on("connection", (ws, req) => {
     maybeEndRound();
 
     if (msg.type === "clientProfile") {
-      rememberPlayerProfile(ws, msg);
-      sendConnectionMeta(ws);
-      safeSend(ws, buildWalletPayload(ws));
+      await rememberPlayerProfile(ws, msg);
+      await sendConnectionMeta(ws);
+      safeSend(ws, await buildWalletPayload(ws));
       return;
     }
 
@@ -1672,7 +1820,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws,{ type: "claimError", reason: "invalid" });
         return;
       }
-      rememberPlayerProfile(ws, msg);
+      await rememberPlayerProfile(ws, msg);
       if (REQUIRE_TELEGRAM_AUTH_FOR_PLAY && !ws.telegramVerified) {
         safeSend(ws, { type: "claimError", reason: "need_telegram" });
         return;
@@ -1695,7 +1843,7 @@ wss.on("connection", (ws, req) => {
         ws.eliminated = false;
         safeSend(ws,{ type: "claimedOk" });
         safeSend(ws,{ type: "roundWinnerPass", token: t, roundIndex });
-        sendConnectionMeta(ws);
+        await sendConnectionMeta(ws);
       } else if (explicitToken) {
         const cip = ws._clientIp || "unknown";
         if (!claimAttemptLimiter.allow(`claim:${cip}`, 25, 60_000)) {
@@ -1966,9 +2114,9 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const priceQuant = PRICES_QUANT.personal[tier];
-      const u = walletStore.getOrCreateUser(pk);
+      const u = await walletStore.getOrCreateUser(pk);
       const now = Date.now();
-      const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
@@ -1976,9 +2124,9 @@ wss.on("connection", (ws, req) => {
       u.personalRecoverySec = tier;
       u.personalRecoveryUntil = now + RECOVERY_BUFF_DURATION_MS;
       if (!devUnl) {
-        walletStore.recordSpend(pk, quantToUsdt(priceQuant), `personal_recovery_${tier}s`, { deferSave: true });
+        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), `personal_recovery_${tier}s`, { deferSave: true });
       }
-      walletStore.save();
+      await walletStore.save();
       broadcast({
         type: "purchaseVfx",
         kind: "personalRecovery",
@@ -1986,7 +2134,7 @@ wss.on("connection", (ws, req) => {
         tierSec: tier,
       });
       safeSend(ws, { type: "purchaseOk", kind: "personalRecovery", tierSec: tier });
-      safeSend(ws, buildWalletPayload(ws));
+      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -2010,7 +2158,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      const u = walletStore.getOrCreateUser(pk);
+      const u = await walletStore.getOrCreateUser(pk);
       const tid = ws.teamId;
       const now = Date.now();
       const cx = msg.x | 0;
@@ -2022,7 +2170,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const priceQuant = PRICES_QUANT.zone4;
-      const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
@@ -2030,8 +2178,8 @@ wss.on("connection", (ws, req) => {
       applyPlannedCapture(pk, tid, planned);
       /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от зоны 4×4. */
       u.lastZoneCaptureAt = now;
-      if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_4x4", { deferSave: true });
-      walletStore.save();
+      if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_4x4", { deferSave: true });
+      await walletStore.save();
       scheduleStatsBroadcast();
       broadcast({
         type: "purchaseVfx",
@@ -2042,7 +2190,7 @@ wss.on("connection", (ws, req) => {
         size: 4,
       });
       safeSend(ws, { type: "purchaseOk", kind: "zoneCapture", cells: planned.length, size: 4 });
-      safeSend(ws, buildWalletPayload(ws));
+      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -2066,7 +2214,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      const u = walletStore.getOrCreateUser(pk);
+      const u = await walletStore.getOrCreateUser(pk);
       const tid = ws.teamId;
       const now = Date.now();
       const cx = msg.x | 0;
@@ -2077,7 +2225,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const priceQuant = PRICES_QUANT.zone6;
-      const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
@@ -2085,8 +2233,8 @@ wss.on("connection", (ws, req) => {
       applyPlannedCapture(pk, tid, planned);
       /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от масс-захвата 6×6. */
       u.lastMassCaptureAt = now;
-      if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "mass_capture_6x6", { deferSave: true });
-      walletStore.save();
+      if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "mass_capture_6x6", { deferSave: true });
+      await walletStore.save();
       scheduleStatsBroadcast();
       broadcast({
         type: "purchaseVfx",
@@ -2097,7 +2245,7 @@ wss.on("connection", (ws, req) => {
         size: 6,
       });
       safeSend(ws, { type: "purchaseOk", kind: "massCapture", cells: planned.length, size: 6 });
-      safeSend(ws, buildWalletPayload(ws));
+      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -2121,7 +2269,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      const u = walletStore.getOrCreateUser(pk);
+      const u = await walletStore.getOrCreateUser(pk);
       const tid = ws.teamId;
       const now = Date.now();
       const cx = msg.x | 0;
@@ -2132,15 +2280,15 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const priceQuant = PRICES_QUANT.zone12;
-      const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
       }
       applyPlannedCapture(pk, tid, planned);
       u.lastZone12CaptureAt = now;
-      if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_12x12", { deferSave: true });
-      walletStore.save();
+      if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_12x12", { deferSave: true });
+      await walletStore.save();
       scheduleStatsBroadcast();
       broadcast({
         type: "purchaseVfx",
@@ -2151,7 +2299,7 @@ wss.on("connection", (ws, req) => {
         size: 12,
       });
       safeSend(ws, { type: "purchaseOk", kind: "zone12Capture", cells: planned.length, size: 12 });
-      safeSend(ws, buildWalletPayload(ws));
+      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -2183,7 +2331,7 @@ wss.on("connection", (ws, req) => {
       const tid = ws.teamId;
       const fx = getTeamFx(tid);
       const now = Date.now();
-      const spend = walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
@@ -2191,9 +2339,9 @@ wss.on("connection", (ws, req) => {
       fx.teamRecoverySec = tier;
       fx.teamRecoveryUntil = now + RECOVERY_BUFF_DURATION_MS;
       if (!devUnl) {
-        walletStore.recordSpend(pk, quantToUsdt(priceQuant), `team_recovery_${tier}s`, { deferSave: true });
+        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), `team_recovery_${tier}s`, { deferSave: true });
       }
-      walletStore.save();
+      await walletStore.save();
       broadcast({
         type: "teamEffect",
         teamId: tid,
@@ -2231,29 +2379,30 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "pixelReject", reason: "rate_limited" });
         return;
       }
-      const u = walletStore.getOrCreateUser(pk);
+      const u = await walletStore.getOrCreateUser(pk);
       const st = tournamentStage(roundIndex, gameFinished);
       const fx = getTeamFx(teamId);
       const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
       const now = Date.now();
       const cd = getCurrentCooldownMs(u, teamFxPayload, st, now);
       if (now < u.lastActionAt + cd) {
-        walletStore.save();
+        await walletStore.save();
         safeSend(ws, { type: "pixelReject", reason: "cooldown not ready" });
         return;
       }
 
       u.lastActionAt = now;
-      walletStore.save();
+      await walletStore.save();
 
       const key = `${x},${y}`;
       const rec = { teamId, ownerPlayerKey: pk, shieldedUntil: 0 };
       pixels.set(key, rec);
       broadcast({ type: "pixel", x, y, t: teamId, ownerPlayerKey: pk, shieldedUntil: 0 });
       scheduleStatsBroadcast();
-      safeSend(ws, buildWalletPayload(ws));
+      safeSend(ws, await buildWalletPayload(ws));
       return;
     }
+    })();
   });
 
   ws.on("close", () => {
@@ -2336,7 +2485,8 @@ async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, pct) {
 /**
  * @param {number} [durationHours] положительное число часов (0.01 = 36 с); без аргумента — 100 ч
  */
-function startRoundOneTimer(durationHours) {
+async function startRoundOneTimer(durationHours) {
+  if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
   if (gameFinished) return { ok: false, reason: "game_finished" };
   if (roundIndex !== 0) return { ok: false, reason: "not_round_first" };
   if (roundTimerStarted) return { ok: false, reason: "already_started" };
@@ -2349,10 +2499,11 @@ function startRoundOneTimer(durationHours) {
   roundTimerStarted = true;
   roundStartMs = Date.now();
   saveRoundState();
-  for (const client of wss.clients) {
-    if (client.readyState !== 1) continue;
-    sendConnectionMeta(client);
-  }
+  await Promise.all(
+    [...wss.clients]
+      .filter((c) => c.readyState === 1)
+      .map((c) => sendConnectionMeta(c))
+  );
   broadcastStatsImmediate();
   return { ok: true, durationMs: ms };
 }
@@ -2442,7 +2593,7 @@ async function telegramPollLoop() {
           }
           hours = n;
         }
-        const result = startRoundOneTimer(hours);
+        const result = await startRoundOneTimer(hours);
         let reply;
         if (result.ok) {
           const h = (result.durationMs ?? roundDurationMs) / 3600000;
@@ -2465,11 +2616,41 @@ async function telegramPollLoop() {
 
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
+  if (REDIS_URL) {
+    const ch = REDIS_GAME_CHANNEL;
+    import("./lib/redis-game-bus.mjs")
+      .then(({ connectGameRedisBus }) =>
+        connectGameRedisBus({
+          url: REDIS_URL,
+          channel: ch,
+          onMessage: (raw) => {
+            try {
+              const msg = JSON.parse(raw);
+              applyClusterGameReplication(msg);
+              broadcastToWebSocketClients(raw);
+            } catch (e) {
+              console.warn("[redis game] inbound:", e.message);
+            }
+          },
+        })
+      )
+      .then((bus) => {
+        redisGamePublish = bus.publish;
+        console.log(
+          `[cluster] Redis Pub/Sub «${ch}» (CLUSTER_LEADER=${isClusterLeader() ? "true" : "false"} — таймеры раунда и Telegram только на лидере)`
+        );
+      })
+      .catch((e) => console.warn("[cluster] Redis:", e.message || e));
+  }
   if (TELEGRAM_BOT_TOKEN) {
     fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`).catch(
       () => {}
     );
-    telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
+    if (isClusterLeader()) {
+      telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
+    } else {
+      console.log("[cluster] Telegram long poll отключён (не CLUSTER_LEADER).");
+    }
     if (getTelegramMiniAppLaunchUrl()) {
       console.log(
         "Telegram: команда /start — сообщение с кнопкой «Запустить игру» (TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME)."

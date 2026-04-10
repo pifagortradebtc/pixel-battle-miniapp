@@ -55,8 +55,9 @@ body {
   z-index: 12;
   left: 2px;
   top: calc(var(--safe-top) + var(--toolbar-h) + 1px);
-  width: min(26vw, 112px);
-  max-width: 122px;
+  /* На ~10% уже — меньше заходит к центру карты */
+  width: min(23.4vw, 101px);
+  max-width: 110px;
   max-height: min(38vh, 220px);
   display: flex;
   flex-direction: column;

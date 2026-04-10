@@ -16,6 +16,10 @@ let gridH = 640;
 const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
+/** Видимых клеток больше — без градиента на каждую (иначе createLinearGradient ×10⁵/сек). */
+const DRAW_DETAIL_GRADIENT_MAX_CELLS = 7000;
+/** Ещё тяжелее — без анимированных рёбер между командами (второй полный проход по сетке). */
+const DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS = 11000;
 const COOLDOWN_MS = 0;
 /** Длительность баффов «личное/командное восстановление» — как на сервере (tournament-economy). */
 const RECOVERY_BUFF_DURATION_MS = 2 * 60 * 1000;
@@ -219,7 +223,10 @@ const floatFxHost = document.getElementById("float-fx");
 
 /** @type {ReturnType<typeof createBoardVfx> | null} */
 let boardVfx = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
 let mapAnimTimer = null;
+/** Последний draw(): число видимых клеток — для реже перерисовки при отдалении. */
+let lastDrawVisibleCellCount = 0;
 let lastZoneGx = 0;
 let lastZoneGy = 0;
 let prevWalletQuant = null;
@@ -378,7 +385,7 @@ function syncWelcomeForRound() {
 }
 
 function countryColor(regionId) {
-  if (regionId === 0) return "#071018";
+  if (regionId === 0) return "#0a1a32"; /* небо / фон плаката */
   if (regionId === 1) return `hsl(38 32% 30%)`;
   const h = ((regionId - 2) * 53) % 360;
   return `hsl(${h} 36% 30%)`;
@@ -2136,14 +2143,22 @@ function setupQuickBuyRail() {
 
 function startMapAnimLoop() {
   if (mapAnimTimer) return;
-  mapAnimTimer = setInterval(() => {
-    if (wantOnline && getWsUrl()) draw(performance.now());
-  }, 45);
+  const tick = () => {
+    mapAnimTimer = null;
+    if (!wantOnline || !getWsUrl()) return;
+    draw(performance.now());
+    const ms =
+      lastDrawVisibleCellCount > 16000 ? 160
+      : lastDrawVisibleCellCount > 10000 ? 90
+      : 45;
+    mapAnimTimer = setTimeout(tick, ms);
+  };
+  mapAnimTimer = setTimeout(tick, 45);
 }
 
 function stopMapAnimLoop() {
   if (mapAnimTimer) {
-    clearInterval(mapAnimTimer);
+    clearTimeout(mapAnimTimer);
     mapAnimTimer = null;
   }
 }
@@ -3289,6 +3304,21 @@ function draw(time = performance.now()) {
   const y1 = Math.min(gridH - 1, Math.ceil((h - offsetY) / cell));
 
   const online = wantOnline && getWsUrl();
+  const visibleCellCount = (x1 - x0 + 1) * (y1 - y0 + 1);
+  const drawGradientShine = !online || visibleCellCount <= DRAW_DETAIL_GRADIENT_MAX_CELLS;
+  const drawEdgeShimmer = online && cell >= 3 && visibleCellCount <= DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS;
+
+  /** O(1) цвет команды вместо teamsMeta.find на каждую клетку */
+  let teamColorById = null;
+  if (online && teamsMeta && teamsMeta.length) {
+    teamColorById = new Map();
+    for (let i = 0; i < teamsMeta.length; i++) {
+      const t = teamsMeta[i];
+      if (t && t.id != null) teamColorById.set(t.id, t.color);
+    }
+  }
+
+  const shNow = Date.now();
 
   for (let gy = y0; gy <= y1; gy++) {
     for (let gx = x0; gx <= x1; gx++) {
@@ -3307,17 +3337,19 @@ function draw(time = performance.now()) {
       if (owner !== undefined) {
         if (online) {
           const tid = typeof owner === "number" ? owner : owner.teamId;
-          const tc = teamColor(tid);
+          const tc = teamColorById?.get(tid) ?? teamColor(tid);
           ctx.fillStyle = tc;
           ctx.fillRect(px, py, cw, ch);
-          const { r, g, b } = hexToRgb(tc);
-          const lg = ctx.createLinearGradient(px, py, px + cw, py + ch);
-          lg.addColorStop(0, `rgba(255,255,255,${0.06 + pulse * 0.04})`);
-          lg.addColorStop(0.5, `rgba(${r},${g},${b},0.12)`);
-          lg.addColorStop(1, `rgba(0,0,0,${0.12 + pulse * 0.04})`);
-          ctx.fillStyle = lg;
-          ctx.fillRect(px, py, cw, ch);
-          if (tid === myTeamId) {
+          if (drawGradientShine) {
+            const { r, g, b } = hexToRgb(tc);
+            const lg = ctx.createLinearGradient(px, py, px + cw, py + ch);
+            lg.addColorStop(0, `rgba(255,255,255,${0.06 + pulse * 0.04})`);
+            lg.addColorStop(0.5, `rgba(${r},${g},${b},0.12)`);
+            lg.addColorStop(1, `rgba(0,0,0,${0.12 + pulse * 0.04})`);
+            ctx.fillStyle = lg;
+            ctx.fillRect(px, py, cw, ch);
+          }
+          if (drawGradientShine && tid === myTeamId) {
             ctx.shadowColor = tc;
             ctx.shadowBlur = Math.min(18, cell * 0.45);
             ctx.strokeStyle = `rgba(255,255,255,${0.2 + pulse * 0.08})`;
@@ -3326,12 +3358,14 @@ function draw(time = performance.now()) {
             ctx.shadowBlur = 0;
           }
           const sh = typeof owner === "object" && owner ? owner.shieldedUntil || 0 : 0;
-          if (sh > Date.now()) {
+          if (sh > shNow) {
             ctx.strokeStyle = `rgba(120, 220, 255, ${0.75 + pulse * 0.15})`;
             ctx.lineWidth = Math.max(1, cell * 0.06);
             ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
-            ctx.fillStyle = `rgba(100, 200, 255, ${0.06 + pulse * 0.03})`;
-            ctx.fillRect(px, py, cw, ch);
+            if (drawGradientShine) {
+              ctx.fillStyle = `rgba(100, 200, 255, ${0.06 + pulse * 0.03})`;
+              ctx.fillRect(px, py, cw, ch);
+            }
           }
         } else {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
@@ -3341,7 +3375,7 @@ function draw(time = performance.now()) {
     }
   }
 
-  if (online && cell >= 3) {
+  if (drawEdgeShimmer) {
     const edgePhase = (Math.sin(time * 0.0022) + 1) * 0.5;
     for (let gy = y0; gy <= y1; gy++) {
       for (let gx = x0; gx <= x1; gx++) {
@@ -3357,7 +3391,9 @@ function draw(time = performance.now()) {
           [1, 0],
           [0, 1],
         ];
-        for (const [dx, dy] of neighbors) {
+        for (let i = 0; i < neighbors.length; i++) {
+          const dx = neighbors[i][0];
+          const dy = neighbors[i][1];
           const nk = `${gx + dx},${gy + dy}`;
           const ow = pixels.get(nk);
           const ntid = ow ? (typeof ow === "number" ? ow : ow.teamId) : null;
@@ -3381,7 +3417,7 @@ function draw(time = performance.now()) {
     }
   }
 
-  if (cell >= 6) {
+  if (cell >= 6 && visibleCellCount <= 22000) {
     ctx.strokeStyle = "rgba(255,255,255,0.035)";
     ctx.lineWidth = 1;
     for (let gx = x0; gx <= x1 + 1; gx++) {
@@ -3399,6 +3435,8 @@ function draw(time = performance.now()) {
       ctx.stroke();
     }
   }
+
+  lastDrawVisibleCellCount = visibleCellCount;
 }
 
 function placePixel(gx, gy) {

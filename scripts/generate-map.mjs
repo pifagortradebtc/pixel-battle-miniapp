@@ -1,8 +1,8 @@
 /**
- * Карта ближе к «реальной»: органичные берега (шум + радиальный континент),
- * океан в основном по периметру/низинам, не полосами сверху/снизу.
- * Реки — отдельный тип клеток (узкие полосы из углов и с рёбер), непроходимы, как вода.
- * Запуск: npm run build-map
+ * Базовая суша — шум + Вороной (как раньше), но внешний силуэт не «планета», а плакат в духе промо:
+ * верх — «небо» (не закрашивается), центр — широкое табло, низ расширяется — «куча / сцена».
+ * Реки — узкие русла на суше, непроходимы.
+ * Запуск: npm run build-map && npm run downsample-regions
  */
 
 import fs from "fs";
@@ -295,58 +295,63 @@ for (let y = 0; y < H; y++) {
   }
 }
 
-/** Раунд 1: основная суша — только внутри круга; в левом нижнем углу — отдельный остров в форме знака ₿. */
-const CIRCLE_R = 0.46 * Math.min(W, H);
-const CX = W * 0.5;
-const CY = H * 0.5;
-
-/** Нормализованные координаты внутри прямоугольника острова (левый нижний угол карты). */
-function inBitcoinSymbol(tx, ty) {
-  if (tx < 0 || tx > 1 || ty < 0 || ty > 1) return false;
-  if (tx >= 0.05 && tx <= 0.16 && ty >= 0.14 && ty <= 0.86) return true;
-  if (tx >= 0.17 && tx <= 0.27 && ty >= 0.14 && ty <= 0.86) return true;
-  if (tx < 0.28) return false;
-  const eTop =
-    (tx - 0.58) ** 2 / 0.34 ** 2 + (ty - 0.3) ** 2 / 0.2 ** 2 <= 1 && ty <= 0.52;
-  const eBot =
-    (tx - 0.58) ** 2 / 0.34 ** 2 + (ty - 0.7) ** 2 / 0.2 ** 2 <= 1 && ty >= 0.48;
-  return eTop || eBot;
+/**
+ * Силуэт «плаката»: верхняя полоса — небо; основной блок с лёгким скруглением сверху;
+ * нижняя треть расширяется к низу (как горизонт кучи монет/купюр на референсе).
+ */
+function inTradePosterShape(x, y) {
+  const nx = (x + 0.5) / W;
+  const ny = (y + 0.5) / H;
+  if (ny < 0.1) return false;
+  const halfWCard = 0.405;
+  if (ny < 0.52) {
+    if (Math.abs(nx - 0.5) > halfWCard) return false;
+    const roundH = 0.055;
+    if (ny < 0.1 + roundH) {
+      const u = (ny - 0.1) / roundH;
+      const capW = halfWCard * (0.42 + 0.58 * u);
+      if (Math.abs(nx - 0.5) > capW) return false;
+    }
+    return true;
+  }
+  const t = (ny - 0.52) / 0.48;
+  const halfWPile = halfWCard + t * 0.155;
+  if (Math.abs(nx - 0.5) > halfWPile) return false;
+  return true;
 }
 
-function cellInBitcoinIsland(x, y) {
-  const bx0 = 4;
-  const bx1 = 96;
-  const by0 = H - 96;
-  const by1 = H - 4;
-  if (x < bx0 || x >= bx1 || y < by0 || y >= by1) return false;
-  const tx = (x - bx0) / (bx1 - bx0);
-  const ty = (y - by0) / (by1 - by0);
-  return inBitcoinSymbol(tx, ty);
-}
-
-function inMainCircle(x, y) {
-  const dx = x + 0.5 - CX;
-  const dy = y + 0.5 - CY;
-  return dx * dx + dy * dy <= CIRCLE_R * CIRCLE_R;
+/** «Салют» — маленькие круги без закраски у верхней кромки плаката (как на референсе). */
+function inSkyFireworkHole(x, y) {
+  const nx = (x + 0.5) / W;
+  const ny = (y + 0.5) / H;
+  if (ny < 0.08 || ny > 0.2) return false;
+  const bursts = [
+    { cx: 0.2, cy: 0.125, r: 0.034 },
+    { cx: 0.38, cy: 0.11, r: 0.028 },
+    { cx: 0.52, cy: 0.118, r: 0.032 },
+    { cx: 0.68, cy: 0.108, r: 0.03 },
+    { cx: 0.84, cy: 0.122, r: 0.034 },
+  ];
+  for (const b of bursts) {
+    const dx = nx - b.cx;
+    const dy = ny - b.cy;
+    if (dx * dx + dy * dy <= b.r * b.r) return true;
+  }
+  return false;
 }
 
 for (let y = 0; y < H; y++) {
   for (let x = 0; x < W; x++) {
     const i = y * W + x;
-    const btc = cellInBitcoinIsland(x, y);
-    const circ = inMainCircle(x, y);
-    if (btc) {
-      if (cells[i] === 0 || cells[i] === 1) {
-        cells[i] = 2 + ((x * 13 + y * 7) % 94);
-      }
-    } else if (!circ) {
+    const poster = inTradePosterShape(x, y);
+    if (!poster || inSkyFireworkHole(x, y)) {
       cells[i] = 0;
     }
   }
 }
 
 const countryNames = new Array(Math.min(256, seeds.length + 2)).fill("");
-countryNames[0] = "Океан";
+countryNames[0] = "Небо";
 countryNames[1] = "Река";
 for (let i = 2; i <= seeds.length + 1; i++) {
   countryNames[i] = `Территория ${i - 1}`;
