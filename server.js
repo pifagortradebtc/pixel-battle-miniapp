@@ -1956,6 +1956,12 @@ wss.on("connection", (ws, req) => {
         walletStore.recordSpend(pk, quantToUsdt(priceQuant), `personal_recovery_${tier}s`, { deferSave: true });
       }
       walletStore.save();
+      broadcast({
+        type: "purchaseVfx",
+        kind: "personalRecovery",
+        teamId: ws.teamId | 0,
+        tierSec: tier,
+      });
       safeSend(ws, { type: "purchaseOk", kind: "personalRecovery", tierSec: tier });
       safeSend(ws, buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
@@ -2015,6 +2021,14 @@ wss.on("connection", (ws, req) => {
       if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_4x4", { deferSave: true });
       walletStore.save();
       scheduleStatsBroadcast();
+      broadcast({
+        type: "purchaseVfx",
+        kind: "zoneCapture",
+        teamId: tid,
+        gx: r.x0,
+        gy: r.y0,
+        size: 4,
+      });
       safeSend(ws, { type: "purchaseOk", kind: "zoneCapture", cells: planned.length, size: 4 });
       safeSend(ws, buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
@@ -2073,6 +2087,14 @@ wss.on("connection", (ws, req) => {
       if (!devUnl) walletStore.recordSpend(pk, quantToUsdt(priceQuant), "mass_capture_6x6", { deferSave: true });
       walletStore.save();
       scheduleStatsBroadcast();
+      broadcast({
+        type: "purchaseVfx",
+        kind: "massCapture",
+        teamId: tid,
+        gx: cx - 2,
+        gy: cy - 2,
+        size: 6,
+      });
       safeSend(ws, { type: "purchaseOk", kind: "massCapture", cells: planned.length, size: 6 });
       safeSend(ws, buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();

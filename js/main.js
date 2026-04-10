@@ -1656,31 +1656,55 @@ function updateWalletBar() {
   updateToolbarHud();
 }
 
-function handlePurchaseOk(msg) {
+/**
+ * Визуальные эффекты покупок для всех зрителей (сервер шлёт broadcast `purchaseVfx` / `teamEffect`).
+ */
+function applyGlobalPurchaseVfx(msg) {
   const app = document.getElementById("app");
   const tr = getVfxTransform();
   const kind = msg.kind;
-  const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
-
-  if (kind === "personalRecovery" && boardVfx) {
-    app?.classList.add("fx-recovery");
-    setTimeout(() => app?.classList.remove("fx-recovery"), 2400);
-    boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
-    const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
-    spawnFloatingText(floatFxHost, `⚡ ЛИЧНО: ${s} С`, flo, "float-fx__pop--gold");
+  if (kind === "personalRecovery") {
+    if (boardVfx) {
+      app?.classList.add("fx-recovery");
+      setTimeout(() => app?.classList.remove("fx-recovery"), 2400);
+      boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    }
+    return;
   }
-  if (kind === "zoneCapture" && boardVfx && myTeamId != null) {
-    boardVfx.zoneFlash(lastZoneGx, lastZoneGy, teamColor(myTeamId), tr, 4);
-    spawnFloatingText(floatFxHost, "ЗОНА 4×4", flo, "float-fx__pop--gold");
+  if (kind === "zoneCapture" && boardVfx && typeof msg.gx === "number" && typeof msg.gy === "number") {
+    const sz = typeof msg.size === "number" && msg.size > 0 ? msg.size | 0 : 4;
+    boardVfx.zoneFlash(msg.gx | 0, msg.gy | 0, teamColor(msg.teamId | 0), tr, sz);
+    return;
   }
-  if (kind === "massCapture" && boardVfx && myTeamId != null) {
-    boardVfx.zoneFlash(lastZoneGx, lastZoneGy, teamColor(myTeamId), tr, 6);
+  if (kind === "massCapture" && boardVfx && typeof msg.gx === "number" && typeof msg.gy === "number") {
+    const sz = typeof msg.size === "number" && msg.size > 0 ? msg.size | 0 : 6;
+    boardVfx.zoneFlash(msg.gx | 0, msg.gy | 0, teamColor(msg.teamId | 0), tr, sz);
     boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
-    spawnFloatingText(floatFxHost, "МАСС-ЗАХВАТ 6×6", { x: flo.x, y: flo.y - 8 }, "float-fx__pop--raid");
+    return;
   }
   if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
+    boardVfx?.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+  }
+}
+
+/** Только для покупателя: всплывающие подсказки и «Снова»; карта — через applyGlobalPurchaseVfx. */
+function handlePurchaseOk(msg) {
+  const kind = msg.kind;
+  const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
+
+  if (kind === "personalRecovery") {
+    const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
+    spawnFloatingText(floatFxHost, `⚡ ЛИЧНО: ${s} С`, flo, "float-fx__pop--gold");
+  }
+  if (kind === "zoneCapture") {
+    spawnFloatingText(floatFxHost, "ЗОНА 4×4", flo, "float-fx__pop--gold");
+  }
+  if (kind === "massCapture") {
+    spawnFloatingText(floatFxHost, "МАСС-ЗАХВАТ 6×6", { x: flo.x, y: flo.y - 8 }, "float-fx__pop--raid");
+  }
+  if (kind === "teamRecovery") {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
     spawnFloatingText(floatFxHost, `👥 КОМАНДА: ${s} С`, { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
   }
@@ -2865,6 +2889,10 @@ function connectWs() {
       applyWalletFromServer(msg);
       return;
     }
+    if (msg.type === "purchaseVfx") {
+      applyGlobalPurchaseVfx(msg);
+      return;
+    }
     if (msg.type === "purchaseOk") {
       handlePurchaseOk(msg);
       return;
@@ -2891,8 +2919,8 @@ function connectWs() {
         updateShopAvailability();
         updateToolbarHud();
       }
-      if (msg.kind === "teamRecovery" && boardVfx && msg.teamId === myTeamId) {
-        boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+      if (msg.kind === "teamRecovery") {
+        applyGlobalPurchaseVfx({ kind: "teamRecovery", teamId: msg.teamId });
       }
       return;
     }
