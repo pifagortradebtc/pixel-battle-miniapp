@@ -1659,33 +1659,60 @@ function updateWalletBar() {
 /**
  * Визуальные эффекты покупок для всех зрителей (сервер шлёт broadcast `purchaseVfx` / `teamEffect`).
  */
+function flushBoardVfxFrame() {
+  if (!boardVfx || !canvasVfx) return;
+  try {
+    boardVfx.render(performance.now(), getVfxTransform());
+  } catch {
+    /* ignore */
+  }
+}
+
 function applyGlobalPurchaseVfx(msg) {
   const app = document.getElementById("app");
   const tr = getVfxTransform();
   const kind = msg.kind;
+  const gx = Number(msg.gx);
+  const gy = Number(msg.gy);
+  const hasGrid = Number.isFinite(gx) && Number.isFinite(gy);
+
   if (kind === "personalRecovery") {
     if (boardVfx) {
       app?.classList.add("fx-recovery");
       setTimeout(() => app?.classList.remove("fx-recovery"), 2400);
       boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+      flushBoardVfxFrame();
+      requestAnimationFrame(() => flushBoardVfxFrame());
     }
     return;
   }
-  if (kind === "zoneCapture" && boardVfx && typeof msg.gx === "number" && typeof msg.gy === "number") {
-    const sz = typeof msg.size === "number" && msg.size > 0 ? msg.size | 0 : 4;
-    boardVfx.zoneFlash(msg.gx | 0, msg.gy | 0, teamColor(msg.teamId | 0), tr, sz);
+  if (kind === "zoneCapture" && boardVfx && hasGrid) {
+    const sz =
+      typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
+        ? msg.size | 0
+        : 4;
+    boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
     return;
   }
-  if (kind === "massCapture" && boardVfx && typeof msg.gx === "number" && typeof msg.gy === "number") {
-    const sz = typeof msg.size === "number" && msg.size > 0 ? msg.size | 0 : 6;
-    boardVfx.zoneFlash(msg.gx | 0, msg.gy | 0, teamColor(msg.teamId | 0), tr, sz);
+  if (kind === "massCapture" && boardVfx && hasGrid) {
+    const sz =
+      typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
+        ? msg.size | 0
+        : 6;
+    boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
     boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
     return;
   }
   if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
     boardVfx?.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
   }
 }
 
