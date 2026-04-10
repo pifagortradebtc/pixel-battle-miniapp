@@ -26,6 +26,8 @@ import {
   createNowpaymentInvoice,
   verifyNowpaymentsSignature,
   verifyNowpaymentsSignatureRaw,
+  API_BASE_PROD,
+  API_BASE_SANDBOX,
 } from "./lib/nowpayments-api.js";
 import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
@@ -41,6 +43,9 @@ const walletStore = new WalletStore({ dataDir: DATA_DIR });
 const NOWPAYMENTS_API_KEY = (process.env.NOWPAYMENTS_API_KEY || "").trim();
 const NOWPAYMENTS_IPN_SECRET = (process.env.NOWPAYMENTS_IPN_SECRET || "").trim();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.APP_URL || "").replace(/\/$/, "");
+const NOWPAYMENTS_API_BASE = /^true$/i.test(String(process.env.NOWPAYMENTS_SANDBOX || "").trim())
+  ? API_BASE_SANDBOX
+  : API_BASE_PROD;
 
 const TRUST_PROXY = /^(1|true|yes)$/i.test(String(process.env.TRUST_PROXY || "").trim());
 const WS_MAX_CONN_PER_IP = Math.min(200, Math.max(3, Number(process.env.WS_MAX_CONN_PER_IP) || 40));
@@ -870,6 +875,7 @@ async function handleApi(req, res) {
     try {
       const inv = await createNowpaymentInvoice({
         apiKey: NOWPAYMENTS_API_KEY,
+        apiBase: NOWPAYMENTS_API_BASE,
         amountUsd: amount,
         orderId,
         ipnUrl,
@@ -882,7 +888,7 @@ async function handleApi(req, res) {
         JSON.stringify({
           ok: true,
           paymentId: inv.id,
-          paymentUrl: inv.paymentUrl || inv.raw?.invoice_url,
+          paymentUrl: inv.paymentUrl,
           payAddress: inv.payAddress,
           orderId,
         })

@@ -1271,6 +1271,7 @@ function setupEconomyUi() {
     });
   });
   depositSubmit?.addEventListener("click", async () => {
+    if (depositSubmit?.disabled) return;
     const raw = depositCustom?.value.trim() || "10";
     const amount = parseFloat(raw.replace(",", "."));
     if (!Number.isFinite(amount) || amount < 1) {
@@ -1280,6 +1281,10 @@ function setupEconomyUi() {
       }
       return;
     }
+    if (depositError) depositError.hidden = true;
+    const prevLabel = depositSubmit.textContent;
+    depositSubmit.disabled = true;
+    depositSubmit.textContent = "Создаём счёт…";
     try {
       const res = await fetch(`${location.origin}/api/deposit/create`, {
         method: "POST",
@@ -1290,23 +1295,51 @@ function setupEconomyUi() {
           initData: getTelegramInitDataForServer(),
         }),
       });
-      const j = await res.json();
-      if (!j.ok || !j.paymentUrl) {
+      const text = await res.text();
+      let j;
+      try {
+        j = JSON.parse(text);
+      } catch {
+        throw new Error(
+          res.ok ? "Некорректный ответ сервера" : `Сервер: ${res.status} ${text.slice(0, 120)}`
+        );
+      }
+      if (!res.ok || !j.ok || !j.paymentUrl) {
         if (depositError) {
-          depositError.textContent = j.error || "Не удалось создать счёт (проверьте NOWPAYMENTS_API_KEY и PUBLIC_BASE_URL на сервере).";
+          let msg =
+            j.error ||
+            (typeof j === "object" && j.message) ||
+            "Не удалось создать счёт. Проверьте NOWPAYMENTS_API_KEY и PUBLIC_BASE_URL на Render.";
+          if (msg === "initData required" || msg.includes("initData")) {
+            msg = "Откройте игру из Telegram Mini App — нужна подпись для оплаты.";
+          }
+          if (msg === "bad initData" || msg.includes("bad initData")) {
+            msg = "Обновите Mini App (закройте и откройте снова) и повторите.";
+          }
+          if (msg === "rate limit" || msg.includes("rate")) {
+            msg = "Слишком много попыток. Подождите минуту.";
+          }
+          depositError.textContent = msg;
           depositError.hidden = false;
         }
         return;
       }
       if (depositOverlay) depositOverlay.hidden = true;
+      const payUrl = String(j.paymentUrl).trim();
       const tg = window.Telegram?.WebApp;
-      if (typeof tg?.openLink === "function") tg.openLink(j.paymentUrl);
-      else window.open(j.paymentUrl, "_blank", "noopener");
+      if (typeof tg?.openLink === "function") {
+        tg.openLink(payUrl, { try_instant_view: false });
+      } else {
+        window.open(payUrl, "_blank", "noopener,noreferrer");
+      }
     } catch (e) {
       if (depositError) {
         depositError.textContent = String(e.message || e);
         depositError.hidden = false;
       }
+    } finally {
+      depositSubmit.disabled = false;
+      depositSubmit.textContent = prevLabel;
     }
   });
 
