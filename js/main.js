@@ -5,6 +5,7 @@
  */
 
 import { createBoardVfx, spawnFloatingText } from "./vfx.js";
+import { getCurrentCooldownMs, getEffectiveRecoverySec } from "../lib/tournament-economy.js";
 
 let gridW = 320;
 let gridH = 320;
@@ -12,6 +13,8 @@ const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
 const COOLDOWN_MS = 0;
+/** Длительность баффов «личное/командное восстановление» — как на сервере (tournament-economy). */
+const RECOVERY_BUFF_DURATION_MS = 2 * 60 * 1000;
 
 const STORAGE_KEY = "pixel-battle-v2";
 const LEGACY_STORAGE_KEY = "pixel-battle-v1";
@@ -143,6 +146,14 @@ const leaderboardListEl = document.getElementById("leaderboard-list");
 const roundTimerEl = document.getElementById("round-timer");
 const spectatorBadgeEl = document.getElementById("spectator-badge");
 const walletBalanceEl = document.getElementById("wallet-balance");
+const toolbarPixelTimerEl = document.getElementById("toolbar-pixel-timer");
+const toolbarBuffsEl = document.getElementById("toolbar-buffs");
+const toolbarBuffPersonalEl = document.getElementById("toolbar-buff-personal");
+const toolbarBuffPersonalLabelEl = document.getElementById("toolbar-buff-personal-label");
+const toolbarBuffPersonalFillEl = document.getElementById("toolbar-buff-personal-fill");
+const toolbarBuffTeamEl = document.getElementById("toolbar-buff-team");
+const toolbarBuffTeamLabelEl = document.getElementById("toolbar-buff-team-label");
+const toolbarBuffTeamFillEl = document.getElementById("toolbar-buff-team-fill");
 const eventBannerEl = document.getElementById("event-banner");
 const crisisOverlayEl = document.getElementById("crisis-overlay");
 const btnDeposit = document.getElementById("btn-deposit");
@@ -1367,8 +1378,37 @@ function syncEventBanner() {
   eventBannerEl.hidden = true;
 }
 
+function syncClientCooldownFromWalletFields() {
+  if (!walletState || walletState.devUnlimited) return;
+  const u = {
+    personalRecoveryUntil: walletState.personalRecoveryUntil,
+    personalRecoverySec: walletState.personalRecoverySec,
+  };
+  const te = walletState.teamEffects;
+  const teamFx = te
+    ? { teamRecoveryUntil: te.teamRecoveryUntil, teamRecoverySec: te.teamRecoverySec }
+    : { teamRecoveryUntil: 0, teamRecoverySec: 20 };
+  const st = walletState.tournamentStage || "MASS_BATTLE";
+  walletState.effectiveRecoverySec = getEffectiveRecoverySec(u, teamFx);
+  walletState.cooldownMs = getCurrentCooldownMs(u, teamFx, st);
+}
+
+/** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || 20000` (ломает 0 и баффы). */
+function getWalletActionCooldownMs() {
+  if (!walletState) return 20000;
+  if (walletState.devUnlimited) return 0;
+  const sec = walletState.effectiveRecoverySec;
+  if (typeof sec === "number" && Number.isFinite(sec) && sec >= 0) {
+    return Math.max(0, Math.round(sec * 1000));
+  }
+  const cd = Number(walletState.cooldownMs);
+  if (Number.isFinite(cd) && cd >= 0) return cd;
+  return 20000;
+}
+
 function applyWalletFromServer(msg) {
   walletState = msg;
+  syncClientCooldownFromWalletFields();
   updateWalletBar();
   updateShopAvailability();
   syncEventBanner();
@@ -1412,8 +1452,153 @@ function syncShopDepositButton() {
   b.hidden = spectatorMode || !!walletState.devUnlimited;
 }
 
+function formatPixelCooldownLeft(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  if (s >= 60) {
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+  return `${s} с`;
+}
+
+function formatBuffRemainingMs(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+function updateActiveBuffBars() {
+  if (!toolbarBuffsEl) return;
+  const online = wantOnline && getWsUrl();
+  if (!online || spectatorMode || !walletState || walletState.devUnlimited) {
+    toolbarBuffsEl.hidden = true;
+    if (toolbarBuffPersonalEl) toolbarBuffPersonalEl.hidden = true;
+    if (toolbarBuffTeamEl) toolbarBuffTeamEl.hidden = true;
+    return;
+  }
+  const now = Date.now();
+  const pu = typeof walletState.personalRecoveryUntil === "number" && walletState.personalRecoveryUntil > now;
+  const te = walletState.teamEffects;
+  const tu =
+    te &&
+    typeof te.teamRecoveryUntil === "number" &&
+    te.teamRecoveryUntil > now;
+
+  let any = false;
+
+  if (pu && toolbarBuffPersonalEl && toolbarBuffPersonalLabelEl && toolbarBuffPersonalFillEl) {
+    const left = walletState.personalRecoveryUntil - now;
+    const sec = walletState.personalRecoverySec ?? "?";
+    const pct = Math.min(
+      100,
+      Math.max(0, (Math.min(left, RECOVERY_BUFF_DURATION_MS) / RECOVERY_BUFF_DURATION_MS) * 100)
+    );
+    toolbarBuffPersonalLabelEl.textContent = `⚡ Лично · каждые ${sec} с · ${formatBuffRemainingMs(left)}`;
+    toolbarBuffPersonalFillEl.style.width = `${pct}%`;
+    toolbarBuffPersonalEl.hidden = false;
+    toolbarBuffPersonalEl.title = `Буст скорости пикселя · осталось ${formatBuffRemainingMs(left)} из 2 мин`;
+    any = true;
+  } else if (toolbarBuffPersonalEl) {
+    toolbarBuffPersonalEl.hidden = true;
+  }
+
+  if (tu && toolbarBuffTeamEl && toolbarBuffTeamLabelEl && toolbarBuffTeamFillEl) {
+    const left = te.teamRecoveryUntil - now;
+    const sec = te.teamRecoverySec ?? "?";
+    const pct = Math.min(
+      100,
+      Math.max(0, (Math.min(left, RECOVERY_BUFF_DURATION_MS) / RECOVERY_BUFF_DURATION_MS) * 100)
+    );
+    toolbarBuffTeamLabelEl.textContent = `👥 Команда · каждые ${sec} с · ${formatBuffRemainingMs(left)}`;
+    toolbarBuffTeamFillEl.style.width = `${pct}%`;
+    toolbarBuffTeamEl.hidden = false;
+    toolbarBuffTeamEl.title = `Командный буст · осталось ${formatBuffRemainingMs(left)} из 2 мин`;
+    any = true;
+  } else if (toolbarBuffTeamEl) {
+    toolbarBuffTeamEl.hidden = true;
+  }
+
+  toolbarBuffsEl.hidden = !any;
+}
+
+function updateToolbarHud() {
+  updateToolbarPixelTimer();
+  updateActiveBuffBars();
+}
+
+function updateToolbarPixelTimer() {
+  const el = toolbarPixelTimerEl;
+  if (!el) return;
+  el.classList.remove(
+    "toolbar__pixel-timer--ready",
+    "toolbar__pixel-timer--wait",
+    "toolbar__pixel-timer--muted"
+  );
+  const online = wantOnline && getWsUrl();
+  if (!online) {
+    if (COOLDOWN_MS > 0) {
+      const left = COOLDOWN_MS - (Date.now() - lastPlaceAt);
+      if (left > 500) {
+        el.textContent = formatPixelCooldownLeft(left);
+        el.classList.add("toolbar__pixel-timer--wait");
+        el.title = `До следующего пикселя: ~${(left / 1000).toFixed(1)} с`;
+      } else {
+        el.textContent = "Готово";
+        el.classList.add("toolbar__pixel-timer--ready");
+        el.title = "Можно ставить пиксель";
+      }
+    } else {
+      el.textContent = "—";
+      el.classList.add("toolbar__pixel-timer--muted");
+      el.title = "Локальный режим";
+    }
+    return;
+  }
+  if (spectatorMode) {
+    el.textContent = "Наблюдение";
+    el.classList.add("toolbar__pixel-timer--muted");
+    el.title = "Пиксели недоступны";
+    return;
+  }
+  if (!walletState) {
+    el.textContent = "—";
+    el.classList.add("toolbar__pixel-timer--muted");
+    el.title = "Загрузка…";
+    return;
+  }
+  if (myTeamId == null) {
+    el.textContent = "—";
+    el.classList.add("toolbar__pixel-timer--muted");
+    el.title = "Вступите в команду";
+    return;
+  }
+  if (walletState.devUnlimited) {
+    el.textContent = "Готово";
+    el.classList.add("toolbar__pixel-timer--ready");
+    el.title = "Следующий пиксель без задержки";
+    return;
+  }
+  const cd = getWalletActionCooldownMs();
+  const la = Number(walletState.lastActionAt) || 0;
+  const left = la + cd - Date.now();
+  if (left > 500) {
+    el.textContent = formatPixelCooldownLeft(left);
+    el.classList.add("toolbar__pixel-timer--wait");
+    el.title = `До следующего пикселя: ~${(left / 1000).toFixed(1)} с`;
+  } else {
+    el.textContent = "Готово";
+    el.classList.add("toolbar__pixel-timer--ready");
+    el.title = "Можно ставить пиксель";
+  }
+}
+
 function updateWalletBar() {
-  if (!walletBalanceEl) return;
+  if (!walletBalanceEl) {
+    updateToolbarHud();
+    return;
+  }
   const online = wantOnline && getWsUrl();
   if (!online || !walletState) {
     prevWalletQuant = null;
@@ -1423,6 +1608,7 @@ function updateWalletBar() {
     syncShopHeaderBalance();
     syncShopDepositButton();
     syncEventBanner();
+    updateToolbarHud();
     return;
   }
   walletBalanceEl.hidden = false;
@@ -1442,8 +1628,8 @@ function updateWalletBar() {
     prevWalletQuant = t;
     walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}`;
   }
-  const cd = walletState.cooldownMs || 20000;
-  const la = walletState.lastActionAt || 0;
+  const cd = getWalletActionCooldownMs();
+  const la = Number(walletState.lastActionAt) || 0;
   const left = Math.max(0, la + cd - Date.now());
   if (left > 500 && !spectatorMode) {
     walletBalanceEl.title = `Интервал между действиями: ~${(left / 1000).toFixed(1)} с · кванты`;
@@ -1453,6 +1639,7 @@ function updateWalletBar() {
   syncShopHeaderBalance();
   syncShopDepositButton();
   syncEventBanner();
+  updateToolbarHud();
 }
 
 function handlePurchaseOk(msg) {
@@ -2379,13 +2566,22 @@ function connectWs() {
       return;
     }
     if (msg.type === "teamEffect") {
-      if (walletState && msg.teamId === myTeamId && walletState.teamEffects) {
+      if (walletState && msg.teamId === myTeamId) {
+        if (!walletState.teamEffects) {
+          walletState.teamEffects = {
+            teamId: msg.teamId,
+            teamRecoveryUntil: 0,
+            teamRecoverySec: 20,
+          };
+        }
         const te = walletState.teamEffects;
         if (msg.kind === "teamRecovery" && typeof msg.until === "number") {
           te.teamRecoveryUntil = msg.until;
           if (typeof msg.teamRecoverySec === "number") te.teamRecoverySec = msg.teamRecoverySec;
         }
+        syncClientCooldownFromWalletFields();
         updateShopAvailability();
+        updateToolbarHud();
       }
       if (msg.kind === "teamRecovery" && boardVfx && msg.teamId === myTeamId) {
         boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
@@ -2711,8 +2907,8 @@ function placePixel(gx, gy) {
 
   const now = Date.now();
   if (online && walletState) {
-    const cd = walletState.cooldownMs || 20000;
-    const la = walletState.lastActionAt || 0;
+    const cd = getWalletActionCooldownMs();
+    const la = Number(walletState.lastActionAt) || 0;
     if (now < la + cd) {
       showCooldown(la + cd - now);
       return;
@@ -2954,6 +3150,8 @@ async function bootstrap() {
   setupEconomyUi();
 
   setInterval(updateRoundTimer, 1000);
+  setInterval(updateToolbarHud, 300);
+  updateToolbarHud();
 
   window.addEventListener("resize", resizeCanvas);
   window.addEventListener("pagehide", () => {
