@@ -1609,7 +1609,7 @@ function updateWalletBar() {
     return;
   }
   const online = wantOnline && getWsUrl();
-  if (!online || !walletState) {
+  if (!online) {
     prevWalletQuant = null;
     walletBalanceEl.hidden = true;
     if (btnDeposit) btnDeposit.hidden = true;
@@ -1621,6 +1621,18 @@ function updateWalletBar() {
     return;
   }
   walletBalanceEl.hidden = false;
+  if (!walletState) {
+    prevWalletQuant = null;
+    walletBalanceEl.textContent = "💰 загрузка…";
+    walletBalanceEl.title = "Баланс квантов с сервера";
+    if (btnDeposit) btnDeposit.hidden = true;
+    if (btnShop) btnShop.hidden = spectatorMode;
+    syncShopHeaderBalance();
+    syncShopDepositButton();
+    syncEventBanner();
+    updateToolbarHud();
+    return;
+  }
   if (btnDeposit) btnDeposit.hidden = spectatorMode || !!walletState.devUnlimited;
   if (btnShop) btnShop.hidden = spectatorMode;
   if (walletState.devUnlimited) {

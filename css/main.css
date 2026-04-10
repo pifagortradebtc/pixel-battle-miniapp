@@ -1034,6 +1034,17 @@ body {
   white-space: nowrap;
 }
 
+/** Слева под таймером — не уезжает в горизонтальный скролл кнопок справа */
+.toolbar__wallet--lead {
+  font-size: 0.72rem;
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.25;
+  margin-top: 1px;
+}
+
 .deposit-presets {
   display: flex;
   flex-wrap: wrap;
