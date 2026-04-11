@@ -151,7 +151,8 @@ const PALETTE = [
 ];
 
 const canvas = document.getElementById("board");
-const ctx = canvas.getContext("2d", { alpha: false });
+/** desynchronized: ниже задержка вывода на части устройств (плавность важнее идеального compositing). */
+const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
 const paletteEl = document.getElementById("palette");
 const paletteTriggerBtn = document.getElementById("palette-trigger");
 const palettePickerOverlay = document.getElementById("palette-picker-overlay");
@@ -255,6 +256,123 @@ let scale = 1;
 let offsetX = 0;
 let offsetY = 0;
 let lastPlaceAt = 0;
+
+/** Пан/щипок: упрощённая отрисовка + coalescing в rAF. */
+let mapInteractionActive = false;
+/** Колесо: отдельно, чтобы таймаут не сбрасывал режим во время перетаскивания мышью. */
+let mapWheelActive = false;
+/** Один rAF на кадр: пан/zoom и сетевые перерисовки не дублируют draw(). */
+let canvasFrameRafId = 0;
+let mapWheelEndTimer = 0;
+
+/** Следующий кадр: полный проход видимой области (true) или только dirtyRect (false). */
+let pendingRedrawFull = false;
+/** @type {{ gx0: number, gy0: number, gx1: number, gy1: number } | null} */
+let pendingDirtyRect = null;
+
+/** ?perf=1 или localStorage pixel-battle-perf=1 — лог draw и window.__pixelBattlePerf */
+const perfDebug =
+  typeof window !== "undefined" &&
+  (() => {
+    try {
+      if (new URLSearchParams(window.location.search).get("perf") === "1") return true;
+      if (typeof localStorage !== "undefined" && localStorage.getItem("pixel-battle-perf") === "1")
+        return true;
+    } catch {
+      /* ignore */
+    }
+    return false;
+  })();
+
+let perfDrawsLite = 0;
+let perfDrawsFull = 0;
+let perfMsLiteSum = 0;
+let perfMsFullSum = 0;
+let perfBucketDraws = 0;
+let perfBucketStart = typeof performance !== "undefined" ? performance.now() : 0;
+
+function perfRecordDraw(ms, lite) {
+  if (lite) {
+    perfDrawsLite++;
+    perfMsLiteSum += ms;
+  } else {
+    perfDrawsFull++;
+    perfMsFullSum += ms;
+  }
+  perfBucketDraws++;
+  const now = performance.now();
+  if (now - perfBucketStart < 2000) return;
+  const span = (now - perfBucketStart) / 1000;
+  const dps = perfBucketDraws / span;
+  const avgL = perfDrawsLite ? perfMsLiteSum / perfDrawsLite : 0;
+  const avgF = perfDrawsFull ? perfMsFullSum / perfDrawsFull : 0;
+  console.log(
+    `[pixel-battle perf] ~${dps.toFixed(0)} draws/s · avg draw lite ${avgL.toFixed(2)} ms · full ${avgF.toFixed(2)} ms (cumulative n=${perfDrawsLite + perfDrawsFull})`
+  );
+  perfBucketStart = now;
+  perfBucketDraws = 0;
+}
+
+/** Оптимистичный пиксель до ответа сервера: { key, prev } */
+let optimisticPixelPending = null;
+
+/**
+ * Оптимистичный захват зоны до purchaseOk / purchaseVfx.
+ * @type {{ kind: string, gx: number, gy: number, size: number, keys: string[], prev: Map<string, ReturnType<typeof snapshotPixelCell>> } | null}
+ */
+let optimisticWeaponPending = null;
+
+/** Кэш id команды → цвет (пересборка только при смене teamsMeta / цвета команды). */
+let teamColorByIdCache = null;
+/** @type {typeof teamsMeta} */
+let teamColorByIdCacheTeamsRef = null;
+
+function invalidateTeamColorByIdCache() {
+  teamColorByIdCache = null;
+  teamColorByIdCacheTeamsRef = null;
+}
+
+/** @typedef {{ gx0: number, gy0: number, gx1: number, gy1: number }} DirtyRect */
+
+function expandDirtyRect(d, pad) {
+  const p = pad | 0;
+  return {
+    gx0: d.gx0 - p,
+    gy0: d.gy0 - p,
+    gx1: d.gx1 + p,
+    gy1: d.gy1 + p,
+  };
+}
+
+function mergeDirtyRects(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    gx0: Math.min(a.gx0, b.gx0),
+    gy0: Math.min(a.gy0, b.gy0),
+    gx1: Math.max(a.gx1, b.gx1),
+    gy1: Math.max(a.gy1, b.gy1),
+  };
+}
+
+function dirtyRectFromKeys(keys) {
+  let gx0 = Infinity;
+  let gy0 = Infinity;
+  let gx1 = -Infinity;
+  let gy1 = -Infinity;
+  for (let i = 0; i < keys.length; i++) {
+    const parts = keys[i].split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    gx0 = Math.min(gx0, x);
+    gy0 = Math.min(gy0, y);
+    gx1 = Math.max(gx1, x);
+    gy1 = Math.max(gy1, y);
+  }
+  if (gx0 === Infinity) return null;
+  return { gx0, gy0, gx1, gy1 };
+}
 
 let persistTimer = null;
 let ws = null;
@@ -390,7 +508,6 @@ async function applyGridFromServer(w, h) {
   scale = 1;
   await loadRegions();
   resizeCanvas();
-  draw();
 }
 
 function syncWelcomeForRound() {
@@ -803,7 +920,8 @@ function applyTeamDisplay(teamId, name, emoji, color) {
   t.name = name;
   t.emoji = emoji;
   if (color && typeof color === "string") t.color = color;
-  draw();
+  invalidateTeamColorByIdCache();
+  scheduleDraw();
 }
 
 function loadFromStorage() {
@@ -1364,6 +1482,7 @@ function onMeta(msg) {
   syncDiscussionChatLinks();
 
   teamsMeta = msg.teams || [];
+  invalidateTeamColorByIdCache();
   teamCounts = msg.teamCounts || {};
   maxPerTeam = msg.maxPerTeam ?? 200;
   gameFinishedMeta = !!msg.gameFinished;
@@ -1820,6 +1939,26 @@ function applyGlobalPurchaseVfx(msg) {
   const gy = Number(msg.gy);
   const hasGrid = Number.isFinite(gx) && Number.isFinite(gy);
 
+  if (
+    (kind === "zoneCapture" || kind === "massCapture" || kind === "zone12Capture") &&
+    consumeDuplicatePurchaseVfx(msg)
+  ) {
+    const sz =
+      typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
+        ? msg.size | 0
+        : kind === "zoneCapture"
+          ? 4
+          : kind === "massCapture"
+            ? 6
+            : 12;
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    scheduleDraw({
+      dirty: { gx0: gxi, gy0: gyi, gx1: gxi + sz - 1, gy1: gyi + sz - 1 },
+    });
+    return;
+  }
+
   if (kind === "personalRecovery") {
     if (boardVfx) {
       boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
@@ -2261,7 +2400,7 @@ function startMapAnimLoop() {
   const tick = () => {
     mapAnimTimer = null;
     if (!wantOnline || !getWsUrl()) return;
-    draw(performance.now());
+    if (!mapDrawUseLite()) drawFull(performance.now());
     const ms =
       lastDrawVisibleCellCount > 16000 ? 160
       : lastDrawVisibleCellCount > 10000 ? 90
@@ -2882,6 +3021,7 @@ function connectWs() {
     }
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
+      invalidateTeamColorByIdCache();
       rebuildTeamList();
       updateTeamBadge();
       cacheTeamDisplayInSession();
@@ -2891,6 +3031,7 @@ function connectWs() {
     if (msg.type === "created") {
       endSessionRestore();
       teamsMeta = msg.teams || [];
+      invalidateTeamColorByIdCache();
       teamCounts = msg.teamCounts || {};
       myTeamId = msg.teamId;
       saveOnlineSession({
@@ -3140,6 +3281,8 @@ function connectWs() {
       return;
     }
     if (msg.type === "full") {
+      optimisticPixelPending = null;
+      optimisticWeaponPending = null;
       pixels.clear();
       for (const p of msg.pixels || []) {
         if (!Array.isArray(p) || p.length < 3) continue;
@@ -3151,13 +3294,21 @@ function connectWs() {
           pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: 0 });
         }
       }
-      draw();
+      scheduleDraw();
       if (wantOnline) flushToStorage();
       else schedulePersist();
       return;
     }
     if (msg.type === "pixel") {
       const pk = `${msg.x},${msg.y}`;
+      /* Оптимистичный пиксель: эхо своей клетки — без второго popPixel (уже показали локально). */
+      const skipOwnPop =
+        optimisticPixelPending &&
+        optimisticPixelPending.key === pk &&
+        msg.t === myTeamId;
+      if (optimisticPixelPending && optimisticPixelPending.key === pk) {
+        optimisticPixelPending = null;
+      }
       const prev = pixels.get(pk);
       const prevSh = typeof prev === "object" && prev ? prev.shieldedUntil || 0 : 0;
       const newSh = typeof msg.shieldedUntil === "number" ? msg.shieldedUntil : 0;
@@ -3168,12 +3319,16 @@ function connectWs() {
       const tr = getVfxTransform();
       const col = teamColor(msg.t);
       if (boardVfx) {
-        boardVfx.popPixel(msg.x, msg.y, col, tr);
+        if (!skipOwnPop) {
+          boardVfx.popPixel(msg.x, msg.y, col, tr);
+        }
         if (newSh > Date.now() && newSh > prevSh) {
           boardVfx.shieldBurst(msg.x, msg.y, col, tr);
         }
       }
-      draw();
+      scheduleDraw({
+        dirty: { gx0: msg.x, gy0: msg.y, gx1: msg.x, gy1: msg.y },
+      });
       schedulePersist();
       return;
     }
@@ -3190,7 +3345,11 @@ function connectWs() {
       return;
     }
     if (msg.type === "purchaseError") {
+      const wk = optimisticWeaponPending?.keys;
+      revertOptimisticWeapon();
       notifyPurchaseError(msg.reason || "");
+      const dr = wk && wk.length ? dirtyRectFromKeys(wk) : null;
+      scheduleDraw(dr ? { dirty: dr } : undefined);
       return;
     }
     if (msg.type === "teamEffect") {
@@ -3218,10 +3377,22 @@ function connectWs() {
       return;
     }
     if (msg.type === "pixelReject") {
+      let rejDirty = null;
+      if (optimisticPixelPending?.key) {
+        const p = optimisticPixelPending.key.split(",");
+        const rx = Number(p[0]);
+        const ry = Number(p[1]);
+        if (Number.isFinite(rx) && Number.isFinite(ry)) {
+          rejDirty = { gx0: rx, gy0: ry, gx1: rx, gy1: ry };
+        }
+      }
+      revertOptimisticPixel();
       if (msg.reason !== "cooldown" && msg.reason !== "cooldown not ready") {
         lastPlaceAt = 0;
       }
       notifyReject(msg.reason || "");
+      scheduleDraw(rejDirty ? { dirty: rejDirty } : undefined);
+      updateToolbarHud();
       return;
     }
   });
@@ -3234,6 +3405,7 @@ function connectWs() {
     const sess = loadOnlineSession();
     myTeamId = sess?.solo ? null : sess?.teamId ?? null;
     teamsMeta = null;
+    invalidateTeamColorByIdCache();
     if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("error", "нет связи");
     reconnectTimer = setTimeout(connectWs, 3500);
@@ -3360,7 +3532,7 @@ function resizeCanvas() {
     canvasVfx.height = bh;
     canvasVfx.style.width = `${w}px`;
     canvasVfx.style.height = `${h}px`;
-    const vctx = canvasVfx.getContext("2d");
+    const vctx = canvasVfx.getContext("2d", { alpha: true, desynchronized: true });
     if (vctx) {
       vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       vctx.imageSmoothingEnabled = false;
@@ -3399,36 +3571,286 @@ function screenToGrid(sx, sy) {
   return { gx, gy };
 }
 
-function draw(time = performance.now()) {
+function getTeamColorByIdMap() {
+  if (teamColorByIdCache != null && teamsMeta === teamColorByIdCacheTeamsRef) {
+    return teamColorByIdCache;
+  }
+  teamColorByIdCacheTeamsRef = teamsMeta;
+  teamColorByIdCache = null;
+  if (!teamsMeta || !teamsMeta.length) return null;
+  const m = new Map();
+  for (let i = 0; i < teamsMeta.length; i++) {
+    const t = teamsMeta[i];
+    if (t && t.id != null) m.set(t.id, t.color);
+  }
+  teamColorByIdCache = m;
+  return teamColorByIdCache;
+}
+
+/** Пан / щипок / колесо — «живой» жест; пока true, карта в lite-режиме. */
+function isMapInteracting() {
+  return mapInteractionActive || mapWheelActive;
+}
+
+function mapDrawUseLite() {
+  return isMapInteracting();
+}
+
+/** Полное качество (после жеста / в покое). */
+function drawFull(time) {
+  draw(time ?? performance.now(), { lite: false });
+}
+
+/** Упрощённый кадр (явный вызов; жесты обычно идут через mapDrawUseLite). */
+function drawFast(time) {
+  draw(time ?? performance.now(), { lite: true });
+}
+
+function flushCanvasFrame() {
+  canvasFrameRafId = 0;
+  const full = pendingRedrawFull;
+  const dirty = pendingDirtyRect;
+  pendingRedrawFull = false;
+  pendingDirtyRect = null;
+  const lite = mapDrawUseLite();
+  draw(performance.now(), {
+    lite,
+    dirtyGrid: full || lite ? null : dirty,
+  });
+}
+
+/**
+ * Запрос кадра (пан/zoom): состояние dirty/full не трогаем — в колбэке только lite.
+ */
+function scheduleCanvasFrame() {
+  if (canvasFrameRafId) return;
+  canvasFrameRafId = requestAnimationFrame(flushCanvasFrame);
+}
+
+/**
+ * Перерисовка карты: объединяет несколько событий в один rAF; опционально только dirty-регион.
+ * @param {{ full?: boolean, dirty?: { gx0: number, gy0: number, gx1: number, gy1: number } } | void} opts
+ */
+function scheduleDraw(opts) {
+  if (!opts) {
+    pendingRedrawFull = true;
+    pendingDirtyRect = null;
+  } else if (opts.full) {
+    pendingRedrawFull = true;
+    pendingDirtyRect = null;
+  } else if (opts.dirty) {
+    if (!pendingRedrawFull) {
+      pendingDirtyRect = mergeDirtyRects(pendingDirtyRect, expandDirtyRect(opts.dirty, 1));
+    }
+  } else {
+    pendingRedrawFull = true;
+    pendingDirtyRect = null;
+  }
+  scheduleCanvasFrame();
+}
+
+function endMapInteraction() {
+  mapInteractionActive = false;
+  if (canvasFrameRafId) {
+    cancelAnimationFrame(canvasFrameRafId);
+    canvasFrameRafId = 0;
+  }
+  if (!mapWheelActive) drawFull();
+  else scheduleCanvasFrame();
+}
+
+function endMapWheelInteraction() {
+  mapWheelActive = false;
+  if (mapWheelEndTimer) {
+    clearTimeout(mapWheelEndTimer);
+    mapWheelEndTimer = 0;
+  }
+  if (!mapInteractionActive) {
+    if (canvasFrameRafId) {
+      cancelAnimationFrame(canvasFrameRafId);
+      canvasFrameRafId = 0;
+    }
+    drawFull();
+  }
+}
+
+/** Снимок значения клетки для отката при pixelReject. */
+function snapshotPixelCell(pk) {
+  const v = pixels.get(pk);
+  if (v === undefined) return undefined;
+  if (typeof v === "number") return v;
+  return { teamId: v.teamId, shieldedUntil: Number(v.shieldedUntil) || 0 };
+}
+
+function revertOptimisticPixel() {
+  if (!optimisticPixelPending) return;
+  const { key, prev } = optimisticPixelPending;
+  optimisticPixelPending = null;
+  if (prev === undefined) pixels.delete(key);
+  else pixels.set(key, prev);
+}
+
+/** Список клеток в прямоугольнике захвата — как на сервере (planCaptureRect). */
+function planClientCaptureCells(kind, cx, cy) {
+  let x0;
+  let y0;
+  let x1;
+  let y1;
+  if (kind === "zoneCapture") {
+    x0 = cx - 1;
+    y0 = cy - 1;
+    x1 = cx + 2;
+    y1 = cy + 2;
+  } else if (kind === "massCapture") {
+    x0 = cx - 2;
+    y0 = cy - 2;
+    x1 = cx + 3;
+    y1 = cy + 3;
+  } else if (kind === "zone12Capture") {
+    x0 = cx - 5;
+    y0 = cy - 5;
+    x1 = cx + 6;
+    y1 = cy + 6;
+  } else {
+    return [];
+  }
+  const keys = [];
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+      keys.push(`${x},${y}`);
+    }
+  }
+  return keys;
+}
+
+function applyOptimisticWeapon(kind, cx, cy) {
+  if (myTeamId == null) return;
+  const keys = planClientCaptureCells(kind, cx, cy);
+  if (!keys.length) return;
+  revertOptimisticWeapon();
+  const prev = new Map();
+  for (const k of keys) {
+    prev.set(k, snapshotPixelCell(k));
+    pixels.set(k, { teamId: myTeamId, shieldedUntil: 0 });
+  }
+  const gx0 = kind === "zoneCapture" ? cx - 1 : kind === "massCapture" ? cx - 2 : cx - 5;
+  const gy0 = kind === "zoneCapture" ? cy - 1 : kind === "massCapture" ? cy - 2 : cy - 5;
+  const size = kind === "zoneCapture" ? 4 : kind === "massCapture" ? 6 : 12;
+  optimisticWeaponPending = { kind, gx: gx0, gy: gy0, size, keys, prev };
+  if (boardVfx) {
+    const tr = getVfxTransform();
+    const col = teamColor(myTeamId);
+    boardVfx.zoneFlash(gx0, gy0, col, tr, size);
+    if (kind !== "zoneCapture") {
+      boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    }
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
+  }
+  const dr = dirtyRectFromKeys(keys);
+  scheduleDraw(dr ? { dirty: dr } : undefined);
+}
+
+function revertOptimisticWeapon() {
+  if (!optimisticWeaponPending) return;
+  const { keys, prev } = optimisticWeaponPending;
+  optimisticWeaponPending = null;
+  for (const k of keys) {
+    const p = prev.get(k);
+    if (p === undefined) pixels.delete(k);
+    else pixels.set(k, p);
+  }
+}
+
+/** Наш оптимистичный zoneFlash совпал с broadcast purchaseVfx — не дублировать VFX. */
+function consumeDuplicatePurchaseVfx(msg) {
+  if (!optimisticWeaponPending) return false;
+  const o = optimisticWeaponPending;
+  if ((msg.teamId | 0) !== (myTeamId | 0)) return false;
+  if (msg.kind !== o.kind) return false;
+  if ((Number(msg.gx) | 0) !== o.gx || (Number(msg.gy) | 0) !== o.gy) return false;
+  const sz = typeof msg.size === "number" && Number.isFinite(msg.size) ? msg.size | 0 : 0;
+  if (sz !== o.size) return false;
+  optimisticWeaponPending = null;
+  return true;
+}
+
+function draw(time = performance.now(), drawOpts = {}) {
+  const _perf0 = perfDebug ? performance.now() : 0;
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   const cell = BASE_CELL * scale;
-  const pulse = 0.5 + 0.5 * Math.sin(time * 0.0018);
+  const lite = drawOpts.lite === true;
+  const pulse = lite ? 0 : 0.5 + 0.5 * Math.sin(time * 0.0018);
 
-  ctx.fillStyle = "#050810";
-  ctx.fillRect(0, 0, w, h);
+  const vx0 = Math.max(0, Math.floor((0 - offsetX) / cell));
+  const vy0 = Math.max(0, Math.floor((0 - offsetY) / cell));
+  const vx1 = Math.min(gridW - 1, Math.ceil((w - offsetX) / cell));
+  const vy1 = Math.min(gridH - 1, Math.ceil((h - offsetY) / cell));
 
-  const x0 = Math.max(0, Math.floor((0 - offsetX) / cell));
-  const y0 = Math.max(0, Math.floor((0 - offsetY) / cell));
-  const x1 = Math.min(gridW - 1, Math.ceil((w - offsetX) / cell));
-  const y1 = Math.min(gridH - 1, Math.ceil((h - offsetY) / cell));
+  const dirtyGrid = drawOpts.dirtyGrid;
+  const partial =
+    !lite &&
+    dirtyGrid != null &&
+    dirtyGrid.gx0 <= dirtyGrid.gx1 &&
+    dirtyGrid.gy0 <= dirtyGrid.gy1;
+
+  let x0;
+  let y0;
+  let x1;
+  let y1;
+  if (partial) {
+    const d = dirtyGrid;
+    x0 = Math.max(vx0, d.gx0);
+    y0 = Math.max(vy0, d.gy0);
+    x1 = Math.min(vx1, d.gx1);
+    y1 = Math.min(vy1, d.gy1);
+    if (x0 > x1 || y0 > y1) {
+      if (perfDebug) perfRecordDraw(performance.now() - _perf0, lite);
+      return;
+    }
+  } else {
+    x0 = vx0;
+    y0 = vy0;
+    x1 = vx1;
+    y1 = vy1;
+  }
+
+  if (partial) {
+    const pxClip = offsetX + x0 * cell;
+    const pyClip = offsetY + y0 * cell;
+    const pw = (x1 - x0 + 1) * cell;
+    const ph = (y1 - y0 + 1) * cell;
+    const rx = Math.floor(pxClip) - 2;
+    const ry = Math.floor(pyClip) - 2;
+    const rw = Math.ceil(pw) + 4;
+    const rh = Math.ceil(ph) + 4;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(rx, ry, rw, rh);
+    ctx.clip();
+    ctx.fillStyle = "#050810";
+    ctx.fillRect(rx, ry, rw, rh);
+  } else {
+    ctx.fillStyle = "#050810";
+    ctx.fillRect(0, 0, w, h);
+  }
 
   const online = wantOnline && getWsUrl();
   const visibleCellCount = (x1 - x0 + 1) * (y1 - y0 + 1);
-  const drawGradientShine = !online || visibleCellCount <= DRAW_DETAIL_GRADIENT_MAX_CELLS;
-  const drawEdgeShimmer = online && cell >= 3 && visibleCellCount <= DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS;
+  const drawGradientShine =
+    !lite && (!online || visibleCellCount <= DRAW_DETAIL_GRADIENT_MAX_CELLS);
+  const drawEdgeShimmer =
+    !lite &&
+    !partial &&
+    online &&
+    cell >= 3 &&
+    visibleCellCount <= DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS;
 
-  /** O(1) цвет команды вместо teamsMeta.find на каждую клетку */
-  let teamColorById = null;
-  if (online && teamsMeta && teamsMeta.length) {
-    teamColorById = new Map();
-    for (let i = 0; i < teamsMeta.length; i++) {
-      const t = teamsMeta[i];
-      if (t && t.id != null) teamColorById.set(t.id, t.color);
-    }
-  }
+  const teamColorById = online ? getTeamColorByIdMap() : null;
 
-  const shNow = Date.now();
+  const shNow = lite ? 0 : Date.now();
 
   for (let gy = y0; gy <= y1; gy++) {
     for (let gx = x0; gx <= x1; gx++) {
@@ -3479,14 +3901,17 @@ function draw(time = performance.now()) {
             ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
             ctx.shadowBlur = 0;
           }
-          const sh = typeof owner === "object" && owner ? owner.shieldedUntil || 0 : 0;
-          if (sh > shNow) {
-            ctx.strokeStyle = `rgba(120, 220, 255, ${0.75 + pulse * 0.15})`;
-            ctx.lineWidth = Math.max(1, cell * 0.06);
-            ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
-            if (drawGradientShine) {
-              ctx.fillStyle = `rgba(100, 200, 255, ${0.06 + pulse * 0.03})`;
-              ctx.fillRect(px, py, cw, ch);
+          /* В lite (пан/зум) щиты и лишние stroke убраны — меньше работы на горячем пути. */
+          if (!lite) {
+            const sh = typeof owner === "object" && owner ? owner.shieldedUntil || 0 : 0;
+            if (sh > shNow) {
+              ctx.strokeStyle = `rgba(120, 220, 255, ${0.75 + pulse * 0.15})`;
+              ctx.lineWidth = Math.max(1, cell * 0.06);
+              ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+              if (drawGradientShine) {
+                ctx.fillStyle = `rgba(100, 200, 255, ${0.06 + pulse * 0.03})`;
+                ctx.fillRect(px, py, cw, ch);
+              }
             }
           }
         } else {
@@ -3539,7 +3964,7 @@ function draw(time = performance.now()) {
     }
   }
 
-  if (cell >= 6 && visibleCellCount <= 22000) {
+  if (!lite && !partial && cell >= 6 && visibleCellCount <= 22000) {
     ctx.strokeStyle = "rgba(255,255,255,0.035)";
     ctx.lineWidth = 1;
     for (let gx = x0; gx <= x1 + 1; gx++) {
@@ -3558,7 +3983,12 @@ function draw(time = performance.now()) {
     }
   }
 
+  if (partial) {
+    ctx.restore();
+  }
+
   lastDrawVisibleCellCount = visibleCellCount;
+  if (perfDebug) perfRecordDraw(performance.now() - _perf0, lite);
 }
 
 function placePixel(gx, gy) {
@@ -3585,6 +4015,7 @@ function placePixel(gx, gy) {
     if (pendingMapAction.type === "zoneCapture") {
       lastZoneGx = gx - 1;
       lastZoneGy = gy - 1;
+      applyOptimisticWeapon("zoneCapture", gx, gy);
       wsSendJson({ type: "purchaseZoneCapture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -3593,6 +4024,7 @@ function placePixel(gx, gy) {
     if (pendingMapAction.type === "massCapture") {
       lastZoneGx = gx - 2;
       lastZoneGy = gy - 2;
+      applyOptimisticWeapon("massCapture", gx, gy);
       wsSendJson({ type: "purchaseMassCapture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -3601,6 +4033,7 @@ function placePixel(gx, gy) {
     if (pendingMapAction.type === "zone12Capture") {
       lastZoneGx = gx - 5;
       lastZoneGy = gy - 5;
+      applyOptimisticWeapon("zone12Capture", gx, gy);
       wsSendJson({ type: "purchaseZone12Capture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -3623,7 +4056,15 @@ function placePixel(gx, gy) {
   lastPlaceAt = now;
 
   if (online) {
+    const pk = `${gx},${gy}`;
+    optimisticPixelPending = { key: pk, prev: snapshotPixelCell(pk) };
+    pixels.set(pk, { teamId: myTeamId, shieldedUntil: 0 });
+    if (boardVfx) {
+      boardVfx.popPixel(gx, gy, teamColor(myTeamId), getVfxTransform());
+    }
+    scheduleDraw({ dirty: { gx0: gx, gy0: gy, gx1: gx, gy1: gy } });
     sendPixelOnline(gx, gy);
+    updateToolbarHud();
   } else {
     pixels.set(`${gx},${gy}`, selectedColor);
     if (boardVfx) {
@@ -3733,8 +4174,9 @@ function setupGestures() {
           scale = newScale;
           offsetX = midX - worldXBefore * BASE_CELL * scale;
           offsetY = midY - worldYBefore * BASE_CELL * scale;
+          mapInteractionActive = true;
+          scheduleCanvasFrame();
         }
-        draw();
       } else if (e.touches.length === 1 && oneFinger) {
         const t = e.touches[0];
         const dx = t.clientX - oneFinger.x;
@@ -3744,7 +4186,8 @@ function setupGestures() {
         if (oneFinger.panning) {
           offsetX = oneFinger.ox + dx;
           offsetY = oneFinger.oy + dy;
-          draw();
+          mapInteractionActive = true;
+          scheduleCanvasFrame();
         }
       }
       e.preventDefault();
@@ -3774,7 +4217,10 @@ function setupGestures() {
         }
         oneFinger = null;
       }
-      if (e.touches.length === 0) schedulePersist();
+      if (e.touches.length === 0) {
+        if (mapInteractionActive) endMapInteraction();
+        schedulePersist();
+      }
       e.preventDefault();
     },
     { passive: false }
@@ -3783,6 +4229,17 @@ function setupGestures() {
   canvas.addEventListener("touchcancel", () => {
     oneFinger = null;
     pinchStartDist = 0;
+    mapInteractionActive = false;
+    mapWheelActive = false;
+    if (mapWheelEndTimer) {
+      clearTimeout(mapWheelEndTimer);
+      mapWheelEndTimer = 0;
+    }
+    if (canvasFrameRafId) {
+      cancelAnimationFrame(canvasFrameRafId);
+      canvasFrameRafId = 0;
+    }
+    drawFull();
     schedulePersist();
   });
 
@@ -3794,7 +4251,8 @@ function setupGestures() {
     if (mousePan.panning) {
       offsetX = mousePan.ox + dx;
       offsetY = mousePan.oy + dy;
-      draw();
+      mapInteractionActive = true;
+      scheduleCanvasFrame();
     }
   }
 
@@ -3809,6 +4267,7 @@ function setupGestures() {
     window.removeEventListener("mousemove", onMouseMove);
     window.removeEventListener("mouseup", onMouseUp);
     if (wasPanning) {
+      endMapInteraction();
       schedulePersist();
       return;
     }
@@ -3850,7 +4309,13 @@ function setupGestures() {
       scale = newScale;
       offsetX = mx - worldX * BASE_CELL * scale;
       offsetY = my - worldY * BASE_CELL * scale;
-      draw();
+      mapWheelActive = true;
+      scheduleCanvasFrame();
+      if (mapWheelEndTimer) clearTimeout(mapWheelEndTimer);
+      mapWheelEndTimer = window.setTimeout(() => {
+        mapWheelEndTimer = 0;
+        endMapWheelInteraction();
+      }, 140);
       schedulePersist();
     },
     { passive: false }
@@ -3900,6 +4365,16 @@ async function bootstrap() {
   if (canvasVfx) boardVfx = createBoardVfx(canvasVfx);
   requestAnimationFrame(vfxLoop);
   connectWs();
+
+  if (perfDebug) {
+    window.__pixelBattlePerf = () => ({
+      drawsLite: perfDrawsLite,
+      drawsFull: perfDrawsFull,
+      avgLiteMs: perfDrawsLite ? perfMsLiteSum / perfDrawsLite : 0,
+      avgFullMs: perfDrawsFull ? perfMsFullSum / perfDrawsFull : 0,
+      hint: "Консоль: лог каждые ~2 с. Включение: ?perf=1 или localStorage pixel-battle-perf=1",
+    });
+  }
 }
 
 bootstrap();

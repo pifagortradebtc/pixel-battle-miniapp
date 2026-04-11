@@ -7,7 +7,7 @@
  * @param {HTMLCanvasElement} canvas
  */
 export function createBoardVfx(canvas) {
-  const ctx = canvas.getContext("2d", { alpha: true });
+  const ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
   /** @type {{ t0: number, x: number, y: number, r: number, color: string, w: number }[]} */
   let ripples = [];
   /** @type {{ x: number, y: number, vx: number, vy: number, life: number, max: number, color: string, size: number }[]} */
