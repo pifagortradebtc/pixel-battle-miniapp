@@ -195,27 +195,42 @@ export function createBoardVfx(canvas) {
   }
 
   /** Взрыв + волны при захвате вражеского флага (все клетки команды переходят атакующему). */
+  /** Удар по базе: короткий импакт (каждый успешный хит по HP). */
+  function flagBaseHitImpact(gx, gy, color, transform) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    ripple(gxi, gyi, color, transform);
+    burst(gxi, gyi, color, transform, 11);
+  }
+
   function flagCaptureExplosion(gx, gy, attackerColor, defenderColor, transform) {
     const gxi = gx | 0;
     const gyi = gy | 0;
     const ac = typeof attackerColor === "string" && attackerColor.startsWith("#") ? attackerColor : "#66ff99";
     const dc = typeof defenderColor === "string" && defenderColor.startsWith("#") ? defenderColor : "#ff6655";
-    burst(gxi, gyi, ac, transform, 44);
-    burst(gxi, gyi, dc, transform, 28);
-    burst(gxi, gyi, "#ffffff", transform, 18);
+    burst(gxi, gyi, ac, transform, 56);
+    burst(gxi, gyi, dc, transform, 36);
+    burst(gxi, gyi, "#ffffff", transform, 26);
     shockwaves.push({
       t0: performance.now(),
       gcx: gxi + 0.5,
       gcy: gyi + 0.5,
-      radiusCells: 10,
+      radiusCells: 14,
       color: ac,
     });
     shockwaves.push({
-      t0: performance.now() + 90,
+      t0: performance.now() + 70,
       gcx: gxi + 0.5,
       gcy: gyi + 0.5,
-      radiusCells: 24,
-      color: "rgba(255,220,120,0.4)",
+      radiusCells: 32,
+      color: "rgba(255,220,120,0.45)",
+    });
+    shockwaves.push({
+      t0: performance.now() + 160,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 48,
+      color: "rgba(255,255,255,0.2)",
     });
     lightningBurst(transform);
   }
@@ -503,6 +518,7 @@ export function createBoardVfx(canvas) {
     shieldBurst,
     zoneFlash,
     defeatExplosion,
+    flagBaseHitImpact,
     flagCaptureExplosion,
     render,
     hasWork,

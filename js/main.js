@@ -13,8 +13,9 @@ import {
 } from "../lib/tournament-economy.js";
 import {
   flagCellFromSpawn,
-  FLAG_CAPTURE_HITS_REQUIRED,
+  FLAG_BASE_MAX_HP,
   FLAG_VISUAL_CELLS_ABOVE,
+  computeEffectiveBaseHp,
 } from "../lib/flag-capture.js";
 
 let gridW = 360;
@@ -526,6 +527,8 @@ let lastMyTeamScoreShare = null;
 let flagCaptureClientState = new Map();
 /** До какого времени показывать пульс/тревогу по своему флагу. */
 let myFlagUnderAttackUntil = 0;
+/** HP ≤ 1 у своей базы — усиленная тревога / тряска. */
+let myFlagCriticalUntil = 0;
 let crisisCooldownUntil = 0;
 /** Ожидание тапа по карте: зона 4×4 или 6×6 */
 let pendingMapAction = null;
@@ -2153,9 +2156,9 @@ function notifyReject(reason) {
     warmup: "Разминка: пиксели включатся, когда закончится отсчёт 2 минут.",
     flag_rate: "Захват флага: слишком часто для вашей команды. Подождите мгновение.",
     enemy_base_locked:
-      "Клетку флага чужой базы нельзя перекрасить обычным пикселем. Захват (20 ударов по центру базы) откроется позже в раунде.",
+      "База врага: снимайте HP ударами по клетке флага (механика откроется позже в раунде). Обычным пикселем базу не перекрасить.",
     enemy_base:
-      "Клетку флага чужой базы можно только «бить» пикселем 20 раз рядом с вашей территорией — она остаётся цветом защитника до полного захвата.",
+      "База врага: бейте по клетке флага рядом с вашей территорией — снимайте HP до 0, затем финальный удар захватывает всю команду.",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -2174,8 +2177,16 @@ function syncFlagCaptureStateFromMeta(flags) {
   if (!Array.isArray(flags)) return;
   for (const f of flags) {
     if (typeof f.teamId !== "number") continue;
+    const maxHp = typeof f.maxHp === "number" ? f.maxHp | 0 : FLAG_BASE_MAX_HP;
+    let hp =
+      typeof f.hp === "number"
+        ? f.hp | 0
+        : Math.max(0, maxHp - (f.progress | 0));
+    if (hp >= maxHp) continue;
     flagCaptureClientState.set(f.teamId, {
-      progress: f.progress | 0,
+      hp,
+      maxHp,
+      lastHitAt: typeof f.lastHitAt === "number" ? f.lastHitAt | 0 : 0,
       attackerTeamId: f.attackerTeamId | 0,
     });
   }
@@ -3646,13 +3657,34 @@ function connectWs() {
       if (msg.reset) {
         flagCaptureClientState.delete(did);
       } else {
-        const p = msg.progress | 0;
-        if (p <= 0) flagCaptureClientState.delete(did);
-        else
+        const maxHp = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
+        const hp =
+          typeof msg.hp === "number"
+            ? msg.hp | 0
+            : Math.max(0, maxHp - (msg.progress | 0));
+        if (hp >= maxHp) flagCaptureClientState.delete(did);
+        else {
           flagCaptureClientState.set(did, {
-            progress: p,
+            hp,
+            maxHp,
+            lastHitAt: typeof msg.lastHitAt === "number" ? msg.lastHitAt | 0 : Date.now(),
             attackerTeamId: msg.attackerTeamId | 0,
           });
+          if (!msg.regen && teamsMeta && boardVfx) {
+            const def = teamsMeta.find((x) => x.id === did);
+            if (def?.spawn) {
+              const { x: fgx, y: fgy } = flagCellFromSpawn(def.spawn.x0, def.spawn.y0);
+              const aid = msg.attackerTeamId | 0;
+              const col = aid ? teamColor(aid) : "#ffaa66";
+              boardVfx.flagBaseHitImpact(fgx, fgy, col, getVfxTransform());
+              flushBoardVfxFrame();
+            }
+          }
+          if ((did | 0) === (myTeamId | 0) && hp <= 1) {
+            myFlagCriticalUntil = Date.now() + 10_000;
+            triggerMapShake(720);
+          }
+        }
       }
       scheduleDraw({ full: true });
       return;
@@ -3664,17 +3696,42 @@ function connectWs() {
     }
     if (msg.type === "flagUnderAttack") {
       if ((msg.defenderTeamId | 0) === (myTeamId | 0)) {
-        myFlagUnderAttackUntil = Date.now() + 14000;
-        showFlagAlertBanner("ВАШ ФЛАГ ПОД АТАКОЙ");
+        myFlagUnderAttackUntil = Date.now() + 16_000;
+        const mx = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
+        const h = typeof msg.hp === "number" ? msg.hp | 0 : mx - 1;
+        showFlagAlertBanner(`ВАША БАЗА ПОД АТАКОЙ — ${h} / ${mx} HP`);
+        try {
+          window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("warning");
+        } catch {
+          /* ignore */
+        }
+      }
+      if ((msg.attackerTeamId | 0) === (myTeamId | 0)) {
+        showPlacementFeedback("Атака базы: продолжайте бить по клетке флага.", "warn", { telegramAlert: false });
       }
       scheduleDraw({ full: true });
       return;
     }
     if (msg.type === "flagDefendWarn") {
       if ((msg.defenderTeamId | 0) === (myTeamId | 0)) {
-        myFlagUnderAttackUntil = Date.now() + 16000;
-        const pr = msg.progress | 0;
-        showFlagAlertBanner(`Флаг: ${pr} / ${FLAG_CAPTURE_HITS_REQUIRED} — отбивайте базу!`);
+        myFlagUnderAttackUntil = Date.now() + 18_000;
+        const mx = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
+        const h = typeof msg.hp === "number" ? msg.hp | 0 : mx;
+        const lv = msg.level | 0;
+        let line = `БАЗА: ${h} / ${mx} HP — держите флаг!`;
+        if (lv <= 1) {
+          line = "КРИТИЧНО! 1 HP — ПОСЛЕДНИЙ УДАР ЗАХВАТИТ БАЗУ!";
+          myFlagCriticalUntil = Date.now() + 12_000;
+          triggerMapShake(900);
+        } else if (lv <= 5) line = `ОПАСНО: ${h} / ${mx} HP — база рушится!`;
+        else if (lv <= 10) line = `Тревога: ${h} / ${mx} HP`;
+        else if (lv <= 15) line = `Внимание: ${h} / ${mx} HP`;
+        showFlagAlertBanner(line);
+        try {
+          window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.(lv <= 5 ? "error" : "warning");
+        } catch {
+          /* ignore */
+        }
       }
       scheduleDraw({ full: true });
       return;
@@ -3703,16 +3760,30 @@ function connectWs() {
       }
       const an = teamsMeta?.find((x) => x.id === aid)?.name || "атакующие";
       const dn = teamsMeta?.find((x) => x.id === did)?.name || "защита";
-      showPlacementFeedback(`ФЛАГ ЗАХВАЧЕН. Команда «${dn}» проиграла — территория у «${an}».`, "error", {
-        telegramAlert: true,
-      });
+      triggerMapShake(1200);
+      showFlagAlertBanner("BASE CAPTURED — БАЗА ЗАХВАЧЕНА");
+      showPlacementFeedback(
+        `BASE CAPTURED / БАЗА ЗАХВАЧЕНА. «${dn}» уничтожена — вся территория у «${an}».`,
+        "error",
+        { telegramAlert: true }
+      );
+      try {
+        window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
+      } catch {
+        /* ignore */
+      }
       scheduleDraw({ full: true });
       schedulePersist();
       return;
     }
     if (msg.type === "flagHitAck") {
-      const mx = typeof msg.max === "number" ? msg.max : FLAG_CAPTURE_HITS_REQUIRED;
-      showPlacementFeedback(`Захват флага… ${msg.progress | 0}/${mx}`, "warn", { telegramAlert: false });
+      const mx = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
+      const h = typeof msg.hp === "number" ? msg.hp | 0 : mx;
+      const line =
+        h <= 0
+          ? "У базы 0 HP — следующий ваш удар захватит её полностью."
+          : `Попадание по базе: у врага ${h} / ${mx} HP.`;
+      showPlacementFeedback(line, "warn", { telegramAlert: false });
       scheduleDraw({ full: true });
       return;
     }
@@ -3740,12 +3811,6 @@ function connectWs() {
       const aliveIds = new Set((teamsMeta || []).map((x) => x.id));
       for (const id of [...flagCaptureClientState.keys()]) {
         if (!aliveIds.has(id)) flagCaptureClientState.delete(id);
-      }
-      for (const t of teamsMeta || []) {
-        if (t.solo || t.eliminated || !t.spawn) continue;
-        if (!flagCaptureClientState.has(t.id)) {
-          flagCaptureClientState.set(t.id, { progress: 0, attackerTeamId: 0 });
-        }
       }
       rebuildTeamList();
       updateTeamBadge();
@@ -4905,24 +4970,41 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
-  /* Флаги баз (захват): высокий флаг цветом команды, якорь = клетка 20 ударов; прогресс. */
+  /* Флаги баз: HP 0–20, реген на клиенте по lastHitAt; визуальные стадии опасности. */
   if (!lite && online && teamsMeta && cell >= 2) {
     const shNowF = Date.now();
     const tmap = getTeamColorByIdMap();
+    const maxH = FLAG_BASE_MAX_HP;
     for (const t of teamsMeta) {
       if (t.solo || t.eliminated || !t.spawn) continue;
       const sp = t.spawn;
       const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
       const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
       if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) continue;
-      const st = flagCaptureClientState.get(t.id) || { progress: 0, attackerTeamId: 0 };
-      const pr = st.progress | 0;
-      const atk = st.attackerTeamId | 0;
+      const raw = flagCaptureClientState.get(t.id);
+      const stForHp =
+        raw && typeof raw.hp === "number"
+          ? { hp: raw.hp | 0, lastHitAt: raw.lastHitAt | 0 }
+          : null;
+      const displayHp = Math.min(maxH, Math.max(0, Math.floor(computeEffectiveBaseHp(stForHp, shNowF) + 1e-9)));
+      const dmgTaken = maxH - displayHp;
+      const atk = raw?.attackerTeamId | 0;
       const px = offsetX + fgx * cell;
       const py = offsetY + fgy * cell;
       const cw = Math.ceil(cell);
       const ch = Math.ceil(cell);
-      const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + pr * 0.2);
+      const dangerLow = displayHp <= 10 && displayHp > 0;
+      const dangerMid = displayHp <= 5 && displayHp > 0;
+      const dangerCrit = displayHp <= 1 && displayHp > 0;
+      const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + dmgTaken * 0.15);
+      const pulseRed =
+        dangerCrit && shNowF < myFlagCriticalUntil && t.id === myTeamId
+          ? 0.35 + 0.35 * Math.sin(time * 0.055)
+          : dangerMid
+            ? 0.12 + 0.12 * Math.sin(time * 0.035)
+            : dangerLow
+              ? 0.06 + 0.06 * Math.sin(time * 0.022)
+              : 0;
       const teamHex = t.color || teamColor(t.id);
       const { r, g, b } = hexToRgb(teamHex);
       const mastW = Math.max(2.5, cell * 0.14);
@@ -4944,53 +5026,65 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.lineTo(cLeft + cW * 0.9, cTop + cH + wave * 0.15);
       ctx.lineTo(cLeft, cTop + cH * 0.96);
       ctx.closePath();
-      ctx.fillStyle = `rgba(${r},${g},${b},${0.88 + pulseF * 0.08})`;
+      const clothA = 0.88 + pulseF * 0.08 - pulseRed * 0.25;
+      ctx.fillStyle = `rgba(${r},${g},${b},${Math.max(0.45, clothA)})`;
       ctx.fill();
+      if (pulseRed > 0) {
+        ctx.fillStyle = `rgba(255, 40, 60, ${pulseRed * 0.55})`;
+        ctx.fill();
+      }
       ctx.strokeStyle = "rgba(0,0,0,0.48)";
       ctx.lineWidth = Math.max(1, cell * 0.05);
       ctx.stroke();
       ctx.restore();
-      if (pr > 0 && atk > 0) {
+      if (dmgTaken > 0 && atk > 0) {
         const atkHex = tmap?.get(atk) || teamColor(atk);
         const ar = hexToRgb(atkHex);
-        const blend = pr / FLAG_CAPTURE_HITS_REQUIRED;
-        ctx.fillStyle = `rgba(${ar.r},${ar.g},${ar.b},${0.2 + blend * 0.32 + pulseF * 0.08})`;
+        const blend = dmgTaken / maxH;
+        ctx.fillStyle = `rgba(${ar.r},${ar.g},${ar.b},${0.18 + blend * 0.3 + pulseF * 0.07})`;
         ctx.fillRect(px, py, cw, ch);
       }
-      if (myTeamId != null && t.id === myTeamId && shNowF < myFlagUnderAttackUntil && pr > 0) {
-        const flash = 0.22 + 0.22 * Math.sin(time * 0.028);
+      if (myTeamId != null && t.id === myTeamId && shNowF < myFlagUnderAttackUntil && dmgTaken > 0) {
+        const flash = 0.18 + 0.2 * Math.sin(time * 0.028);
         ctx.fillStyle = `rgba(255, 35, 60, ${flash})`;
         ctx.fillRect(px, py, cw, ch);
       }
-      ctx.strokeStyle = `rgba(0,0,0,${0.35 + pulseF * 0.12})`;
-      ctx.lineWidth = Math.max(1, cell * 0.06);
+      ctx.strokeStyle = dangerCrit
+        ? `rgba(255,50,50,${0.55 + 0.35 * Math.sin(time * 0.08)})`
+        : `rgba(0,0,0,${0.35 + pulseF * 0.12})`;
+      ctx.lineWidth = Math.max(1, cell * (dangerCrit ? 0.1 : 0.06));
       ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
-      if (pr > 0) {
-        const barW = cw * 0.88;
-        const barH = Math.max(3, cell * 0.15);
-        const bx = px + (cw - barW) / 2;
-        const by = py + ch - barH - 2;
-        ctx.fillStyle = "rgba(0,0,0,0.5)";
-        ctx.fillRect(bx, by, barW, barH);
-        const barCol = atk > 0 ? teamColor(atk) : "#ffee66";
-        ctx.fillStyle = barCol;
-        ctx.fillRect(bx, by, (barW * pr) / FLAG_CAPTURE_HITS_REQUIRED, barH);
-        const remaining = FLAG_CAPTURE_HITS_REQUIRED - pr;
-        if (remaining > 0 && cell >= 4) {
-          ctx.save();
-          const fs = Math.max(8, Math.min(13, cell * 0.38));
-          ctx.font = `600 ${fs}px system-ui,sans-serif`;
-          ctx.textAlign = "center";
-          ctx.textBaseline = "bottom";
-          const tx = px + cw / 2;
-          const ty = by - 2;
-          ctx.lineWidth = Math.max(2, fs * 0.2);
-          ctx.strokeStyle = "rgba(0,0,0,0.75)";
-          ctx.strokeText(`ещё ${remaining}`, tx, ty);
-          ctx.fillStyle = "rgba(255,252,240,0.95)";
-          ctx.fillText(`ещё ${remaining}`, tx, ty);
-          ctx.restore();
-        }
+      const barW = cw * 0.92;
+      const barH = Math.max(4, cell * 0.17);
+      const bx = px + (cw - barW) / 2;
+      const by = py + ch - barH - 2;
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(bx, by, barW, barH);
+      const hpFrac = displayHp / maxH;
+      ctx.fillStyle =
+        displayHp <= 5 ? "#ff4444" : displayHp <= 10 ? "#ffaa33" : displayHp < maxH ? "#66dd88" : "rgba(100,220,130,0.85)";
+      ctx.fillRect(bx, by, barW * hpFrac, barH);
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 0.5, by + 0.5, barW - 1, barH - 1);
+      if (cell >= 4) {
+        ctx.save();
+        const fs = Math.max(7, Math.min(12, cell * 0.34));
+        ctx.font = `700 ${fs}px system-ui,sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        const tx = px + cw / 2;
+        const ty = by - 3;
+        const hpLabel =
+          displayHp <= 0
+            ? "FINISH!"
+            : `${displayHp} / ${maxH} HP`;
+        ctx.lineWidth = Math.max(2, fs * 0.18);
+        ctx.strokeStyle = "rgba(0,0,0,0.8)";
+        ctx.strokeText(hpLabel, tx, ty);
+        ctx.fillStyle = dangerCrit ? "#ffcccc" : "rgba(255,252,240,0.96)";
+        ctx.fillText(hpLabel, tx, ty);
+        ctx.restore();
       }
     }
   }

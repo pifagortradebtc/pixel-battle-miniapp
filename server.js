@@ -40,11 +40,12 @@ import {
   computeTotalAvailableScore,
 } from "./lib/scoring.js";
 import {
-  FLAG_CAPTURE_HITS_REQUIRED,
-  FLAG_CAPTURE_IDLE_MS,
-  FLAG_CAPTURE_DECAY_STEP_MS,
+  FLAG_BASE_MAX_HP,
   FLAG_CAPTURE_ENABLE_AFTER_BATTLE_FRACTION,
   FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC,
+  FLAG_REGEN_IDLE_MS,
+  FLAG_WARN_THRESHOLDS,
+  computeEffectiveBaseHp,
   flagCellFromSpawn,
 } from "./lib/flag-capture.js";
 
@@ -807,8 +808,8 @@ const teamPeakScoreForTiebreak = new Map();
 const teamFirstHitPeakAt = new Map();
 
 /**
- * Захват флага: прогресс по защищающейся команде. Объявлено до rebuildLandFromRound (старт модуля вызывает rebuild).
- * @type {Map<number, { progress: number, lastHitAt: number, attackerTeamId: number, nextDecayAt: number | null }>}
+ * HP базы по защищающейся команде. hp — целое после последнего удара; реген вычисляется по lastHitAt.
+ * @type {Map<number, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number }>}
  */
 const flagCaptureByDefender = new Map();
 
@@ -1309,7 +1310,6 @@ function applyClusterGameReplication(msg) {
       const dt = dynamicTeams.find((x) => x.id === tid);
       if (dt) dt.eliminated = true;
       clearFlagCaptureStateForDefender(tid);
-      removeAttackerFromAllFlagCaptures(tid, false);
       teamEffects.delete(tid);
       teamMemberKeys.delete(tid);
       teamPlayerCounts.delete(tid);
@@ -1350,17 +1350,18 @@ function applyClusterGameReplication(msg) {
         flagCaptureByDefender.delete(did);
         return;
       }
-      const p = msg.progress | 0;
-      if (p <= 0) {
+      const hp =
+        typeof msg.hp === "number" && Number.isFinite(msg.hp)
+          ? msg.hp | 0
+          : Math.max(0, FLAG_BASE_MAX_HP - (msg.progress | 0));
+      if (hp >= FLAG_BASE_MAX_HP) {
         flagCaptureByDefender.delete(did);
         return;
       }
-      const prev = flagCaptureByDefender.get(did);
       flagCaptureByDefender.set(did, {
-        progress: p,
-        lastHitAt: Date.now(),
+        hp,
+        lastHitAt: typeof msg.lastHitAt === "number" ? msg.lastHitAt | 0 : Date.now(),
         attackerTeamId: msg.attackerTeamId | 0,
-        nextDecayAt: prev?.nextDecayAt ?? null,
       });
       return;
     }
@@ -1443,20 +1444,6 @@ function canPlaceForTeam(x, y, teamId) {
   return cellTouchesTeamTerritory(x, y, teamId);
 }
 
-/** @param {boolean} emitStopped — false при репликации кластера (без повторного broadcast). */
-function removeAttackerFromAllFlagCaptures(attackerTeamId, emitStopped) {
-  const aid = attackerTeamId | 0;
-  if (!aid) return;
-  for (const [did, st] of [...flagCaptureByDefender.entries()]) {
-    if ((st.attackerTeamId | 0) === aid) {
-      flagCaptureByDefender.delete(did);
-      if (emitStopped) {
-        broadcast({ type: "flagCaptureStopped", defenderTeamId: did, reason: "attacker_gone" });
-      }
-    }
-  }
-}
-
 function findDefenderTeamAtFlagCell(x, y) {
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
@@ -1493,65 +1480,60 @@ function isFlagCaptureMechanicEnabled(now) {
 
 function buildFlagsSnapshot() {
   const out = [];
+  const now = Date.now();
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
     const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
     const st = flagCaptureByDefender.get(t.id);
-    const progress = Math.max(0, Math.min(FLAG_CAPTURE_HITS_REQUIRED, st?.progress | 0));
+    const eff = computeEffectiveBaseHp(st, now);
+    const hp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
     const attackerTeamId = (st?.attackerTeamId | 0) || 0;
     out.push({
       teamId: t.id,
       fx: x,
       fy: y,
-      progress,
+      hp,
+      maxHp: FLAG_BASE_MAX_HP,
+      lastHitAt: st?.lastHitAt | 0,
       attackerTeamId,
-      underAttack: progress > 0,
+      underAttack: hp < FLAG_BASE_MAX_HP,
     });
   }
   return out;
 }
 
-function tickFlagCaptureDecay(now) {
+function tickFlagBaseRegen(now) {
   if (!isClusterLeader()) return;
   if (!isFlagCaptureMechanicEnabled(now)) return;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
-    let p = st.progress | 0;
-    if (p <= 0) {
+    const eff = computeEffectiveBaseHp(st, now);
+    if (eff >= FLAG_BASE_MAX_HP - 1e-9) {
       flagCaptureByDefender.delete(d);
+      broadcast({ type: "flagCaptureStopped", defenderTeamId: d, reason: "regen_full" });
       continue;
     }
-    if (now - st.lastHitAt < FLAG_CAPTURE_IDLE_MS) continue;
-    if (st.nextDecayAt == null) {
-      st.nextDecayAt = st.lastHitAt + FLAG_CAPTURE_IDLE_MS + FLAG_CAPTURE_DECAY_STEP_MS;
-    }
-    let changed = false;
-    while (now >= (st.nextDecayAt || 0) && p > 0) {
-      p--;
-      st.progress = p;
-      st.nextDecayAt = (st.nextDecayAt || 0) + FLAG_CAPTURE_DECAY_STEP_MS;
-      changed = true;
-    }
-    if (!changed) continue;
-    if (p <= 0) {
-      flagCaptureByDefender.delete(d);
-      broadcast({ type: "flagCaptureStopped", defenderTeamId: d, reason: "decay" });
-    } else {
-      broadcast({
-        type: "flagCaptureProgress",
-        defenderTeamId: d,
-        attackerTeamId: st.attackerTeamId | 0,
-        progress: p,
-        decay: true,
-      });
-    }
+    const idleEnd = st.lastHitAt + FLAG_REGEN_IDLE_MS;
+    if (now < idleEnd) continue;
+    const curInt = Math.max(0, Math.min(FLAG_BASE_MAX_HP - 1, Math.floor(eff + 1e-9)));
+    if (st._lastRegenBroadcastHp === curInt) continue;
+    st._lastRegenBroadcastHp = curInt;
+    broadcast({
+      type: "flagCaptureProgress",
+      defenderTeamId: d,
+      attackerTeamId: st.attackerTeamId | 0,
+      hp: curInt,
+      maxHp: FLAG_BASE_MAX_HP,
+      lastHitAt: st.lastHitAt,
+      regen: true,
+    });
   }
 }
 
 /**
- * Удар по флагу: без смены владельца клетки до завершения захвата.
- * @returns {null | { rateLimited?: true } | { hit: true } | { captured: true }}
+ * Удар по базе: HP −1; при HP уже 0 — захват. Клетка не перекрашивается до захвата.
+ * @returns {null | { rateLimited?: true } | { hit: true, defenderTeamId: number, hp: number, maxHp: number } | { captured: true, defenderTeamId: number }}
  */
 function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   const defTeam = findDefenderTeamAtFlagCell(x, y);
@@ -1569,37 +1551,32 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   }
 
   let st = flagCaptureByDefender.get(defTeam.id);
+  const curHpFloat = computeEffectiveBaseHp(st, now);
+  const curHp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(curHpFloat + 1e-9)));
+
+  if (curHp <= 0) {
+    executeFlagCaptureSuccess(attackerTeamId | 0, defTeam.id);
+    return { captured: true, defenderTeamId: defTeam.id };
+  }
+
+  const newHp = curHp - 1;
   if (!st) {
-    st = { progress: 0, lastHitAt: 0, attackerTeamId: 0, nextDecayAt: null };
+    st = { hp: newHp, lastHitAt: now, attackerTeamId: attackerTeamId | 0 };
     flagCaptureByDefender.set(defTeam.id, st);
-  }
-
-  if ((st.attackerTeamId | 0) !== (attackerTeamId | 0)) {
-    const prevA = st.attackerTeamId | 0;
-    st.progress = 0;
+  } else {
+    st.hp = newHp;
+    st.lastHitAt = now;
     st.attackerTeamId = attackerTeamId | 0;
-    st.nextDecayAt = null;
-    if (prevA) {
-      broadcast({
-        type: "flagCaptureProgress",
-        defenderTeamId: defTeam.id,
-        attackerTeamId: attackerTeamId | 0,
-        progress: 0,
-        reset: true,
-      });
-    }
   }
+  st._lastRegenBroadcastHp = newHp;
 
-  st.progress = Math.min(FLAG_CAPTURE_HITS_REQUIRED, (st.progress | 0) + 1);
-  st.lastHitAt = now;
-  st.nextDecayAt = null;
-
-  if (st.progress === 1) {
+  if (curHp === FLAG_BASE_MAX_HP) {
     broadcast({
       type: "flagUnderAttack",
       defenderTeamId: defTeam.id,
       attackerTeamId: attackerTeamId | 0,
-      progress: st.progress,
+      hp: newHp,
+      maxHp: FLAG_BASE_MAX_HP,
     });
   }
 
@@ -1607,26 +1584,26 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     type: "flagCaptureProgress",
     defenderTeamId: defTeam.id,
     attackerTeamId: attackerTeamId | 0,
-    progress: st.progress,
+    hp: newHp,
+    maxHp: FLAG_BASE_MAX_HP,
+    lastHitAt: now,
   });
 
-  for (const threshold of [5, 10, 15, 18]) {
-    if (st.progress === threshold) {
+  for (const th of FLAG_WARN_THRESHOLDS) {
+    if (newHp === th) {
       broadcast({
         type: "flagDefendWarn",
         defenderTeamId: defTeam.id,
         attackerTeamId: attackerTeamId | 0,
-        progress: st.progress,
+        hp: newHp,
+        maxHp: FLAG_BASE_MAX_HP,
+        level: th,
       });
       break;
     }
   }
 
-  if (st.progress >= FLAG_CAPTURE_HITS_REQUIRED) {
-    executeFlagCaptureSuccess(attackerTeamId | 0, defTeam.id);
-    return { captured: true, defenderTeamId: defTeam.id };
-  }
-  return { hit: true, defenderTeamId: defTeam.id, progress: st.progress };
+  return { hit: true, defenderTeamId: defTeam.id, hp: newHp, maxHp: FLAG_BASE_MAX_HP };
 }
 
 function executeFlagCaptureSuccess(attackerId, defenderId) {
@@ -1656,6 +1633,7 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
     gy,
     attackerColor: dtAtk.color || "#888888",
     defenderColor: dtDef.color || "#888888",
+    banner: "BASE CAPTURED",
   });
 
   eliminateTeamByTerritoryLoss(defenderId);
@@ -1910,7 +1888,6 @@ function eliminateTeamByTerritoryLoss(teamId) {
   const dt = dynamicTeams.find((t) => t.id === teamId);
   if (!dt || dt.solo || dt.eliminated) return;
   clearFlagCaptureStateForDefender(teamId);
-  removeAttackerFromAllFlagCaptures(teamId, true);
   dt.eliminated = true;
   saveDynamicTeams();
   teamEffects.delete(teamId);
@@ -2702,7 +2679,7 @@ function maybeEndRound() {
 }
 
 setInterval(() => maybeEndRound(), 30000);
-setInterval(() => tickFlagCaptureDecay(Date.now()), 500);
+setInterval(() => tickFlagBaseRegen(Date.now()), 500);
 
 wss.on("connection", (ws, req) => {
   const ip = getClientIpFromReq(req);
@@ -3382,12 +3359,12 @@ wss.on("connection", (ws, req) => {
           scheduleStatsBroadcast();
         }
         safeSend(ws, await buildWalletPayload(ws));
-        if (fc.hit && typeof fc.defenderTeamId === "number" && typeof fc.progress === "number") {
+        if (fc.hit && typeof fc.defenderTeamId === "number" && typeof fc.hp === "number") {
           safeSend(ws, {
             type: "flagHitAck",
             defenderTeamId: fc.defenderTeamId,
-            progress: fc.progress,
-            max: FLAG_CAPTURE_HITS_REQUIRED,
+            hp: fc.hp,
+            maxHp: fc.maxHp ?? FLAG_BASE_MAX_HP,
           });
         }
         return;
