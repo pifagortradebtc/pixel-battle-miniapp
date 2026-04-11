@@ -1,7 +1,7 @@
 /**
  * Pixel Battle — карта мира, команды, WebSocket.
- * Локально: палитра кисти. Онлайн: цвет команды назначает сервер при создании, выбора в UI нет;
- * в панели — только индикатор цвета из метаданных.
+ * Локально: палитра кисти. Онлайн: цвет команды выбирается только при создании (TEAM_CREATE_PALETTE);
+ * после создания смена запрещена — в панели только индикатор из метаданных.
  */
 
 import { createBoardVfx, spawnFloatingText } from "./vfx.js";
@@ -130,7 +130,7 @@ const EMOJI_PRESETS = [
   "🦊", "🐙", "🦄", "☀️", "🌙", "💀", "👑", "🏴",
 ];
 
-/** 16 ярких, хорошо различимых цветов (на тёмном фоне UI и на карте) */
+/** 16 ярких цветов — только локальная кисть (не путать с цветом команды). */
 const PALETTE = [
   "#FF1744",
   "#FF6D00",
@@ -147,6 +147,40 @@ const PALETTE = [
   "#FF5722",
   "#1DE9B6",
   "#8E24AA",
+  "#FFFFFF",
+];
+
+/** 30 цветов при создании команды — тот же набор, что TEAM_CREATE_COLORS на сервере (регистр не важен). */
+const TEAM_CREATE_PALETTE = [
+  "#FF1744",
+  "#FF3D00",
+  "#FF6D00",
+  "#FFC400",
+  "#FFEA00",
+  "#C6FF00",
+  "#76FF03",
+  "#00E676",
+  "#00C853",
+  "#00BFA5",
+  "#00B8D4",
+  "#00E5FF",
+  "#00B0FF",
+  "#2979FF",
+  "#304FFE",
+  "#6200EA",
+  "#651FFF",
+  "#AA00FF",
+  "#D500F9",
+  "#E040FB",
+  "#F50057",
+  "#E91E63",
+  "#C51162",
+  "#FF4081",
+  "#18FFFF",
+  "#64FFDA",
+  "#EEFF41",
+  "#FFAB40",
+  "#000000",
   "#FFFFFF",
 ];
 
@@ -187,6 +221,7 @@ const createTeamOverlay = document.getElementById("create-team-overlay");
 const createTeamNameInput = document.getElementById("create-team-name");
 const createTeamEmojiInput = document.getElementById("create-team-emoji");
 const createTeamEmojiPresets = document.getElementById("create-team-emoji-presets");
+const createTeamColorPaletteEl = document.getElementById("create-team-color-palette");
 const btnOpenCreateTeam = document.getElementById("btn-open-create-team");
 const btnCreateTeamCancel = document.getElementById("create-team-cancel");
 const btnCreateTeamSubmit = document.getElementById("create-team-submit");
@@ -247,6 +282,8 @@ let regionRgb = null;
 let selectedColor = 5;
 /** Откуда открыли форму создания команды — «Назад» ведёт на welcome или список команд */
 let createTeamFromWelcome = false;
+/** Индекс в TEAM_CREATE_PALETTE при создании команды */
+let createTeamColorIdx = 0;
 let scale = 1;
 let offsetX = 0;
 let offsetY = 0;
@@ -1179,11 +1216,38 @@ function buildCreateTeamEmojiPresets() {
   createTeamEmojiInput?.addEventListener("input", syncCreateEmojiPresetHighlight);
 }
 
+function buildCreateTeamColorPalette() {
+  if (!createTeamColorPaletteEl) return;
+  createTeamColorPaletteEl.innerHTML = "";
+  TEAM_CREATE_PALETTE.forEach((hex, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "palette__swatch";
+    if (hex.toUpperCase() === "#FFFFFF" || hex.toUpperCase() === "#EEFF41") {
+      b.classList.add("palette__swatch--needs-ring");
+    }
+    b.style.backgroundColor = hex;
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", i === createTeamColorIdx ? "true" : "false");
+    b.dataset.index = String(i);
+    b.title = hex;
+    b.addEventListener("click", () => {
+      createTeamColorIdx = i;
+      createTeamColorPaletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
+        el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
+      });
+    });
+    createTeamColorPaletteEl.appendChild(b);
+  });
+}
+
 function openCreateTeamOverlay(fromWelcome) {
   createTeamFromWelcome = !!fromWelcome;
   if (createTeamNameInput) createTeamNameInput.value = "";
   if (createTeamEmojiInput) createTeamEmojiInput.value = EMOJI_PRESETS[0] || "🔥";
   syncCreateEmojiPresetHighlight();
+  createTeamColorIdx = Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1);
+  buildCreateTeamColorPalette();
   if (createTeamOverlay) createTeamOverlay.hidden = false;
 }
 
@@ -1208,9 +1272,23 @@ function submitCreateTeam() {
     else alert(msg);
     return;
   }
+  const color = TEAM_CREATE_PALETTE[Math.max(0, Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1))];
+  if (!color) {
+    const tg = window.Telegram?.WebApp;
+    const m = "Выберите цвет команды.";
+    if (typeof tg?.showAlert === "function") tg.showAlert(m);
+    else alert(m);
+    return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(
-    JSON.stringify({ type: "createTeam", name, emoji, playerKey: getOrCreatePlayerKey() })
+    JSON.stringify({
+      type: "createTeam",
+      name,
+      emoji,
+      color,
+      playerKey: getOrCreatePlayerKey(),
+    })
   );
 }
 

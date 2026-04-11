@@ -75,11 +75,13 @@
   <div id="create-team-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Новая команда</h2>
-      <p class="overlay__hint">Название и смайлик. Цвет команды назначается автоматически — все участники рисуют им. После создания покажем реферальную ссылку.</p>
+      <p class="overlay__hint">Название, смайлик и цвет — все участники рисуют этим цветом. Цвет можно выбрать только здесь; после создания он не меняется. Далее — реферальная ссылка.</p>
       <label class="field">
         <span class="field__label">Название</span>
         <input type="text" id="create-team-name" class="field__input" maxlength="40" autocomplete="off" />
       </label>
+      <p class="field__label">Цвет команды (30 вариантов, потом не меняется)</p>
+      <div id="create-team-color-palette" class="palette palette--create-team" role="listbox" aria-label="Цвет команды"></div>
       <p class="field__label">Быстрый выбор смайлика</p>
       <div id="create-team-emoji-presets" class="emoji-presets" role="list"></div>
       <label class="field">
@@ -124,7 +126,7 @@
   <div id="team-settings-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Команда</h2>
-      <p class="overlay__hint">Видят все игроки. Название и смайлик может менять только создатель команды. Цвет назначается при создании и не выбирается. Не чаще раза в 5 секунд.</p>
+      <p class="overlay__hint">Видят все игроки. Название и смайлик может менять только создатель команды. Цвет задаётся только при создании команды и здесь недоступен. Не чаще раза в 5 секунд.</p>
       <label class="field">
         <span class="field__label">Название</span>
         <input type="text" id="team-settings-name" class="field__input" maxlength="40" autocomplete="off" />

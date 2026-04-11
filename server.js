@@ -1,6 +1,6 @@
 /**
  * Статика + WebSocket: карта, только пользовательские команды (динамические).
- * Публичные команды — в списке для вступления. Цвет команды назначается сервером при создании и не меняется.
+ * Публичные команды — в списке для вступления. Цвет при создании — из палитры (или автоподбор); смена после создания запрещена.
  * Запуск: npm start
  */
 
@@ -505,30 +505,57 @@ function sanitizeHexColor(s) {
   return `#${t.toLowerCase()}`;
 }
 
-/** Автоназначение цвета — клиент не выбирает (единообразно с игрой без палитры). */
-const TEAM_AUTO_COLORS = [
+/**
+ * 30 ярких цветов для выбора при создании команды (как на клиенте в TEAM_CREATE_PALETTE).
+ * После создания смена цвета запрещена — принимаем только значения из этого списка.
+ */
+const TEAM_CREATE_COLORS = [
   "#ff1744",
+  "#ff3d00",
   "#ff6d00",
   "#ffc400",
+  "#ffea00",
   "#c6ff00",
+  "#76ff03",
   "#00e676",
+  "#00c853",
   "#00bfa5",
+  "#00b8d4",
   "#00e5ff",
+  "#00b0ff",
   "#2979ff",
+  "#304ffe",
+  "#6200ea",
   "#651fff",
+  "#aa00ff",
   "#d500f9",
+  "#e040fb",
+  "#f50057",
   "#e91e63",
-  "#ff5722",
-  "#1de9b6",
-  "#8e24aa",
-  "#ffeb3b",
+  "#c51162",
+  "#ff4081",
+  "#18ffff",
+  "#64ffda",
+  "#eeff41",
+  "#ffab40",
+  "#000000",
+  "#ffffff",
 ];
+
+const TEAM_CREATE_COLOR_SET = new Set(TEAM_CREATE_COLORS);
+
+/** Цвет из сообщения createTeam: только из белого списка. */
+function pickCreateTeamColorFromMessage(msgColor) {
+  const hex = sanitizeHexColor(msgColor);
+  if (!hex || !TEAM_CREATE_COLOR_SET.has(hex)) return "";
+  return hex;
+}
 
 function pickAutoTeamColor(name, emoji, salt) {
   const raw = `${name}\0${emoji}\0${salt}`;
   const h = crypto.createHash("sha256").update(raw, "utf8").digest();
-  const idx = h.readUInt32BE(0) % TEAM_AUTO_COLORS.length;
-  return TEAM_AUTO_COLORS[idx];
+  const idx = h.readUInt32BE(0) % TEAM_CREATE_COLORS.length;
+  return TEAM_CREATE_COLORS[idx];
 }
 
 function teamsForMeta() {
@@ -1962,7 +1989,8 @@ wss.on("connection", (ws, req) => {
       }
       const id = nextTeamId++;
       const pkForColor = sanitizePlayerKey(ws.playerKey);
-      const color = pickAutoTeamColor(name, emoji, pkForColor || `id:${id}`);
+      const fromClient = pickCreateTeamColorFromMessage(msg.color);
+      const color = fromClient || pickAutoTeamColor(name, emoji, pkForColor || `id:${id}`);
       const editToken = newTeamEditToken();
       dynamicTeams.push({ id, name, emoji, color, editToken, solo: false });
       saveDynamicTeams();

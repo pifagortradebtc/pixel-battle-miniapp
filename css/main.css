@@ -703,6 +703,28 @@ body {
   box-shadow: 0 0 0 2px var(--tg-button);
 }
 
+/* Светлые кляксы в палитре создания команды — обводка, иначе сливаются с фоном карточки */
+.palette__swatch.palette__swatch--needs-ring {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.palette__swatch.palette__swatch--needs-ring[aria-selected="true"] {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 0 2px var(--tg-button);
+}
+
+.palette--create-team {
+  gap: 6px;
+  justify-content: flex-start;
+}
+
+.palette--create-team .palette__swatch {
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+}
+
 .palette__swatch:focus-visible {
   outline: 2px solid var(--tg-button);
   outline-offset: 2px;
