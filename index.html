@@ -75,13 +75,11 @@
   <div id="create-team-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Новая команда</h2>
-      <p class="overlay__hint">Название, смайлик и цвет команды — одним цветом рисуют все участники. После создания покажем реферальную ссылку.</p>
+      <p class="overlay__hint">Название и смайлик. Цвет команды назначается автоматически — все участники рисуют им. После создания покажем реферальную ссылку.</p>
       <label class="field">
         <span class="field__label">Название</span>
         <input type="text" id="create-team-name" class="field__input" maxlength="40" autocomplete="off" />
       </label>
-      <p class="field__label">Цвет команды</p>
-      <div id="create-team-color-palette" class="palette" role="listbox" aria-label="Цвет команды"></div>
       <p class="field__label">Быстрый выбор смайлика</p>
       <div id="create-team-emoji-presets" class="emoji-presets" role="list"></div>
       <label class="field">
@@ -126,13 +124,11 @@
   <div id="team-settings-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Команда</h2>
-      <p class="overlay__hint">Видят все игроки. Название, смайлик и цвет может менять только создатель команды. Не чаще раза в 5 секунд.</p>
+      <p class="overlay__hint">Видят все игроки. Название и смайлик может менять только создатель команды. Цвет назначается при создании и не выбирается. Не чаще раза в 5 секунд.</p>
       <label class="field">
         <span class="field__label">Название</span>
         <input type="text" id="team-settings-name" class="field__input" maxlength="40" autocomplete="off" />
       </label>
-      <p class="field__label">Цвет команды</p>
-      <div id="team-settings-color-palette" class="palette" role="listbox" aria-label="Цвет команды"></div>
       <p class="field__label">Быстрый выбор смайлика</p>
       <div id="team-settings-emoji-presets" class="emoji-presets" role="list"></div>
       <label class="field">
@@ -538,6 +534,13 @@
             <div id="team-badge" class="team-badge" hidden>
               <span class="team-badge__label">Команда:</span>
               <span id="team-badge-emoji" class="team-badge__emoji" aria-hidden="true"></span>
+              <span
+                id="team-badge-color"
+                class="team-badge__color"
+                hidden
+                aria-hidden="true"
+                title=""
+              ></span>
               <button
                 type="button"
                 id="palette-trigger"

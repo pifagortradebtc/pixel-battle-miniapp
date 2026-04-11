@@ -662,6 +662,24 @@ body {
   outline-offset: 2px;
 }
 
+/* Индикатор цвета команды (онлайн, без смены цвета) — визуал как у компактного palette-trigger */
+.team-badge__color {
+  display: block;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 6px;
+  border: 2px solid color-mix(in srgb, var(--tg-button-text) 85%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tg-button) 50%, transparent), 0 2px 6px rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.team-badge__color[hidden] {
+  display: none !important;
+}
+
 .palette {
   display: flex;
   flex-wrap: wrap;
@@ -819,6 +837,7 @@ body {
 
 .team-badge--palette-only .team-badge__label,
 .team-badge--palette-only .team-badge__emoji,
+.team-badge--palette-only .team-badge__color,
 .team-badge--palette-only .team-badge__name,
 .team-badge--palette-only .team-badge__count {
   display: none !important;

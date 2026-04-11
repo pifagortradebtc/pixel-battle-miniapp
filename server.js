@@ -1,6 +1,6 @@
 /**
  * Статика + WebSocket: карта, только пользовательские команды (динамические).
- * Соло: имя + цвет; публичные команды — в списке для вступления. Цвет команды один на всех.
+ * Публичные команды — в списке для вступления. Цвет команды назначается сервером при создании и не меняется.
  * Запуск: npm start
  */
 
@@ -505,6 +505,32 @@ function sanitizeHexColor(s) {
   return `#${t.toLowerCase()}`;
 }
 
+/** Автоназначение цвета — клиент не выбирает (единообразно с игрой без палитры). */
+const TEAM_AUTO_COLORS = [
+  "#ff1744",
+  "#ff6d00",
+  "#ffc400",
+  "#c6ff00",
+  "#00e676",
+  "#00bfa5",
+  "#00e5ff",
+  "#2979ff",
+  "#651fff",
+  "#d500f9",
+  "#e91e63",
+  "#ff5722",
+  "#1de9b6",
+  "#8e24aa",
+  "#ffeb3b",
+];
+
+function pickAutoTeamColor(name, emoji, salt) {
+  const raw = `${name}\0${emoji}\0${salt}`;
+  const h = crypto.createHash("sha256").update(raw, "utf8").digest();
+  const idx = h.readUInt32BE(0) % TEAM_AUTO_COLORS.length;
+  return TEAM_AUTO_COLORS[idx];
+}
+
 function teamsForMeta() {
   return dynamicTeams.map((t) => ({
     id: t.id,
@@ -664,8 +690,6 @@ function loadRoundState() {
 
 /** @type {WeakMap<object, number>} */
 const lastTeamUpdate = new WeakMap();
-/** Троттлинг смены только цвета (палитра внизу) */
-const lastColorOnlySet = new WeakMap();
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -848,6 +872,7 @@ function planCaptureRect(x0, y0, x1, y1) {
 
 function applyPlannedCapture(pk, tid, planned) {
   for (const [x, y] of planned) {
+    if (!cellIsLand(x, y)) continue;
     const k = `${x},${y}`;
     pixels.set(k, {
       teamId: tid,
@@ -1890,8 +1915,6 @@ wss.on("connection", (ws, req) => {
       }
       dt.name = name;
       dt.emoji = emoji;
-      const newColor = sanitizeHexColor(msg.color);
-      if (newColor) dt.color = newColor;
       saveDynamicTeams();
       lastTeamUpdate.set(ws, Date.now());
       broadcast({
@@ -1906,76 +1929,12 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg.type === "setTeamColor") {
-      if (!assertCanPlay(ws)) return;
-      if (ws.teamId == null) {
-        safeSend(ws,{ type: "setTeamColorError", reason: "no_team" });
-        return;
-      }
-      const prevC = lastColorOnlySet.get(ws) || 0;
-      if (Date.now() - prevC < 320) return;
-      const tid = ws.teamId;
-      const dt = dynamicTeams.find((x) => x.id === tid);
-      if (!dt || dt.solo) {
-        safeSend(ws,{ type: "setTeamColorError", reason: "solo" });
-        return;
-      }
-      const sent = typeof msg.editToken === "string" ? msg.editToken.trim() : "";
-      if (dt.editToken && sent !== dt.editToken) {
-        safeSend(ws,{ type: "setTeamColorError", reason: "not_owner" });
-        return;
-      }
-      const color = sanitizeHexColor(msg.color);
-      if (!color) {
-        safeSend(ws,{ type: "setTeamColorError", reason: "color" });
-        return;
-      }
-      dt.color = color;
-      saveDynamicTeams();
-      lastColorOnlySet.set(ws, Date.now());
-      broadcast({ type: "teamsFull", teams: teamsForMeta() });
-      broadcast({
-        type: "teamDisplay",
-        teamId: tid,
-        name: dt.name,
-        emoji: dt.emoji,
-        color: dt.color,
-      });
-      broadcastStatsImmediate();
+      safeSend(ws, { type: "setTeamColorError", reason: "locked" });
       return;
     }
 
     if (msg.type === "soloSetColor") {
-      if (!assertCanPlay(ws)) return;
-      if (ws.teamId == null) {
-        safeSend(ws,{ type: "soloColorError", reason: "no_team" });
-        return;
-      }
-      const prevC = lastColorOnlySet.get(ws) || 0;
-      if (Date.now() - prevC < 320) return;
-      const tid = ws.teamId;
-      const dt = dynamicTeams.find((x) => x.id === tid);
-      const sent = typeof msg.resumeToken === "string" ? msg.resumeToken.trim() : "";
-      if (!dt || !dt.solo || !dt.soloResumeToken || sent !== dt.soloResumeToken) {
-        safeSend(ws,{ type: "soloColorError", reason: "invalid" });
-        return;
-      }
-      const color = sanitizeHexColor(msg.color);
-      if (!color) {
-        safeSend(ws,{ type: "soloColorError", reason: "color" });
-        return;
-      }
-      dt.color = color;
-      saveDynamicTeams();
-      lastColorOnlySet.set(ws, Date.now());
-      broadcast({ type: "teamsFull", teams: teamsForMeta() });
-      broadcast({
-        type: "teamDisplay",
-        teamId: tid,
-        name: dt.name,
-        emoji: dt.emoji,
-        color: dt.color,
-      });
-      broadcastStatsImmediate();
+      safeSend(ws, { type: "soloColorError", reason: "locked" });
       return;
     }
 
@@ -1993,8 +1952,7 @@ wss.on("connection", (ws, req) => {
       }
       const name = sanitizeTeamName(msg.name);
       const emoji = sanitizeTeamEmoji(msg.emoji);
-      const color = sanitizeHexColor(msg.color);
-      if (!name || !emoji || !color) {
+      if (!name || !emoji) {
         safeSend(ws,{ type: "createTeamError", reason: "fields" });
         return;
       }
@@ -2003,6 +1961,8 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const id = nextTeamId++;
+      const pkForColor = sanitizePlayerKey(ws.playerKey);
+      const color = pickAutoTeamColor(name, emoji, pkForColor || `id:${id}`);
       const editToken = newTeamEditToken();
       dynamicTeams.push({ id, name, emoji, color, editToken, solo: false });
       saveDynamicTeams();

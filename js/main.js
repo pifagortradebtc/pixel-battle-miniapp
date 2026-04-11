@@ -1,7 +1,7 @@
 /**
  * Pixel Battle — карта мира, команды, WebSocket.
- * Локально: палитра кисти. Онлайн: соло и создатель команды меняют цвет снизу;
- * остальные в команде рисуют цветом команды (задаёт создатель).
+ * Локально: палитра кисти. Онлайн: цвет команды назначает сервер при создании, выбора в UI нет;
+ * в панели — только индикатор цвета из метаданных.
  */
 
 import { createBoardVfx, spawnFloatingText } from "./vfx.js";
@@ -176,18 +176,17 @@ const teamOverlay = document.getElementById("team-overlay");
 const btnTeamOverlayBack = document.getElementById("btn-team-overlay-back");
 const teamListEl = document.getElementById("team-list");
 const teamBadgeEmoji = document.getElementById("team-badge-emoji");
+const teamBadgeColorEl = document.getElementById("team-badge-color");
 const teamSettingsOverlay = document.getElementById("team-settings-overlay");
 const teamSettingsName = document.getElementById("team-settings-name");
 const teamSettingsEmojiInput = document.getElementById("team-settings-emoji");
 const teamSettingsEmojiPresets = document.getElementById("team-settings-emoji-presets");
-const teamSettingsColorPaletteEl = document.getElementById("team-settings-color-palette");
 const btnTeamSettingsSave = document.getElementById("team-settings-save");
 const btnTeamSettingsCancel = document.getElementById("team-settings-cancel");
 const createTeamOverlay = document.getElementById("create-team-overlay");
 const createTeamNameInput = document.getElementById("create-team-name");
 const createTeamEmojiInput = document.getElementById("create-team-emoji");
 const createTeamEmojiPresets = document.getElementById("create-team-emoji-presets");
-const createTeamColorPaletteEl = document.getElementById("create-team-color-palette");
 const btnOpenCreateTeam = document.getElementById("btn-open-create-team");
 const btnCreateTeamCancel = document.getElementById("create-team-cancel");
 const btnCreateTeamSubmit = document.getElementById("create-team-submit");
@@ -246,10 +245,6 @@ let regionCells = null;
 let regionRgb = null;
 
 let selectedColor = 5;
-/** Индекс в PALETTE для welcome / создания команды / настроек (онлайн) */
-let welcomeColorIdx = 5;
-let createTeamColorIdx = 5;
-let teamSettingsColorIdx = 5;
 /** Откуда открыли форму создания команды — «Назад» ведёт на welcome или список команд */
 let createTeamFromWelcome = false;
 let scale = 1;
@@ -485,6 +480,13 @@ function isClientLandCell(x, y) {
   return regionCells[y * gridW + x] !== 0;
 }
 
+/** Вода по маске карты (только если regions загружены). */
+function isClientWaterCell(x, y) {
+  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
+  if (!regionCells || regionCells.length !== gridW * gridH) return false;
+  return regionCells[y * gridW + x] === 0;
+}
+
 async function loadRegions() {
   const w = gridW;
   const h = gridH;
@@ -544,11 +546,6 @@ function hexToRgb(hex) {
 
 function getVfxTransform() {
   return { offsetX, offsetY, scale, gridW, gridH, BASE_CELL, dpr: boardVfxDpr };
-}
-
-function paletteIndexForHex(hex) {
-  const i = PALETTE.indexOf(hex);
-  return i >= 0 ? i : 5;
 }
 
 function setConnState(state, text) {
@@ -615,14 +612,13 @@ function saveOnlineSession(patch) {
   }
 }
 
-/** Сбросить команду, оставить имя и цвет для экрана входа (после выхода или ошибки вступления). */
+/** Сбросить команду, оставить имя для экрана входа (после выхода или ошибки вступления). */
 function clearTeamIdentityFromSession() {
   try {
     const s = loadOnlineSession();
     if (!s) return;
     saveOnlineSessionRaw({
       playerName: s.playerName,
-      welcomeColorIdx: s.welcomeColorIdx,
     });
   } catch {
     /* ignore */
@@ -636,7 +632,6 @@ function clearSoloFromSession() {
     if (!s || !s.solo) return;
     saveOnlineSessionRaw({
       playerName: s.playerName,
-      welcomeColorIdx: s.welcomeColorIdx,
     });
   } catch {
     /* ignore */
@@ -769,48 +764,12 @@ function canEditTeamSettings() {
   return !!getTeamEditToken(myTeamId);
 }
 
-/** Онлайн: цвет кисти выбирают только соло или создатель команды; остальные рисуют цветом команды. */
-function canPickOnlineDrawColor() {
-  if (myTeamId == null) return false;
-  return isCurrentTeamSolo() || canEditTeamSettings();
-}
-
-/** Подсветить нижнюю палитру по текущему цвету команды в мета. */
-function syncPaletteSelectionFromTeam() {
-  if (!myTeamId || !teamsMeta || !paletteEl?.querySelector(".palette__swatch")) return;
-  const t = teamsMeta.find((x) => x.id === myTeamId);
-  if (!t?.color) return;
-  const idx = paletteIndexForHex(t.color);
-  selectedColor = idx;
-  paletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
-    el.setAttribute("aria-selected", el.dataset.index === String(idx) ? "true" : "false");
-  });
-  updatePaletteTriggerPreview();
-}
-
-function sendOnlineColorChoice(hex) {
-  if (spectatorMode) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (isCurrentTeamSolo()) {
-    const sess = loadOnlineSession();
-    const tok = sess?.soloResumeToken;
-    if (!tok) return;
-    ws.send(JSON.stringify({ type: "soloSetColor", color: hex, resumeToken: tok }));
-    return;
-  }
-  if (canEditTeamSettings()) {
-    const tok = getTeamEditToken(myTeamId);
-    if (!tok) return;
-    ws.send(JSON.stringify({ type: "setTeamColor", color: hex, editToken: tok }));
-  }
-}
-
 function setFooterMode() {
   const online = wantOnline;
   const joined = myTeamId != null;
   const localMode = !online;
-  const showPalette =
-    localMode || (online && joined && canPickOnlineDrawColor() && !spectatorMode);
+  /* Онлайн: палитра внизу скрыта — цвет команды только с сервера; локально палитра кисти. */
+  const showPalette = localMode;
   if (paletteTriggerBtn) paletteTriggerBtn.hidden = !showPalette;
   /* Локально без команды: показываем только компактный квадрат цвета (не прячем весь блок из‑за hidden team-badge). */
   const showTeamPaletteOnly = localMode && showPalette;
@@ -821,8 +780,12 @@ function setFooterMode() {
   if (spectatorBadgeEl) {
     spectatorBadgeEl.hidden = !online || !spectatorMode;
   }
+  if (teamBadgeColorEl) {
+    const showSwatch =
+      online && joined && !spectatorMode && !showTeamPaletteOnly;
+    teamBadgeColorEl.hidden = !showSwatch;
+  }
   if (online && joined) updateTeamBadge();
-  if (showPalette && online && joined) syncPaletteSelectionFromTeam();
   refreshToolbarSessionButton();
   updateWalletBar();
   renderQuickBuyRail();
@@ -854,6 +817,13 @@ function refreshToolbarSessionButton() {
   }
 }
 
+function syncTeamBadgeColorSwatch() {
+  if (!teamBadgeColorEl || teamBadgeColorEl.hidden) return;
+  const hex = myTeamId != null ? teamColor(myTeamId) : "#888888";
+  teamBadgeColorEl.style.backgroundColor = hex;
+  teamBadgeColorEl.title = `Цвет команды: ${hex}`;
+}
+
 function updateTeamBadge() {
   if (!myTeamId) return;
   const t = teamsMeta?.find((x) => x.id === myTeamId);
@@ -864,14 +834,13 @@ function updateTeamBadge() {
     teamBadgeName.style.removeProperty("color");
     const cnt = teamCounts[t.id] ?? 0;
     teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
-    return;
-  }
-  if (s && s.teamId === myTeamId && s.cachedTeamName) {
+  } else if (s && s.teamId === myTeamId && s.cachedTeamName) {
     if (teamBadgeEmoji) teamBadgeEmoji.textContent = s.cachedEmoji || "";
     setCompactTeamName(teamBadgeName, s.cachedTeamName);
     const cnt = teamCounts[myTeamId] ?? 0;
     teamBadgeCount.textContent = `${cnt} / ${maxPerTeam}`;
   }
+  syncTeamBadgeColorSwatch();
 }
 
 function formatPercent(pct) {
@@ -1210,47 +1179,11 @@ function buildCreateTeamEmojiPresets() {
   createTeamEmojiInput?.addEventListener("input", syncCreateEmojiPresetHighlight);
 }
 
-function buildSwatchPalette(container, selectedIdx, onPick) {
-  if (!container) return;
-  container.innerHTML = "";
-  PALETTE.forEach((hex, i) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "palette__swatch";
-    b.style.backgroundColor = hex;
-    b.setAttribute("role", "option");
-    b.setAttribute("aria-selected", i === selectedIdx ? "true" : "false");
-    b.dataset.index = String(i);
-    b.title = hex;
-    b.addEventListener("click", () => {
-      onPick(i);
-      container.querySelectorAll(".palette__swatch").forEach((el) => {
-        el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
-      });
-    });
-    container.appendChild(b);
-  });
-}
-
-function buildCreateTeamPalette() {
-  buildSwatchPalette(createTeamColorPaletteEl, createTeamColorIdx, (i) => {
-    createTeamColorIdx = i;
-  });
-}
-
-function buildTeamSettingsColorPalette() {
-  buildSwatchPalette(teamSettingsColorPaletteEl, teamSettingsColorIdx, (i) => {
-    teamSettingsColorIdx = i;
-  });
-}
-
 function openCreateTeamOverlay(fromWelcome) {
   createTeamFromWelcome = !!fromWelcome;
   if (createTeamNameInput) createTeamNameInput.value = "";
   if (createTeamEmojiInput) createTeamEmojiInput.value = EMOJI_PRESETS[0] || "🔥";
   syncCreateEmojiPresetHighlight();
-  createTeamColorIdx = fromWelcome ? welcomeColorIdx : 5;
-  buildCreateTeamPalette();
   if (createTeamOverlay) createTeamOverlay.hidden = false;
 }
 
@@ -1268,17 +1201,16 @@ function submitCreateTeam() {
   }
   const name = createTeamNameInput?.value.trim() ?? "";
   const emoji = createTeamEmojiInput?.value.trim() ?? "";
-  const color = PALETTE[createTeamColorIdx];
-  if (!name || !emoji || !color) {
+  if (!name || !emoji) {
     const tg = window.Telegram?.WebApp;
-    const msg = "Укажите название, смайлик и цвет команды.";
+    const msg = "Укажите название и смайлик команды.";
     if (typeof tg?.showAlert === "function") tg.showAlert(msg);
     else alert(msg);
     return;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(
-    JSON.stringify({ type: "createTeam", name, emoji, color, playerKey: getOrCreatePlayerKey() })
+    JSON.stringify({ type: "createTeam", name, emoji, playerKey: getOrCreatePlayerKey() })
   );
 }
 
@@ -1426,8 +1358,6 @@ function openTeamSettings() {
   if (teamSettingsName) teamSettingsName.value = t.name || "";
   if (teamSettingsEmojiInput) teamSettingsEmojiInput.value = t.emoji || "";
   syncEmojiPresetHighlight();
-  teamSettingsColorIdx = paletteIndexForHex(t.color);
-  buildTeamSettingsColorPalette();
   teamSettingsOverlay.hidden = false;
 }
 
@@ -1442,8 +1372,7 @@ function saveTeamSettings() {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const tok = getTeamEditToken(myTeamId);
   if (!tok) return;
-  const color = PALETTE[teamSettingsColorIdx];
-  ws.send(JSON.stringify({ type: "updateTeam", name, emoji, editToken: tok, color }));
+  ws.send(JSON.stringify({ type: "updateTeam", name, emoji, editToken: tok }));
   closeTeamSettings();
 }
 
@@ -3031,7 +2960,6 @@ function connectWs() {
       rebuildTeamList();
       updateTeamBadge();
       cacheTeamDisplayInSession();
-      syncPaletteSelectionFromTeam();
       return;
     }
     if (msg.type === "teamsFull") {
@@ -3040,7 +2968,6 @@ function connectWs() {
       rebuildTeamList();
       updateTeamBadge();
       cacheTeamDisplayInSession();
-      syncPaletteSelectionFromTeam();
       return;
     }
     if (msg.type === "created") {
@@ -3070,6 +2997,9 @@ function connectWs() {
       return;
     }
     if (msg.type === "setTeamColorError" || msg.type === "soloColorError") {
+      if (msg.reason === "locked") {
+        notifyReject("Цвет команды нельзя изменить после создания.");
+      }
       return;
     }
     if (msg.type === "soloError") {
@@ -3142,7 +3072,7 @@ function connectWs() {
         return;
       }
       const map = {
-        fields: "Укажите название, смайлик и цвет команды.",
+        fields: "Укажите название и смайлик команды.",
         limit: "Достигнут лимит команд на сервере.",
         duel: "Финальная дуэль 1 на 1 — публичные команды в этот момент недоступны.",
       };
@@ -3158,7 +3088,7 @@ function connectWs() {
         name: "Укажите название команды.",
         emoji: "Выберите смайлик (эмодзи).",
         no_team: "Сначала вступите в команду.",
-        not_owner: "Название и смайлик может менять только создатель этой команды.",
+        not_owner: "Название и смайлик может менять только создатель команды (цвет не меняется).",
         solo: "Соло-режим отключён. Вступите в команду или создайте свою.",
       };
       const text = map[msg.reason] || "Не удалось сохранить.";
@@ -3301,11 +3231,14 @@ function connectWs() {
       pixels.clear();
       for (const p of msg.pixels || []) {
         if (!Array.isArray(p) || p.length < 3) continue;
+        const x = p[0] | 0;
+        const y = p[1] | 0;
+        if (wantOnline && isClientWaterCell(x, y)) continue;
         if (msg.pixelFormat === "v2" && p.length >= 5) {
-          const [x, y, t, , sh] = p;
+          const [, , t, , sh] = p;
           pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: sh || 0 });
         } else {
-          const [x, y, t] = p;
+          const [, , t] = p;
           pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: 0 });
         }
       }
@@ -3315,7 +3248,16 @@ function connectWs() {
       return;
     }
     if (msg.type === "pixel") {
-      const pk = `${msg.x},${msg.y}`;
+      const x = msg.x | 0;
+      const y = msg.y | 0;
+      const pk = `${x},${y}`;
+      if (wantOnline && isClientWaterCell(x, y)) {
+        pixels.delete(pk);
+        if (optimisticPixelPending?.key === pk) optimisticPixelPending = null;
+        scheduleDraw({ dirty: { gx0: x, gy0: y, gx1: x, gy1: y } });
+        schedulePersist();
+        return;
+      }
       /* Оптимистичный пиксель: эхо своей клетки — без второго popPixel (уже показали локально). */
       const skipOwnPop =
         optimisticPixelPending &&
@@ -3509,9 +3451,6 @@ function buildPalette() {
         el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
       });
       updatePaletteTriggerPreview();
-      if (wantOnline && getWsUrl() && canPickOnlineDrawColor()) {
-        sendOnlineColorChoice(hex);
-      }
       schedulePersist();
       closePalettePicker();
     });
@@ -4339,14 +4278,6 @@ async function bootstrap() {
   loadFromStorage();
   migrateLegacySessionStorage();
   clearSoloFromSession();
-  const os = loadOnlineSession();
-  if (
-    typeof os?.welcomeColorIdx === "number" &&
-    os.welcomeColorIdx >= 0 &&
-    os.welcomeColorIdx < PALETTE.length
-  ) {
-    welcomeColorIdx = os.welcomeColorIdx;
-  }
   wantOnline = !!getWsUrl();
   buildPalette();
   setupPalettePickerUi();

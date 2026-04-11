@@ -24,7 +24,12 @@ const ALPHA_CUTOFF = 24;
 function isWaterPixel(r, g, b, a) {
   if (a < ALPHA_CUTOFF) return true;
   const maxc = Math.max(r, g, b);
-  if (maxc < 22) return false;
+  const mr = Math.max(r, g);
+  /* Тёмный/почти чёрный океан: раньше maxc < 22 сразу давал «сушу» — захват 12×12 заливал «воду». */
+  if (maxc < 56) {
+    if (b >= r && b >= g && b - mr >= 2) return true;
+    return false;
+  }
   if (b > 135 && b > r + 14 && b > g + 10) return true;
   if (b > 100 && b > r + 28 && b > g + 20) return true;
   if (b === maxc && b > 88 && b > r + 6 && b > g + 4 && r + g < b + 75) return true;
