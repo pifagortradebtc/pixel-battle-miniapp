@@ -120,7 +120,7 @@ async function main() {
     }
   }
 
-  const countryNames = ["Фон", "Река", "Постер"];
+  const countryNames = ["Океан", "Река", "Страны"];
 
   const out320 = path.join(root, "data", "regions-320.json");
   writeRegionsJson(out320, BASE, BASE, cells, rgb, countryNames);

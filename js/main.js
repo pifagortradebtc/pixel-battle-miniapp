@@ -1961,7 +1961,7 @@ function applyGlobalPurchaseVfx(msg) {
 
   if (kind === "personalRecovery") {
     if (boardVfx) {
-      boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+      boardVfx.lightningBurst(getVfxTransform());
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
@@ -1983,7 +1983,7 @@ function applyGlobalPurchaseVfx(msg) {
         ? msg.size | 0
         : 6;
     boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    boardVfx.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
     return;
@@ -1994,7 +1994,7 @@ function applyGlobalPurchaseVfx(msg) {
         ? msg.size | 0
         : 12;
     boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    boardVfx.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
     return;
@@ -2002,7 +2002,7 @@ function applyGlobalPurchaseVfx(msg) {
   if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
-    boardVfx?.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+    boardVfx?.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
   }
@@ -3532,7 +3532,7 @@ function resizeCanvas() {
     canvasVfx.height = bh;
     canvasVfx.style.width = `${w}px`;
     canvasVfx.style.height = `${h}px`;
-    const vctx = canvasVfx.getContext("2d", { alpha: true, desynchronized: true });
+    const vctx = canvasVfx.getContext("2d", { alpha: true, desynchronized: false });
     if (vctx) {
       vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       vctx.imageSmoothingEnabled = false;
@@ -3743,7 +3743,7 @@ function applyOptimisticWeapon(kind, cx, cy) {
     const col = teamColor(myTeamId);
     boardVfx.zoneFlash(gx0, gy0, col, tr, size);
     if (kind !== "zoneCapture") {
-      boardVfx.lightningBurst(canvas.clientWidth, canvas.clientHeight);
+      boardVfx.lightningBurst(getVfxTransform());
     }
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
