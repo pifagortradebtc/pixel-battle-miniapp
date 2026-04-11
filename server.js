@@ -1090,6 +1090,7 @@ function planCaptureRect(x0, y0, x1, y1) {
 function applyPlannedCapture(pk, tid, planned) {
   for (const [x, y] of planned) {
     if (!cellIsLand(x, y)) continue;
+    if (isEnemyOwnedFlagBaseCell(tid, x, y)) continue;
     const k = `${x},${y}`;
     pixels.set(k, {
       teamId: tid,
@@ -1464,6 +1465,18 @@ function findDefenderTeamAtFlagCell(x, y) {
     if (fc.x === x && fc.y === y) return t;
   }
   return null;
+}
+
+/**
+ * Клетка флага (центр стартового квадрата) чужой команды, всё ещё окрашенная ею.
+ * Такую клетку нельзя перекрасить обычным пикселем / зоной — только 20 «ударов» по флагу.
+ */
+function isEnemyOwnedFlagBaseCell(attackerTeamId, x, y) {
+  const def = findDefenderTeamAtFlagCell(x, y);
+  if (!def || (def.id | 0) === (attackerTeamId | 0)) return false;
+  const existing = pixels.get(`${x},${y}`);
+  const owner = existing != null ? pixelTeam(existing) : 0;
+  return owner === (def.id | 0);
 }
 
 function isFlagCaptureMechanicEnabled(now) {
@@ -3377,6 +3390,15 @@ wss.on("connection", (ws, req) => {
             max: FLAG_CAPTURE_HITS_REQUIRED,
           });
         }
+        return;
+      }
+
+      if (isEnemyOwnedFlagBaseCell(teamId, x, y)) {
+        await walletStore.save();
+        const locked = !isFlagCaptureMechanicEnabled(now);
+        const r = locked ? "enemy_base_locked" : "enemy_base";
+        safeSend(ws, { type: "invalidPlacement", teamId, reason: r });
+        safeSend(ws, { type: "pixelReject", reason: r });
         return;
       }
 

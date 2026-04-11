@@ -2148,6 +2148,10 @@ function notifyReject(reason) {
     team_eliminated: "Команда уничтожена — территории не осталось.",
     warmup: "Разминка: пиксели включатся, когда закончится отсчёт 2 минут.",
     flag_rate: "Захват флага: слишком часто для вашей команды. Подождите мгновение.",
+    enemy_base_locked:
+      "Клетку флага чужой базы нельзя перекрасить обычным пикселем. Захват (20 ударов по центру базы) откроется позже в раунде.",
+    enemy_base:
+      "Клетку флага чужой базы можно только «бить» пикселем 20 раз рядом с вашей территорией — она остаётся цветом защитника до полного захвата.",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -4919,6 +4923,22 @@ function draw(time = performance.now(), drawOpts = {}) {
         const barCol = atk > 0 ? teamColor(atk) : "#ffee66";
         ctx.fillStyle = barCol;
         ctx.fillRect(bx, by, (barW * pr) / FLAG_CAPTURE_HITS_REQUIRED, barH);
+        const remaining = FLAG_CAPTURE_HITS_REQUIRED - pr;
+        if (remaining > 0 && cell >= 4) {
+          ctx.save();
+          const fs = Math.max(8, Math.min(13, cell * 0.38));
+          ctx.font = `600 ${fs}px system-ui,sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          const tx = px + cw / 2;
+          const ty = by - 2;
+          ctx.lineWidth = Math.max(2, fs * 0.2);
+          ctx.strokeStyle = "rgba(0,0,0,0.75)";
+          ctx.strokeText(`ещё ${remaining}`, tx, ty);
+          ctx.fillStyle = "rgba(255,252,240,0.95)";
+          ctx.fillText(`ещё ${remaining}`, tx, ty);
+          ctx.restore();
+        }
       }
     }
   }
