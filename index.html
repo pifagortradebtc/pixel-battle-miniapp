@@ -13,7 +13,10 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <div id="event-banner" class="event-banner" hidden role="status" aria-live="polite"></div>
+  <div class="event-banner-stack" aria-live="polite">
+    <div id="event-banner" class="event-banner" hidden role="status"></div>
+    <div id="team-buff-banner" class="event-banner event-banner--team" hidden role="status"></div>
+  </div>
   <!-- Порядок оверлеев: снизу вверх (последний в DOM — поверх остальных). -->
   <div id="welcome-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings welcome-card">

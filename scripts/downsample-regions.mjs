@@ -1,6 +1,7 @@
 /**
  * Строит regions-{w}.json из regions-320.json тем же правилом, что и server.js (центр ячейки).
  * 640 — надсэмпл (каждая клетка 320 → блок 2×2); остальное — даунсэмпл.
+ * Не копирует rgbBase64 — для постера используйте npm run rasterize-poster.
  * Запуск: node scripts/downsample-regions.mjs
  */
 

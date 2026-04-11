@@ -1380,21 +1380,34 @@ body {
   }
 }
 
-.event-banner {
+.event-banner-stack {
   position: fixed;
   z-index: 50;
   left: 0;
   right: 0;
   top: 0;
-  padding: calc(var(--safe-top) + 4px) 10px 6px;
+  padding-top: var(--safe-top);
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+
+.event-banner {
+  width: 100%;
+  padding: 5px 10px 6px;
   text-align: center;
   font-size: 0.7rem;
   font-weight: 700;
   color: #fef3c7;
   background: linear-gradient(90deg, rgba(180, 83, 9, 0.92), rgba(217, 119, 6, 0.88), rgba(180, 83, 9, 0.92));
   border-bottom: 1px solid rgba(251, 191, 36, 0.35);
-  pointer-events: none;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.event-banner--team {
+  color: #ecfdf5;
+  background: linear-gradient(90deg, rgba(6, 95, 70, 0.92), rgba(5, 150, 105, 0.88), rgba(6, 95, 70, 0.92));
+  border-bottom-color: rgba(52, 211, 153, 0.35);
 }
 
 .event-banner[hidden] {

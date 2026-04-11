@@ -6,6 +6,7 @@
 
 import { createBoardVfx, spawnFloatingText } from "./vfx.js";
 import {
+  BASE_ACTION_COOLDOWN_SEC,
   getCurrentCooldownMs,
   getEffectiveRecoverySec,
   PRICES_QUANT,
@@ -205,6 +206,7 @@ const toolbarBuffPersonalEl = document.getElementById("toolbar-buff-personal");
 const toolbarBuffPersonalLabelEl = document.getElementById("toolbar-buff-personal-label");
 const toolbarBuffPersonalFillEl = document.getElementById("toolbar-buff-personal-fill");
 const eventBannerEl = document.getElementById("event-banner");
+const teamBuffBannerEl = document.getElementById("team-buff-banner");
 const crisisOverlayEl = document.getElementById("crisis-overlay");
 const btnDeposit = document.getElementById("btn-deposit");
 const btnShop = document.getElementById("btn-shop");
@@ -221,6 +223,9 @@ const shopPending = document.getElementById("shop-pending");
 const canvasVfx = document.getElementById("board-vfx");
 const floatFxHost = document.getElementById("float-fx");
 
+/** После успешной покупки в открытом магазине: остальные «Купить» неактивны, на купленной — «✓». */
+let shopPurchaseUiLock = false;
+
 /** @type {ReturnType<typeof createBoardVfx> | null} */
 let boardVfx = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -236,6 +241,8 @@ const pixels = new Map();
 
 /** @type {Uint8Array | null} id страны на клетку, 0 = океан */
 let regionCells = null;
+/** @type {Uint8Array | null} RGB шаблон из regions-*.json (длина gridW*gridH*3), если есть — рисуем постер до закраски команд */
+let regionRgb = null;
 
 let selectedColor = 5;
 /** Индекс в PALETTE для welcome / создания команды / настроек (онлайн) */
@@ -360,8 +367,14 @@ async function loadRegions() {
     const j = await r.json();
     regionCells = b64ToUint8(j.cellsBase64);
     if (regionCells.length !== w * h) regionCells = null;
+    regionRgb = null;
+    if (j.rgbBase64 && typeof j.rgbBase64 === "string") {
+      const raw = b64ToUint8(j.rgbBase64);
+      if (raw.length === w * h * 3) regionRgb = raw;
+    }
   } catch {
     regionCells = null;
+    regionRgb = null;
   }
 }
 
@@ -578,6 +591,8 @@ function updateRoundTimer() {
     const sec = s % 60;
     roundTimerEl.textContent = h > 0 ? `${h}ч ${m}м` : m > 0 ? `${m}м ${sec}с` : `${sec}с`;
   } finally {
+    syncEventBanner();
+    syncTeamBuffBanner();
     syncToolbarHeightCssVar();
   }
 }
@@ -1217,6 +1232,7 @@ function setupCreateTeamUi() {
       });
     }
     if (shopOverlay) shopOverlay.hidden = false;
+    resetShopPurchaseButtonsUi();
     syncShopHeaderBalance();
     updateShopAvailability();
   });
@@ -1234,6 +1250,7 @@ function setupCreateTeamUi() {
       });
     }
     if (shopOverlay) shopOverlay.hidden = false;
+    resetShopPurchaseButtonsUi();
     syncShopHeaderBalance();
     updateShopAvailability();
   });
@@ -1452,17 +1469,27 @@ function notifyPurchaseError(reason) {
   notifyReject(m[reason] || reason);
 }
 
+const ROUND_END_BANNER_MS = 10 * 60 * 1000;
+
 function syncEventBanner() {
   if (!eventBannerEl) return;
-  const ge = walletState?.globalEvent || lastStatsGlobalEvent;
-  if (ge && ge.active && ge.until > Date.now()) {
-    eventBannerEl.hidden = false;
-    const left = Math.max(0, ge.until - Date.now());
-    const m = Math.max(1, Math.ceil(left / 60000));
-    eventBannerEl.textContent = `⚡ Событие на карте · ещё ~${m} мин`;
+  const online = wantOnline && getWsUrl();
+  if (!online || spectatorMode || gameFinishedMeta) {
+    eventBannerEl.hidden = true;
     return;
   }
-  eventBannerEl.hidden = true;
+  if (roundEndsAtMs == null) {
+    eventBannerEl.hidden = true;
+    return;
+  }
+  const left = roundEndsAtMs - Date.now();
+  if (left <= 0 || left > ROUND_END_BANNER_MS) {
+    eventBannerEl.hidden = true;
+    return;
+  }
+  eventBannerEl.hidden = false;
+  const m = Math.max(1, Math.ceil(left / 60000));
+  eventBannerEl.textContent = `⏱ До конца раунда · ещё ~${m} мин`;
 }
 
 function syncClientCooldownFromWalletFields() {
@@ -1474,15 +1501,15 @@ function syncClientCooldownFromWalletFields() {
   const te = walletState.teamEffects;
   const teamFx = te
     ? { teamRecoveryUntil: te.teamRecoveryUntil, teamRecoverySec: te.teamRecoverySec }
-    : { teamRecoveryUntil: 0, teamRecoverySec: 20 };
+    : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const st = walletState.tournamentStage || "MASS_BATTLE";
   walletState.effectiveRecoverySec = getEffectiveRecoverySec(u, teamFx);
   walletState.cooldownMs = getCurrentCooldownMs(u, teamFx, st);
 }
 
-/** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || 20000` (ломает 0 и баффы). */
+/** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || fallback` (ломает 0 и баффы). */
 function getWalletActionCooldownMs() {
-  if (!walletState) return 20000;
+  if (!walletState) return BASE_ACTION_COOLDOWN_SEC * 1000;
   /* Без пересчёта по текущему времени после окончания personalRecoveryUntil остаётся устаревший effectiveRecoverySec (напр. 1 с). */
   syncClientCooldownFromWalletFields();
   const sec = walletState.effectiveRecoverySec;
@@ -1491,7 +1518,7 @@ function getWalletActionCooldownMs() {
   }
   const cd = Number(walletState.cooldownMs);
   if (Number.isFinite(cd) && cd >= 0) return cd;
-  return 20000;
+  return BASE_ACTION_COOLDOWN_SEC * 1000;
 }
 
 /**
@@ -1509,6 +1536,7 @@ function applyWalletFromServer(msg) {
   updateWalletBar();
   updateShopAvailability();
   syncEventBanner();
+  syncTeamBuffBanner();
 }
 
 function syncShopHeaderBalance() {
@@ -1573,6 +1601,32 @@ function formatBuffRemainingMs(ms) {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+function syncTeamBuffBanner() {
+  if (!teamBuffBannerEl) return;
+  const online = wantOnline && getWsUrl();
+  if (!online || spectatorMode || gameFinishedMeta || !walletState || myTeamId == null) {
+    teamBuffBannerEl.hidden = true;
+    return;
+  }
+  const te = walletState.teamEffects;
+  if (!te || (typeof te.teamId === "number" && te.teamId !== myTeamId)) {
+    teamBuffBannerEl.hidden = true;
+    return;
+  }
+  const until = typeof te.teamRecoveryUntil === "number" ? te.teamRecoveryUntil : 0;
+  const now = Date.now();
+  if (until <= now) {
+    teamBuffBannerEl.hidden = true;
+    return;
+  }
+  const secRaw = te.teamRecoverySec;
+  const sec =
+    typeof secRaw === "number" && Number.isFinite(secRaw) && secRaw >= 0 ? secRaw : BASE_ACTION_COOLDOWN_SEC;
+  const left = until - now;
+  teamBuffBannerEl.hidden = false;
+  teamBuffBannerEl.textContent = `👥 Командное усиление · пиксель каждые ${sec} с · ещё ${formatBuffRemainingMs(left)}`;
 }
 
 function updateActiveBuffBars() {
@@ -1676,7 +1730,7 @@ function updateToolbarPixelTimer() {
       : cd / 1000;
   const intervalHint =
     erSec >= 19.5
-      ? "База 20 с между кликами (без буста в магазине)."
+      ? `База ${BASE_ACTION_COOLDOWN_SEC} с между кликами (без буста в магазине).`
       : `Сейчас ~${erSec.toFixed(erSec < 1 ? 1 : 0)} с между кликами (буст из магазина).`;
   if (left > 500) {
     el.textContent = formatPixelCooldownLeft(left);
@@ -1703,6 +1757,7 @@ function updateWalletBar() {
     syncShopHeaderBalance();
     syncShopDepositButton();
     syncEventBanner();
+    syncTeamBuffBanner();
     updateToolbarHud();
     return;
   }
@@ -1716,6 +1771,7 @@ function updateWalletBar() {
     syncShopHeaderBalance();
     syncShopDepositButton();
     syncEventBanner();
+    syncTeamBuffBanner();
     updateToolbarHud();
     return;
   }
@@ -1740,6 +1796,7 @@ function updateWalletBar() {
   syncShopHeaderBalance();
   syncShopDepositButton();
   syncEventBanner();
+  syncTeamBuffBanner();
   updateToolbarHud();
 }
 
@@ -1835,6 +1892,64 @@ function handlePurchaseOk(msg) {
     spawnFloatingText(floatFxHost, `👥 КОМАНДА: ${s} С`, { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
   }
   recordQuickBuyAfterPurchase(kind, msg);
+  applyShopPurchaseSuccessUi(msg);
+}
+
+function ensureShopBtnDefaultLabels() {
+  const root = document.getElementById("shop-overlay");
+  if (!root) return;
+  root.querySelectorAll(".shop-btn").forEach((btn) => {
+    if (btn.dataset.shopDefaultLabel == null) {
+      btn.dataset.shopDefaultLabel = btn.textContent.trim();
+    }
+  });
+}
+
+function resetShopPurchaseButtonsUi() {
+  shopPurchaseUiLock = false;
+  const root = document.getElementById("shop-overlay");
+  if (!root) return;
+  ensureShopBtnDefaultLabels();
+  root.querySelectorAll(".shop-btn").forEach((btn) => {
+    const def = btn.dataset.shopDefaultLabel;
+    if (def != null) btn.textContent = def;
+    btn.classList.remove("game-shop__buy--success");
+    btn.removeAttribute("aria-label");
+  });
+}
+
+function shopBtnMatchesPurchase(btn, msg) {
+  const kind = msg.kind;
+  const action = btn.dataset.action;
+  if (!action || !kind) return false;
+  if (kind === "personalRecovery") {
+    return action === "personalRecovery" && Number(btn.dataset.tierSec) === Number(msg.tierSec);
+  }
+  if (kind === "teamRecovery") {
+    return action === "teamRecovery" && Number(btn.dataset.tierSec) === Number(msg.tierSec);
+  }
+  if (kind === "zoneCapture") return action === "zoneCapture";
+  if (kind === "massCapture") return action === "massCapture";
+  if (kind === "zone12Capture") return action === "zone12Capture";
+  return false;
+}
+
+function applyShopPurchaseSuccessUi(msg) {
+  const root = document.getElementById("shop-overlay");
+  if (!root || root.hidden) return;
+  ensureShopBtnDefaultLabels();
+  const buttons = Array.from(root.querySelectorAll(".shop-btn"));
+  const winner = buttons.find((b) => shopBtnMatchesPurchase(b, msg));
+  if (!winner) return;
+  shopPurchaseUiLock = true;
+  for (const btn of buttons) {
+    btn.disabled = true;
+    if (btn === winner) {
+      btn.textContent = "✓";
+      btn.classList.add("game-shop__buy--success");
+      btn.setAttribute("aria-label", "Куплено");
+    }
+  }
 }
 
 function loadQuickBuyHistory() {
@@ -2192,12 +2307,12 @@ function updateShopAvailability() {
       ? false
       : st === "GRAND_FINAL" || st === "DUEL" || spectatorMode;
   document.querySelectorAll(".shop-btn").forEach((btn) => {
-    btn.disabled = !!dis;
+    btn.disabled = !!dis || shopPurchaseUiLock;
   });
   const effEl = document.getElementById("shop-effective-recovery-hint");
   if (effEl) {
     const now = Date.now();
-    const sec = walletState.effectiveRecoverySec ?? 20;
+    const sec = walletState.effectiveRecoverySec ?? BASE_ACTION_COOLDOWN_SEC;
     const pu = walletState.personalRecoveryUntil > now;
     const tu = walletState.teamEffects?.teamRecoveryUntil > now;
     let sub = "";
@@ -2206,7 +2321,7 @@ function updateShopAvailability() {
       const t = tu ? `ком. ${walletState.teamEffects.teamRecoverySec} с` : null;
       sub = ` Активно: ${[p, t].filter(Boolean).join(", ")}.`;
     }
-    effEl.textContent = `Сейчас пиксель каждые ~${sec} с (минимум из базы 20 с и баффов).${sub}`;
+    effEl.textContent = `Сейчас пиксель каждые ~${sec} с (минимум из базы ${BASE_ACTION_COOLDOWN_SEC} с и баффов).${sub}`;
   }
   if (shopEffects) {
     const te = walletState.teamEffects;
@@ -2369,6 +2484,7 @@ function setupEconomyUi() {
   });
 
   btnShop?.addEventListener("click", () => {
+    resetShopPurchaseButtonsUi();
     if (shopOverlay) shopOverlay.hidden = false;
     const bal = document.getElementById("shop-display-balance");
     if (bal) {
@@ -2738,18 +2854,11 @@ function connectWs() {
     }
     if (msg.type === "globalEvent") {
       if (walletState) {
-        walletState.globalEvent = {
-          active: !!msg.active,
-          kind: msg.kind || null,
-          until: msg.until | 0,
-        };
+        walletState.globalEvent = { active: false, kind: null, until: 0 };
       }
-      lastStatsGlobalEvent = {
-        active: !!msg.active,
-        kind: msg.kind || null,
-        until: msg.until | 0,
-      };
+      lastStatsGlobalEvent = { active: false, kind: null, until: 0 };
       syncEventBanner();
+      syncTeamBuffBanner();
       return;
     }
     if (msg.type === "stats") {
@@ -3090,7 +3199,7 @@ function connectWs() {
           walletState.teamEffects = {
             teamId: msg.teamId,
             teamRecoveryUntil: 0,
-            teamRecoverySec: 20,
+            teamRecoverySec: BASE_ACTION_COOLDOWN_SEC,
           };
         }
         const te = walletState.teamEffects;
@@ -3101,6 +3210,7 @@ function connectWs() {
         syncClientCooldownFromWalletFields();
         updateShopAvailability();
         updateToolbarHud();
+        syncTeamBuffBanner();
       }
       if (msg.kind === "teamRecovery") {
         applyGlobalPurchaseVfx({ kind: "teamRecovery", teamId: msg.teamId });
@@ -3324,7 +3434,19 @@ function draw(time = performance.now()) {
     for (let gx = x0; gx <= x1; gx++) {
       const key = `${gx},${gy}`;
       const idx = regionCells ? regionCells[gy * gridW + gx] : 2;
-      const base = countryColor(idx);
+      let base;
+      if (regionRgb && regionRgb.length === gridW * gridH * 3) {
+        if (idx === 0) {
+          base = countryColor(0);
+        } else if (idx === 1) {
+          base = countryColor(1);
+        } else {
+          const ri = (gy * gridW + gx) * 3;
+          base = `rgb(${regionRgb[ri]},${regionRgb[ri + 1]},${regionRgb[ri + 2]})`;
+        }
+      } else {
+        base = countryColor(idx);
+      }
       const owner = pixels.get(key);
       const px = offsetX + gx * cell;
       const py = offsetY + gy * cell;

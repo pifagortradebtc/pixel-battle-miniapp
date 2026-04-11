@@ -348,18 +348,8 @@ function ensureWsOnlineTracked(ws) {
   trackOnlinePk(pk);
 }
 
-/** Глобальные события карты: «окно битвы» — короче интервал между действиями. */
-const GLOBAL_EVENT_DURATION_MS = 10 * 60 * 1000;
-const GLOBAL_EVENT_INTERVAL_MS = 2 * 60 * 60 * 1000;
-let globalEventUntil = 0;
-let globalEventKind = null;
-/** Первое событие — через полный интервал после старта сервера. */
-let nextGlobalEventAt = Date.now() + GLOBAL_EVENT_INTERVAL_MS;
-
-function getGlobalEventPayload(now = Date.now()) {
-  if (globalEventUntil > now) {
-    return { active: true, kind: globalEventKind || "battle_window", until: globalEventUntil };
-  }
+/** Зарезервировано под кошелёк; отдельных «событий карты» на сервере нет (плашка на клиенте — по таймеру раунда). */
+function getGlobalEventPayload() {
   return { active: false, kind: null, until: 0 };
 }
 
@@ -699,7 +689,7 @@ try {
     baseRegion320 = null;
   }
 } catch (e) {
-  console.warn("Нет data/regions-320.json — npm run build-map", e.message);
+  console.warn("Нет data/regions-320.json — npm run build-map или npm run rasterize-poster", e.message);
 }
 
 /** @type {Uint8Array | null} регион: 0 океан, 1 река, ≥2 — регионы (для справки; закрасить можно любую клетку сетки). */
@@ -804,7 +794,7 @@ function clearTeamEffectsMap() {
 
 function getTeamFx(tid) {
   if (!teamEffects.has(tid)) {
-    teamEffects.set(tid, { teamRecoveryUntil: 0, teamRecoverySec: 20 });
+    teamEffects.set(tid, { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC });
   }
   const fx = teamEffects.get(tid);
   if (fx.teamRecoveryUntil == null && fx.teamBoostUntil != null) {
@@ -812,7 +802,7 @@ function getTeamFx(tid) {
   }
   if (typeof fx.teamRecoveryUntil !== "number") fx.teamRecoveryUntil = 0;
   if (typeof fx.teamRecoverySec !== "number" || fx.teamRecoverySec < 1) {
-    fx.teamRecoverySec = 20;
+    fx.teamRecoverySec = BASE_ACTION_COOLDOWN_SEC;
   }
   delete fx.teamBoostUntil;
   delete fx.raidBoostUntil;
@@ -907,7 +897,7 @@ async function buildWalletPayload(ws) {
   const now = Date.now();
   const st = tournamentStage(roundIndex, gameFinished);
   const tid = ws.teamId | 0;
-  const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: 20 };
+  const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const devUnl = pk && isDevUnlimitedWallet(pk);
   const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
   /* Безлимит только баланс/списания — интервал пикселя и баффы как у всех */
@@ -926,7 +916,7 @@ async function buildWalletPayload(ws) {
     lastMassCaptureAt: u.lastMassCaptureAt ?? 0,
     lastZone12CaptureAt: u.lastZone12CaptureAt ?? 0,
     referralBonusActive: !!(ref && isPlayerKeyOnline(ref)),
-    globalEvent: getGlobalEventPayload(now),
+    globalEvent: getGlobalEventPayload(),
     tournamentStage: st,
     roundIndex,
     devUnlimited: !!devUnl,
@@ -1018,13 +1008,6 @@ function applyClusterGameReplication(msg) {
       }
       return;
     case "globalEvent":
-      if (msg.active === false) {
-        globalEventUntil = 0;
-        globalEventKind = null;
-      } else {
-        globalEventUntil = Number(msg.until) || 0;
-        globalEventKind = msg.kind != null ? String(msg.kind) : null;
-      }
       return;
     case "teamDisplay": {
       const tid = msg.teamId | 0;
@@ -1042,7 +1025,7 @@ function applyClusterGameReplication(msg) {
       if (msg.kind === "teamRecovery" && typeof msg.teamId === "number") {
         const fx = getTeamFx(msg.teamId);
         fx.teamRecoveryUntil = Number(msg.until) || 0;
-        fx.teamRecoverySec = Number(msg.teamRecoverySec) || 20;
+        fx.teamRecoverySec = Number(msg.teamRecoverySec) || BASE_ACTION_COOLDOWN_SEC;
       }
       return;
     case "roundEnded":
@@ -1362,32 +1345,6 @@ function scheduleBroadcastWalletDebounced() {
     void broadcastWalletToAll();
   }, 50);
 }
-
-function pollGlobalEvents() {
-  if (!isClusterLeader()) return;
-  const now = Date.now();
-  if (globalEventUntil > 0 && globalEventUntil <= now) {
-    globalEventUntil = 0;
-    globalEventKind = null;
-    broadcast({ type: "globalEvent", active: false, kind: null, until: 0 });
-    scheduleBroadcastWalletDebounced();
-    nextGlobalEventAt = now + GLOBAL_EVENT_INTERVAL_MS;
-  }
-  if (globalEventUntil <= 0 && now >= nextGlobalEventAt && !gameFinished) {
-    globalEventKind = "battle_window";
-    globalEventUntil = now + GLOBAL_EVENT_DURATION_MS;
-    broadcast({
-      type: "globalEvent",
-      active: true,
-      kind: globalEventKind,
-      until: globalEventUntil,
-    });
-    scheduleBroadcastWalletDebounced();
-    broadcastStatsImmediate();
-  }
-}
-
-setInterval(pollGlobalEvents, 15000);
 
 function countOnlineClients() {
   let n = 0;
