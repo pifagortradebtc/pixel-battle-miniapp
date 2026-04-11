@@ -4,6 +4,37 @@
  * проецируются через текущий transform — пан/зум не оставляют «залипших» следов.
  */
 
+const VFX_DEBUG =
+  typeof window !== "undefined" &&
+  (() => {
+    try {
+      return new URLSearchParams(window.location.search).get("vfxdebug") === "1";
+    } catch {
+      return false;
+    }
+  })();
+
+/**
+ * Сброс состояния 2D-контекста: clip/shadow/composite не должны урезать clearRect.
+ */
+function hardResetCanvas2DState(c) {
+  if (typeof c.reset === "function") {
+    c.reset();
+    return;
+  }
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.globalAlpha = 1;
+  c.globalCompositeOperation = "source-over";
+  c.shadowBlur = 0;
+  c.shadowColor = "transparent";
+  c.filter = "none";
+  c.strokeStyle = "#000";
+  c.fillStyle = "#000";
+  c.lineWidth = 1;
+  c.setLineDash([]);
+  c.beginPath();
+}
+
 /**
  * @param {HTMLCanvasElement} canvas
  */
@@ -118,7 +149,7 @@ export function createBoardVfx(canvas) {
 
   /**
    * Молнии в координатах сетки (по всей карте), двигаются вместе с картой.
-   * @param {{ offsetX: number, offsetY: number, scale: number, gridW: number, gridH: number, BASE_CELL: number }} transform
+   * @param {{ offsetX: number, offsetY: number, scale: number, gridW: number, gridH: number, BASE_CELL: number, dpr?: number }} transform
    */
   function lightningBurst(transform) {
     const w = Math.max(1, transform.gridW | 0);
@@ -179,21 +210,44 @@ export function createBoardVfx(canvas) {
     });
   }
 
-  function render(now, transform) {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.restore();
+  /**
+   * Кадр board-vfx — строгая последовательность (никаких «старых» пикселей между кадрами):
+   * 1) Сброс матрицы/состояния контекста.
+   * 2) Полная очистка bitmap через clearRect (без composite «copy» — в WebView даёт тёмную пелену на карте).
+   * 3) Обновление мира: интеграция частиц + удаление истёкших из массивов (без отрисовки).
+   * 4) Матрица DPR для координат в CSS px, как у #board.
+   * 5) Отрисовка только текущих активных эффектов: world/grid → screen через камеру transform.
+   */
+  function wipeBitmapIdentity(ctx2, bw, bh) {
+    hardResetCanvas2DState(ctx2);
+    ctx2.setTransform(1, 0, 0, 1, 0, 0);
+    ctx2.globalCompositeOperation = "source-over";
+    ctx2.globalAlpha = 1;
+    ctx2.clearRect(0, 0, bw, bh);
+  }
 
-    ctx.globalCompositeOperation = "source-over";
-    ctx.shadowBlur = 0;
-    ctx.shadowColor = "transparent";
+  function pruneExpiredAndIntegrate(now, cellPx) {
+    ripples = ripples.filter((rp) => now - rp.t0 <= 700);
 
-    const c = transform.BASE_CELL * transform.scale;
+    particles = particles.filter((p) => {
+      p.fx += p.vx / cellPx;
+      p.fy += p.vy / cellPx;
+      p.vy += 0.04;
+      p.life -= 16 / p.max;
+      return p.life > 0;
+    });
 
-    ripples = ripples.filter((rp) => {
+    beams = beams.filter((b) => now - b.t0 <= 420);
+    shockwaves = shockwaves.filter((sw) => now - sw.t0 <= 900);
+    bolts = bolts.filter((b) => now - b.t0 <= 500);
+    shields = shields.filter((s) => now - s.t0 <= 900);
+    zoneFlashes = zoneFlashes.filter((z) => now - z.t0 <= 500);
+  }
+
+  function paintActiveEffects(now, transform, cellPx) {
+    for (let i = 0; i < ripples.length; i++) {
+      const rp = ripples[i];
       const age = now - rp.t0;
-      if (age > 700) return false;
       const t = age / 700;
       const { x, y, cell } = gridToScreen(rp.gx, rp.gy, transform);
       const rad = cell * (0.4 + t * 3.2);
@@ -203,34 +257,28 @@ export function createBoardVfx(canvas) {
       ctx.beginPath();
       ctx.arc(x, y, rad, 0, Math.PI * 2);
       ctx.stroke();
-      return true;
-    });
+    }
 
-    particles = particles.filter((p) => {
-      p.fx += p.vx / c;
-      p.fy += p.vy / c;
-      p.vy += 0.04;
-      p.life -= 16 / p.max;
-      if (p.life <= 0) return false;
-      const sx = transform.offsetX + p.fx * c;
-      const sy = transform.offsetY + p.fy * c;
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const sx = transform.offsetX + p.fx * cellPx;
+      const sy = transform.offsetY + p.fy * cellPx;
       const m = /rgba\((\d+),(\d+),(\d+),/.exec(p.color);
       ctx.fillStyle = m ? `rgba(${m[1]},${m[2]},${m[3]},${p.life})` : p.color;
-      const radius = Math.max(0.8, p.sizeCells * c * p.life);
+      const radius = Math.max(0.8, p.sizeCells * cellPx * p.life);
       ctx.beginPath();
       ctx.arc(sx, sy, radius, 0, Math.PI * 2);
       ctx.fill();
-      return true;
-    });
+    }
 
-    beams = beams.filter((b) => {
+    for (let i = 0; i < beams.length; i++) {
+      const b = beams[i];
       const age = now - b.t0;
-      if (age > 420) return false;
       const t = age / 420;
-      const sx1 = transform.offsetX + b.gx1 * c;
-      const sy1 = transform.offsetY + b.gy1 * c;
-      const sx2 = transform.offsetX + b.gx2 * c;
-      const sy2 = transform.offsetY + b.gy2 * c;
+      const sx1 = transform.offsetX + b.gx1 * cellPx;
+      const sy1 = transform.offsetY + b.gy1 * cellPx;
+      const sx2 = transform.offsetX + b.gx2 * cellPx;
+      const sy2 = transform.offsetY + b.gy2 * cellPx;
       ctx.strokeStyle = b.color;
       ctx.lineWidth = (1 - t) * 5 + 1;
       ctx.shadowColor = b.color;
@@ -240,16 +288,15 @@ export function createBoardVfx(canvas) {
       ctx.lineTo(sx2, sy2);
       ctx.stroke();
       ctx.shadowBlur = 0;
-      return true;
-    });
+    }
 
-    shockwaves = shockwaves.filter((sw) => {
+    for (let i = 0; i < shockwaves.length; i++) {
+      const sw = shockwaves[i];
       const age = now - sw.t0;
-      if (age > 900) return false;
       const t = age / 900;
-      const sx = transform.offsetX + sw.gcx * c;
-      const sy = transform.offsetY + sw.gcy * c;
-      const maxR = sw.radiusCells * c;
+      const sx = transform.offsetX + sw.gcx * cellPx;
+      const sy = transform.offsetY + sw.gcy * cellPx;
+      const maxR = sw.radiusCells * cellPx;
       const rad = maxR * t;
       const { r: R, g: G, b: B } = hexToRgb(sw.color.startsWith("#") ? sw.color : "#ff8866");
       ctx.strokeStyle = `rgba(${R},${G},${B},${0.45 * (1 - t)})`;
@@ -257,34 +304,33 @@ export function createBoardVfx(canvas) {
       ctx.beginPath();
       ctx.arc(sx, sy, rad, 0, Math.PI * 2);
       ctx.stroke();
-      return true;
-    });
+    }
 
-    bolts = bolts.filter((b) => {
+    for (let i = 0; i < bolts.length; i++) {
+      const b = bolts[i];
       const age = now - b.t0;
-      if (age > 500) return false;
       const fade = 1 - age / 500;
       ctx.strokeStyle = `rgba(200, 230, 255, ${0.85 * fade})`;
       ctx.lineWidth = 2;
       ctx.shadowColor = "#a5d8ff";
       ctx.shadowBlur = 14 * fade;
-      for (const s of b.segments) {
-        const sx1 = transform.offsetX + s.gx1 * c;
-        const sy1 = transform.offsetY + s.gy1 * c;
-        const sx2 = transform.offsetX + s.gx2 * c;
-        const sy2 = transform.offsetY + s.gy2 * c;
+      for (let j = 0; j < b.segments.length; j++) {
+        const s = b.segments[j];
+        const sx1 = transform.offsetX + s.gx1 * cellPx;
+        const sy1 = transform.offsetY + s.gy1 * cellPx;
+        const sx2 = transform.offsetX + s.gx2 * cellPx;
+        const sy2 = transform.offsetY + s.gy2 * cellPx;
         ctx.beginPath();
         ctx.moveTo(sx1, sy1);
         ctx.lineTo(sx2, sy2);
         ctx.stroke();
       }
       ctx.shadowBlur = 0;
-      return true;
-    });
+    }
 
-    shields = shields.filter((s) => {
+    for (let i = 0; i < shields.length; i++) {
+      const s = shields[i];
       const age = now - s.t0;
-      if (age > 900) return false;
       const t = age / 900;
       const { x, y, cell } = gridToScreen(s.gx, s.gy, transform);
       const rr = cell * 0.65 * (1 + t * 0.5);
@@ -292,35 +338,80 @@ export function createBoardVfx(canvas) {
       ctx.strokeStyle = m ? `rgba(${m[1]},${m[2]},${m[3]},${0.5 * (1 - t)})` : s.color;
       ctx.lineWidth = 3;
       ctx.beginPath();
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2 + t * 0.8;
+      for (let k = 0; k < 6; k++) {
+        const a = (k / 6) * Math.PI * 2 + t * 0.8;
         const px = x + Math.cos(a) * rr;
         const py = y + Math.sin(a) * rr;
-        if (i === 0) ctx.moveTo(px, py);
+        if (k === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       }
       ctx.closePath();
       ctx.stroke();
       ctx.fillStyle = m ? `rgba(${m[1]},${m[2]},${m[3]},${0.12 * (1 - t)})` : s.color;
       ctx.fill();
-      return true;
-    });
+    }
 
-    zoneFlashes = zoneFlashes.filter((z) => {
+    for (let i = 0; i < zoneFlashes.length; i++) {
+      const z = zoneFlashes[i];
       const age = now - z.t0;
-      if (age > 500) return false;
       const t = age / 500;
-      const x = transform.offsetX + z.gx * c;
-      const y = transform.offsetY + z.gy * c;
-      const side = c * z.n;
+      const x = transform.offsetX + z.gx * cellPx;
+      const y = transform.offsetY + z.gy * cellPx;
+      const side = cellPx * z.n;
       const zm = /rgba\((\d+),(\d+),(\d+),/.exec(z.color);
       ctx.fillStyle = zm ? `rgba(${zm[1]},${zm[2]},${zm[3]},${0.4 * (1 - t)})` : z.color;
       ctx.fillRect(x, y, side, side);
       ctx.strokeStyle = `rgba(255,255,255,${0.5 * (1 - t)})`;
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, side, side);
-      return true;
-    });
+    }
+  }
+
+  function render(now, transform) {
+    const bw = canvas.width | 0;
+    const bh = canvas.height | 0;
+    const dprGuess = bw / Math.max(1, canvas.clientWidth || bw);
+    const dpr =
+      typeof transform.dpr === "number" && transform.dpr > 0 ? transform.dpr : dprGuess;
+
+    const cellPx = transform.BASE_CELL * transform.scale;
+
+    /* 1–2: identity + полная зачистка bitmap */
+    wipeBitmapIdentity(ctx, bw, bh);
+
+    /* 3 + 5: сначала убрать мёртвое и сдвинуть частицы в world; списки — только активные */
+    pruneExpiredAndIntegrate(now, cellPx);
+
+    /* 4: матрица отрисовки (логические px карты) */
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = "transparent";
+    ctx.filter = "none";
+    ctx.imageSmoothingEnabled = false;
+
+    /* 5 (продолжение): только активные, world → screen этим кадром */
+    paintActiveEffects(now, transform, cellPx);
+
+    if (VFX_DEBUG) {
+      const n =
+        ripples.length +
+        particles.length +
+        beams.length +
+        shockwaves.length +
+        bolts.length +
+        shields.length +
+        zoneFlashes.length;
+      if (n > 0) {
+        console.log("[vfxdebug]", {
+          active: n,
+          bitmap: `${bw}x${bh}`,
+          dpr,
+          cam: { ox: transform.offsetX, oy: transform.offsetY, sc: transform.scale },
+        });
+      }
+    }
   }
 
   function hasWork() {

@@ -265,6 +265,9 @@ let mapWheelActive = false;
 let canvasFrameRafId = 0;
 let mapWheelEndTimer = 0;
 
+/** DPR слоя карты / board-vfx (обновляется в resizeCanvas) — для VFX после жёсткого reset контекста. */
+let boardVfxDpr = 1;
+
 /** Следующий кадр: полный проход видимой области (true) или только dirtyRect (false). */
 let pendingRedrawFull = false;
 /** @type {{ gx0: number, gy0: number, gx1: number, gy1: number } | null} */
@@ -534,7 +537,7 @@ function hexToRgb(hex) {
 }
 
 function getVfxTransform() {
-  return { offsetX, offsetY, scale, gridW, gridH, BASE_CELL };
+  return { offsetX, offsetY, scale, gridW, gridH, BASE_CELL, dpr: boardVfxDpr };
 }
 
 function paletteIndexForHex(hex) {
@@ -3521,6 +3524,7 @@ function resizeCanvas() {
   const h = Math.max(1, Math.round(rect.height));
   const bw = Math.max(1, Math.round(w * dpr));
   const bh = Math.max(1, Math.round(h * dpr));
+  boardVfxDpr = dpr;
   canvas.width = bw;
   canvas.height = bh;
   canvas.style.width = `${w}px`;

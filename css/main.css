@@ -715,8 +715,8 @@ body {
   padding: 16px;
   padding-top: calc(16px + var(--safe-top));
   padding-bottom: calc(16px + var(--safe-bottom));
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(6px);
+  background: rgba(0, 0, 0, 0.78);
+  /* Без backdrop-filter: в Telegram WebView размытие часто «тянется» на область карты под модалками */
 }
 
 .overlay[hidden] {
@@ -1246,6 +1246,7 @@ body {
 .board-vfx {
   position: absolute;
   inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
   pointer-events: none;
@@ -1302,51 +1303,7 @@ body {
   transform: translate(-50%, -200%) scale(0.88);
 }
 
-/* Только fx-speed (если класс когда-либо включат). Бафф личного восстановления — без полноэкранного слоя:
-   иначе градиент + пульс выглядят как перекрытие/«туман» на половине карты в WebView. */
-.app.fx-speed::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 5;
-  background: linear-gradient(
-    185deg,
-    rgba(120, 200, 255, 0.12) 0%,
-    transparent 38%,
-    rgba(99, 102, 241, 0.05) 100%
-  );
-  animation: fx-speed-pulse 0.45s ease-in-out 5;
-}
-
-@keyframes fx-speed-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 0.85;
-  }
-}
-
-.app.fx-flash::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 5;
-  background: rgba(255, 255, 255, 0.12);
-  animation: fx-flash-once 0.35s ease-out forwards;
-}
-
-@keyframes fx-flash-once {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
+/* Полноэкранные .fx-speed / .fx-flash убраны: в TG WebView давали «туман» на большой площади карты. */
 
 .app.fx-team-boost .toolbar__wallet {
   animation: wallet-pulse-glow 0.9s ease-in-out 2;
@@ -1509,12 +1466,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app.fx-speed::after,
-  .app.fx-flash::after {
-    animation: none;
-    opacity: 0;
-  }
-
   .toolbar__wallet--pulse,
   .app.fx-team-boost .toolbar__wallet,
   .fx-btn-press {
