@@ -16,7 +16,47 @@
   <div class="event-banner-stack" aria-live="polite">
     <div id="event-banner" class="event-banner" hidden role="status"></div>
     <div id="team-buff-banner" class="event-banner event-banner--team" hidden role="status"></div>
+    <div id="territory-drama-banner" class="event-banner event-banner--danger" hidden role="alert"></div>
+    <div
+      id="placement-feedback-banner"
+      class="event-banner event-banner--feedback"
+      hidden
+      role="alert"
+      aria-live="assertive"
+    ></div>
+    <div id="flag-alert-banner" class="event-banner event-banner--flag" hidden role="alert" aria-live="assertive"></div>
   </div>
+
+  <div id="round-start-splash" class="round-start-splash" hidden aria-live="polite">
+    <div class="round-start-splash__panel">
+      <p class="round-start-splash__kicker" id="round-start-splash-kicker"></p>
+      <h2 class="round-start-splash__title" id="round-start-splash-title"></h2>
+    </div>
+  </div>
+
+  <div id="tournament-warmup-overlay" class="tournament-warmup-overlay" hidden>
+    <div class="tournament-warmup-overlay__card">
+      <div class="tournament-warmup-overlay__badge">Разминка 2:00</div>
+      <h2 class="tournament-warmup-overlay__title" id="tournament-warmup-title">Подготовка</h2>
+      <div class="tournament-warmup-overlay__timer" id="tournament-warmup-countdown">—</div>
+      <div class="tournament-warmup-overlay__body" id="tournament-warmup-body"></div>
+      <p class="tournament-warmup-overlay__hint">
+        Пиксели и покупки отключены. Найдите базу 6×6 — бой начнётся по таймеру.
+      </p>
+    </div>
+  </div>
+
+  <div id="round-ended-overlay" class="round-ended-overlay" hidden>
+    <div class="round-ended-overlay__card">
+      <p class="round-ended-overlay__kicker">Раунд завершён</p>
+      <h2 class="round-ended-overlay__title" id="round-ended-winner">Победитель</h2>
+      <p class="round-ended-overlay__score" id="round-ended-score"></p>
+      <div class="round-ended-overlay__board" id="round-ended-board"></div>
+      <p class="round-ended-overlay__next" id="round-ended-next"></p>
+      <button type="button" class="round-ended-overlay__btn" id="round-ended-dismiss">Понятно</button>
+    </div>
+  </div>
+
   <!-- Порядок оверлеев: снизу вверх (последний в DOM — поверх остальных). -->
   <div id="welcome-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings welcome-card">
@@ -98,13 +138,28 @@
   <div id="crisis-overlay" class="overlay crisis-overlay" hidden>
     <div class="overlay__card crisis-overlay__card">
       <h2 class="overlay__title crisis-overlay__title">Команда теряет контроль!</h2>
-      <p class="overlay__hint">Доля территории падает. Откройте магазин: восстановление, командный бафф или масс-захват 6×6.</p>
+      <p class="overlay__hint">Доля очков падает. Откройте магазин: восстановление, командный бафф или масс-захват 6×6.</p>
       <div class="crisis-overlay__actions">
         <button type="button" class="overlay__btn" id="crisis-cta-boost">⚡ Личное восстановление</button>
         <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-team-recovery">👥 Командное восстановление</button>
         <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-raid">💥 Масс-захват 6×6</button>
       </div>
       <button type="button" class="overlay__btn overlay__btn--secondary crisis-overlay__dismiss" id="crisis-dismiss">Позже</button>
+    </div>
+  </div>
+
+  <div id="defeat-overlay" class="overlay defeat-overlay" hidden>
+    <div class="overlay__card defeat-overlay__card">
+      <h2 id="defeat-overlay-title" class="overlay__title defeat-overlay__title">Уничтожено</h2>
+      <p class="overlay__hint defeat-overlay__text" id="defeat-overlay-text"></p>
+      <div class="defeat-overlay__actions" id="defeat-actions-reenter">
+        <button type="button" class="overlay__btn" id="defeat-btn-create">Создать новую команду</button>
+        <button type="button" class="overlay__btn overlay__btn--secondary" id="defeat-btn-join">Вступить в команду</button>
+      </div>
+      <div class="defeat-overlay__actions" id="defeat-actions-spectator" hidden>
+        <p class="overlay__sub defeat-overlay__sub">Дальше доступен только просмотр карты.</p>
+        <button type="button" class="overlay__btn" id="defeat-btn-dismiss">Понятно</button>
+      </div>
     </div>
   </div>
 
@@ -470,7 +525,7 @@
   <div id="app" class="app">
     <aside id="leaderboard-panel" class="leaderboard" hidden aria-label="Рейтинг команд">
       <div class="leaderboard__online">Онлайн: <span id="online-count">0</span></div>
-      <p class="leaderboard__hint">% территории суши.</p>
+      <p class="leaderboard__hint">Счёт и доля доступных очков (не «% карты»).</p>
       <ol id="leaderboard-list" class="leaderboard__list"></ol>
     </aside>
 
@@ -506,6 +561,9 @@
           >💬</a>
           <span id="conn-status" class="toolbar__conn" title="Состояние сети" data-state="local">локально</span>
           <span id="spectator-badge" class="toolbar__spectator" hidden>Наблюдение</span>
+          <button type="button" id="btn-toolbar-base" class="toolbar__btn" hidden title="Показать базу 6×6">
+            🏠 База
+          </button>
           <button type="button" id="btn-toolbar-session" class="toolbar__btn" title="">Сменить команду</button>
           <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
           <div
@@ -524,7 +582,8 @@
         </div>
       </header>
 
-      <main class="stage-wrap">
+      <main class="stage-wrap" id="stage-wrap">
+        <div id="defeat-flash" class="defeat-flash" aria-hidden="true"></div>
         <canvas id="board" class="board" aria-label="Карта мира"></canvas>
         <canvas id="board-vfx" class="board-vfx" aria-hidden="true"></canvas>
         <div id="float-fx" class="float-fx" aria-hidden="true"></div>

@@ -194,6 +194,64 @@ export function createBoardVfx(canvas) {
     });
   }
 
+  /** Взрыв + волны при захвате вражеского флага (все клетки команды переходят атакующему). */
+  function flagCaptureExplosion(gx, gy, attackerColor, defenderColor, transform) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const ac = typeof attackerColor === "string" && attackerColor.startsWith("#") ? attackerColor : "#66ff99";
+    const dc = typeof defenderColor === "string" && defenderColor.startsWith("#") ? defenderColor : "#ff6655";
+    burst(gxi, gyi, ac, transform, 44);
+    burst(gxi, gyi, dc, transform, 28);
+    burst(gxi, gyi, "#ffffff", transform, 18);
+    shockwaves.push({
+      t0: performance.now(),
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 10,
+      color: ac,
+    });
+    shockwaves.push({
+      t0: performance.now() + 90,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 24,
+      color: "rgba(255,220,120,0.4)",
+    });
+    lightningBurst(transform);
+  }
+
+  /** Крупный взрыв при уничтожении команды (эпицентр в координатах сетки). */
+  function defeatExplosion(gx, gy, color, transform) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const col = typeof color === "string" && color.startsWith("#") ? color : "#ff3344";
+    burst(gxi, gyi, col, transform, 62);
+    burst(gxi, gyi, "#ffffff", transform, 22);
+    burst(gxi, gyi, "#ffee88", transform, 14);
+    shockwaves.push({
+      t0: performance.now(),
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 7,
+      color: col,
+    });
+    shockwaves.push({
+      t0: performance.now() + 50,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 12,
+      color: "#ffaa66",
+    });
+    shockwaves.push({
+      t0: performance.now() + 140,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 18,
+      color: "rgba(255,80,40,0.45)",
+    });
+    lightningBurst(transform);
+  }
+
   function countActiveVfx() {
     return (
       ripples.length +
@@ -444,6 +502,8 @@ export function createBoardVfx(canvas) {
     lightningBurst,
     shieldBurst,
     zoneFlash,
+    defeatExplosion,
+    flagCaptureExplosion,
     render,
     hasWork,
   };

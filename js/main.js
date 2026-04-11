@@ -11,6 +11,7 @@ import {
   getEffectiveRecoverySec,
   PRICES_QUANT,
 } from "../lib/tournament-economy.js";
+import { flagCellFromSpawn, FLAG_CAPTURE_HITS_REQUIRED } from "../lib/flag-capture.js";
 
 let gridW = 360;
 let gridH = 360;
@@ -243,6 +244,32 @@ const toolbarBuffPersonalFillEl = document.getElementById("toolbar-buff-personal
 const eventBannerEl = document.getElementById("event-banner");
 const teamBuffBannerEl = document.getElementById("team-buff-banner");
 const crisisOverlayEl = document.getElementById("crisis-overlay");
+const defeatOverlayEl = document.getElementById("defeat-overlay");
+const defeatOverlayTextEl = document.getElementById("defeat-overlay-text");
+const defeatActionsReenterEl = document.getElementById("defeat-actions-reenter");
+const defeatActionsSpectatorEl = document.getElementById("defeat-actions-spectator");
+const defeatBtnCreate = document.getElementById("defeat-btn-create");
+const defeatBtnJoin = document.getElementById("defeat-btn-join");
+const defeatBtnDismiss = document.getElementById("defeat-btn-dismiss");
+const defeatOverlayTitleEl = document.getElementById("defeat-overlay-title");
+const territoryDramaBannerEl = document.getElementById("territory-drama-banner");
+const placementFeedbackBannerEl = document.getElementById("placement-feedback-banner");
+const defeatFlashEl = document.getElementById("defeat-flash");
+const stageWrapEl = document.getElementById("stage-wrap");
+const btnToolbarBase = document.getElementById("btn-toolbar-base");
+const roundStartSplashEl = document.getElementById("round-start-splash");
+const roundStartSplashKickerEl = document.getElementById("round-start-splash-kicker");
+const roundStartSplashTitleEl = document.getElementById("round-start-splash-title");
+const tournamentWarmupOverlayEl = document.getElementById("tournament-warmup-overlay");
+const tournamentWarmupTitleEl = document.getElementById("tournament-warmup-title");
+const tournamentWarmupCountdownEl = document.getElementById("tournament-warmup-countdown");
+const tournamentWarmupBodyEl = document.getElementById("tournament-warmup-body");
+const roundEndedOverlayEl = document.getElementById("round-ended-overlay");
+const roundEndedWinnerEl = document.getElementById("round-ended-winner");
+const roundEndedScoreEl = document.getElementById("round-ended-score");
+const roundEndedBoardEl = document.getElementById("round-ended-board");
+const roundEndedNextEl = document.getElementById("round-ended-next");
+const roundEndedDismissBtn = document.getElementById("round-ended-dismiss");
 const btnDeposit = document.getElementById("btn-deposit");
 const btnShop = document.getElementById("btn-shop");
 const depositOverlay = document.getElementById("deposit-overlay");
@@ -288,6 +315,35 @@ let scale = 1;
 let offsetX = 0;
 let offsetY = 0;
 let lastPlaceAt = 0;
+/** Подсветка базы + стрелка после входа в команду (мс по Date.now()). */
+let teamSpawnOnboardUntil = 0;
+/** Таймер скрытия подсказки у базы */
+let teamSpawnHintTimer = 0;
+/** Задержка перед оверлеем поражения (мс): время на VFX взрыва. */
+const TEAM_DEFEAT_UI_DELAY_MS = 780;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let teamDefeatUiTimer = null;
+/** Повторная подсветка базы и стрелки после неверного клика. */
+let baseReminderUntil = 0;
+/** Красная пульсация оставшейся территории (мало клеток). */
+let myTerritoryDangerUntil = 0;
+/** Сильная пульсация при одной клетке. */
+let myTerritoryLastCellUntil = 0;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let territoryBannerHideTimer = null;
+/** Скрытие баннера отклонённого действия (всегда видимый фидбек, не только Telegram). */
+/** @type {ReturnType<typeof setTimeout> | null} */
+let placementFeedbackHideTimer = null;
+/** Дедуп взрыва при teamEliminated (сервер шлёт участникам дважды). */
+let lastTeamElimVfxKey = "";
+let lastTeamElimVfxAt = 0;
+
+const INVALID_PLACEMENT_HINTS = [
+  "Ставьте пиксели только рядом с территорией команды (включая диагональ).",
+  "Начните с базы 6×6 и расширяйтесь от соседних клеток.",
+  "Сюда пока нельзя — сначала захватите клетку рядом со своей территорией.",
+  "Расширяйтесь только от клеток, которые касаются вашей команды.",
+];
 
 /** Пан/щипок: упрощённая отрисовка + coalescing в rAF. */
 let mapInteractionActive = false;
@@ -447,6 +503,8 @@ let maxPerTeam = 200;
 let spectatorMode = false;
 /** Время окончания текущего раунда (мс, Date.now()); null — ожидание старта 1-го раунда по «go» */
 let roundEndsAtMs = null;
+/** Когда включаются пиксели (конец 2-мин разминки); null — нет отдельной фазы */
+let playStartsAtMs = null;
 let roundIndexMeta = 0;
 /** С сервера: игра полностью завершена (финал) */
 let gameFinishedMeta = false;
@@ -458,7 +516,12 @@ let pendingLeaveToCreate = false;
 /** Экономика с сервера */
 let walletState = null;
 let lastStatsGlobalEvent = null;
-let lastMyTeamPercent = null;
+/** Доля доступных очков (score share), для кризис-оверлея при просадке. */
+let lastMyTeamScoreShare = null;
+/** Прогресс захвата флага по защищающейся команде: teamId → { progress, attackerTeamId }. */
+let flagCaptureClientState = new Map();
+/** До какого времени показывать пульс/тревогу по своему флагу. */
+let myFlagUnderAttackUntil = 0;
 let crisisCooldownUntil = 0;
 /** Ожидание тапа по карте: зона 4×4 или 6×6 */
 let pendingMapAction = null;
@@ -515,6 +578,256 @@ function isClientLandCell(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
   if (!regionCells || regionCells.length !== gridW * gridH) return true;
   return regionCells[y * gridW + x] !== 0;
+}
+
+function clientPixelTeamIdAt(x, y) {
+  const v = pixels.get(`${x},${y}`);
+  if (v === undefined) return null;
+  return typeof v === "number" ? v : v.teamId;
+}
+
+/** 8-соседство: есть ли рядом пиксель той же команды (как на сервере). */
+function cellTouchesTeamTerritoryClient(x, y, teamId) {
+  if (teamId == null) return false;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
+      if (clientPixelTeamIdAt(nx, ny) === teamId) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Клетки из keyStrings, достижимые от текущей территории команды через цепочку внутри множества (8-связность).
+ * Совпадает с логикой filterPlannedReachableFromTeam на сервере для покупок зон.
+ */
+function filterClientKeysReachableFromTeam(keyStrings, teamId) {
+  const inSet = new Set(keyStrings);
+  const seen = new Set();
+  const queue = [];
+  for (const k of keyStrings) {
+    const parts = k.split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (cellTouchesTeamTerritoryClient(x, y, teamId) && !seen.has(k)) {
+      seen.add(k);
+      queue.push(k);
+    }
+  }
+  while (queue.length) {
+    const k = queue.pop();
+    const parts = k.split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nk = `${x + dx},${y + dy}`;
+        if (!inSet.has(nk) || seen.has(nk)) continue;
+        seen.add(nk);
+        queue.push(nk);
+      }
+    }
+  }
+  return keyStrings.filter((kk) => seen.has(kk));
+}
+
+function getMyTeamSpawn() {
+  if (myTeamId == null || !teamsMeta) return null;
+  const t = teamsMeta.find((x) => x.id === myTeamId);
+  const s = t?.spawn;
+  if (!s || typeof s.x0 !== "number" || typeof s.y0 !== "number") return null;
+  const w = typeof s.w === "number" ? s.w : 6;
+  const h = typeof s.h === "number" ? s.h : 6;
+  return { x0: s.x0, y0: s.y0, w, h };
+}
+
+const TEAM_SPAWN_ONBOARD_MS = 9000;
+
+function focusCameraOnTeamSpawn(spawn) {
+  if (!spawn) return;
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+  if (cw < 32 || ch < 32) return;
+  const targetScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, 2.4));
+  scale = targetScale;
+  const cell = BASE_CELL * scale;
+  const cx = spawn.x0 + spawn.w / 2;
+  const cy = spawn.y0 + spawn.h / 2;
+  offsetX = cw / 2 - cx * cell;
+  offsetY = ch / 2 - cy * cell;
+  pendingRedrawFull = true;
+  scheduleDraw();
+}
+
+function triggerDefeatScreenFlash() {
+  if (!defeatFlashEl) return;
+  const run = () => {
+    defeatFlashEl.classList.remove("defeat-flash--on");
+    void defeatFlashEl.offsetWidth;
+    defeatFlashEl.classList.add("defeat-flash--on");
+  };
+  run();
+  setTimeout(() => defeatFlashEl.classList.remove("defeat-flash--on"), 450);
+  setTimeout(run, 220);
+  setTimeout(() => defeatFlashEl.classList.remove("defeat-flash--on"), 900);
+}
+
+function hidePlacementFeedbackBanner() {
+  if (placementFeedbackHideTimer) {
+    clearTimeout(placementFeedbackHideTimer);
+    placementFeedbackHideTimer = null;
+  }
+  if (placementFeedbackBannerEl) {
+    placementFeedbackBannerEl.hidden = true;
+    placementFeedbackBannerEl.classList.remove(
+      "event-banner--feedback-warn",
+      "event-banner--feedback-error"
+    );
+  }
+  if (cooldownLabel) {
+    cooldownLabel.classList.remove("toolbar__cooldown--alert");
+    setPendingHint();
+  }
+}
+
+/**
+ * Явный фидбек по отклонённым действиям: полоска под статусом + тактильный отклик; не полагаемся только на Telegram alert.
+ * @param {"warn"|"error"} severity
+ * @param {{ telegramAlert?: boolean }} opts
+ */
+function showPlacementFeedback(text, severity, opts = {}) {
+  const telegramAlert = opts.telegramAlert === true;
+  if (placementFeedbackBannerEl && text) {
+    placementFeedbackBannerEl.textContent = text;
+    placementFeedbackBannerEl.hidden = false;
+    placementFeedbackBannerEl.classList.toggle("event-banner--feedback-warn", severity === "warn");
+    placementFeedbackBannerEl.classList.toggle("event-banner--feedback-error", severity === "error");
+    if (placementFeedbackHideTimer) clearTimeout(placementFeedbackHideTimer);
+    placementFeedbackHideTimer = setTimeout(() => {
+      placementFeedbackHideTimer = null;
+      hidePlacementFeedbackBanner();
+    }, 5600);
+  }
+  if (cooldownLabel && text) {
+    cooldownLabel.hidden = false;
+    cooldownLabel.textContent = text;
+    cooldownLabel.classList.add("toolbar__cooldown--alert");
+    cooldownLabel.title = text;
+  }
+  const tg = window.Telegram?.WebApp;
+  try {
+    if (severity === "error" && tg?.HapticFeedback?.notificationOccurred) {
+      tg.HapticFeedback.notificationOccurred("error");
+    } else if (tg?.HapticFeedback?.notificationOccurred) {
+      tg.HapticFeedback.notificationOccurred("warning");
+    }
+  } catch {
+    /* ignore */
+  }
+  if (telegramAlert && typeof tg?.showAlert === "function") {
+    tg.showAlert(text);
+  }
+}
+
+function triggerMapShake(ms = 560) {
+  if (!stageWrapEl) return;
+  stageWrapEl.classList.remove("map-shake");
+  void stageWrapEl.offsetWidth;
+  stageWrapEl.classList.add("map-shake");
+  setTimeout(() => stageWrapEl.classList.remove("map-shake"), ms);
+}
+
+function showTerritoryDramaBanner(text, durationMs = 3200, critical = false) {
+  if (!territoryDramaBannerEl) return;
+  territoryDramaBannerEl.textContent = text;
+  territoryDramaBannerEl.hidden = false;
+  territoryDramaBannerEl.classList.toggle("event-banner--critical", critical);
+  if (territoryBannerHideTimer) {
+    clearTimeout(territoryBannerHideTimer);
+    territoryBannerHideTimer = null;
+  }
+  territoryBannerHideTimer = setTimeout(() => {
+    territoryDramaBannerEl.hidden = true;
+    territoryDramaBannerEl.classList.remove("event-banner--critical");
+    territoryBannerHideTimer = null;
+  }, durationMs);
+}
+
+function tryPlayTeamEliminationVfx(msg) {
+  const tid = msg.teamId | 0;
+  const gx = Number(msg.destroyGx);
+  const gy = Number(msg.destroyGy);
+  if (!boardVfx || !Number.isFinite(gx) || !Number.isFinite(gy)) return;
+  const key = `${tid}:${gx},${gy}`;
+  const now = Date.now();
+  if (lastTeamElimVfxKey === key && now - lastTeamElimVfxAt < 900) return;
+  lastTeamElimVfxKey = key;
+  lastTeamElimVfxAt = now;
+  boardVfx.defeatExplosion(gx | 0, gy | 0, msg.teamColor || "#ff3344", getVfxTransform());
+}
+
+/**
+ * После ошибки размещения: снова стрелка на базу; опционально — общий текст в шапке.
+ * @param {boolean} [updateCooldownLabel] если false — не трогаем `#cooldown-label` (уже показан точный reason из notifyReject).
+ */
+function remindInvalidPlacementBase(updateCooldownLabel = true) {
+  if (!wantOnline || spectatorMode || myTeamId == null) return;
+  const now = Date.now();
+  baseReminderUntil = now + 7000;
+  teamSpawnOnboardUntil = Math.max(teamSpawnOnboardUntil, now + 5000);
+  if (updateCooldownLabel && cooldownLabel) {
+    cooldownLabel.hidden = false;
+    cooldownLabel.textContent =
+      INVALID_PLACEMENT_HINTS[Math.floor(Math.random() * INVALID_PLACEMENT_HINTS.length)];
+  }
+  scheduleDraw();
+}
+
+function startTeamSpawnOnboarding(spawn) {
+  if (!spawn || spectatorMode) return;
+  try {
+    if (myTeamId != null) {
+      sessionStorage.setItem(`pixel-battle-spawn-onboard:${myTeamId}`, "done");
+    }
+  } catch {
+    /* ignore */
+  }
+  teamSpawnOnboardUntil = Date.now() + TEAM_SPAWN_ONBOARD_MS;
+  if (teamSpawnHintTimer) {
+    clearTimeout(teamSpawnHintTimer);
+    teamSpawnHintTimer = 0;
+  }
+  if (cooldownLabel) {
+    cooldownLabel.hidden = false;
+    cooldownLabel.textContent =
+      "Это ваша база. Начните расширение отсюда — пиксели только рядом с территорией команды (8 направлений).";
+  }
+  teamSpawnHintTimer = window.setTimeout(() => {
+    teamSpawnHintTimer = 0;
+    if (Date.now() >= teamSpawnOnboardUntil - 80 && cooldownLabel) {
+      cooldownLabel.hidden = true;
+    }
+  }, TEAM_SPAWN_ONBOARD_MS);
+}
+
+/** Первый full после переподключения: показать базу, если ещё не показывали в этой вкладке. */
+function maybeOnboardSpawnAfterFull() {
+  if (!wantOnline || spectatorMode || myTeamId == null) return;
+  try {
+    if (sessionStorage.getItem(`pixel-battle-spawn-onboard:${myTeamId}`) === "done") return;
+  } catch {
+    return;
+  }
+  const sp = getMyTeamSpawn();
+  if (!sp) return;
+  focusCameraOnTeamSpawn(sp);
+  startTeamSpawnOnboarding(sp);
 }
 
 /** Вода по маске карты (только если regions загружены). */
@@ -716,6 +1029,149 @@ function tryClaimEligibility() {
   );
 }
 
+/** Тексты панели разминки / сплэша по roundIndex (0..3). */
+const TOURNAMENT_ROUND_COPY = [
+  {
+    title: "РАУНД 1 — МАССОВАЯ БИТВА",
+    splashKicker: "МАССОВАЯ БИТВА",
+    splashTitle: "РАУНД 1 СТАРТОВАЛ",
+    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li>После части раунда: <strong>флаг в центре базы</strong> — 20 ударов по клетке флага захватывают всю команду</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
+  },
+  {
+    title: "РАУНД 2 — КОМАНДНЫЙ БОЙ",
+    splashKicker: "КОМАНДНЫЙ БОЙ",
+    splashTitle: "РАУНД 2 СТАРТОВАЛ",
+    bodyHtml: `<ul><li>До <strong>10</strong> игроков в команде</li><li>Бой: <strong>5 ч</strong></li><li>Цель: максимальный счёт</li><li>Дальше проходит только <strong>одна</strong> победившая команда</li></ul>`,
+  },
+  {
+    title: "РАУНД 3 — ПАРЫ",
+    splashKicker: "СТАДИЯ ПАР",
+    splashTitle: "РАУНД 3 СТАРТОВАЛ",
+    bodyHtml: `<ul><li>Команды по <strong>2</strong> игрока</li><li>Бой: <strong>4 ч</strong></li><li>Счёт и захват как раньше</li><li>Дальше проходит только <strong>одна пара</strong></li></ul>`,
+  },
+  {
+    title: "ФИНАЛ — 1 НА 1",
+    splashKicker: "ДУЭЛЬ",
+    splashTitle: "ФИНАЛ СТАРТОВАЛ",
+    bodyHtml: `<ul><li><strong>2</strong> игрока, бой <strong>75 мин</strong></li><li>Без донатов и бустов — только скилл</li><li>Победа: больший счёт <strong>или</strong> ≥60% всех доступных очков на карте мгновенно</li></ul>`,
+  },
+];
+
+function tournamentRoundCopy(ri) {
+  const i = Math.min(Math.max(ri | 0, 0), 3);
+  return TOURNAMENT_ROUND_COPY[i] || TOURNAMENT_ROUND_COPY[0];
+}
+
+function isClientWarmupPhase() {
+  if (!wantOnline || !getWsUrl() || gameFinishedMeta || spectatorMode) return false;
+  if (playStartsAtMs == null || Number.isNaN(playStartsAtMs)) return false;
+  if (roundIndexMeta === 0 && roundEndsAtMs == null) return false;
+  return Date.now() < playStartsAtMs;
+}
+
+function syncTournamentWarmupOverlay() {
+  if (!tournamentWarmupOverlayEl) return;
+  const show =
+    wantOnline &&
+    getWsUrl() &&
+    !gameFinishedMeta &&
+    !spectatorMode &&
+    isClientWarmupPhase();
+  tournamentWarmupOverlayEl.hidden = !show;
+  if (tournamentWarmupTitleEl) {
+    tournamentWarmupTitleEl.textContent = tournamentRoundCopy(roundIndexMeta).title;
+  }
+  if (tournamentWarmupBodyEl) {
+    tournamentWarmupBodyEl.innerHTML = tournamentRoundCopy(roundIndexMeta).bodyHtml;
+  }
+  if (show && playStartsAtMs != null) {
+    const left = Math.max(0, playStartsAtMs - Date.now());
+    const s = Math.ceil(left / 1000);
+    const mm = Math.floor(s / 60);
+    const ss = s % 60;
+    if (tournamentWarmupCountdownEl) {
+      tournamentWarmupCountdownEl.textContent = `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} до боя`;
+    }
+    if (myTeamId != null) {
+      const until = playStartsAtMs;
+      teamSpawnOnboardUntil = Math.max(teamSpawnOnboardUntil, until);
+      baseReminderUntil = Math.max(baseReminderUntil, until);
+      scheduleDraw();
+    }
+  }
+}
+
+function showRoundStartSplash(roundIdx) {
+  if (!roundStartSplashEl || !roundStartSplashTitleEl) return;
+  const c = tournamentRoundCopy(roundIdx);
+  if (roundStartSplashKickerEl) roundStartSplashKickerEl.textContent = c.splashKicker;
+  roundStartSplashTitleEl.textContent = c.splashTitle;
+  roundStartSplashEl.hidden = false;
+  roundStartSplashEl.classList.remove("round-start-splash--in");
+  void roundStartSplashEl.offsetWidth;
+  roundStartSplashEl.classList.add("round-start-splash--in");
+  window.setTimeout(() => {
+    roundStartSplashEl.classList.remove("round-start-splash--in");
+    roundStartSplashEl.hidden = true;
+  }, 2600);
+}
+
+function hideRoundEndedOverlay() {
+  if (roundEndedOverlayEl) roundEndedOverlayEl.hidden = true;
+}
+
+function showRoundEndedOverlay(msg) {
+  if (!roundEndedOverlayEl) return;
+  const name = msg.winnerName || "—";
+  if (roundEndedWinnerEl) {
+    roundEndedWinnerEl.textContent = `Победитель: «${name}»`;
+  }
+  const sc = typeof msg.winnerScore === "number" ? msg.winnerScore : null;
+  const pc =
+    typeof msg.winnerScoreSharePercent === "number"
+      ? msg.winnerScoreSharePercent
+      : typeof msg.winnerPercent === "number"
+        ? msg.winnerPercent
+        : null;
+  if (roundEndedScoreEl) {
+    const parts = [];
+    if (sc != null) parts.push(`Счёт: ${sc} оч.`);
+    if (pc != null) parts.push(`Доля очков: ${pc.toFixed(2)}%`);
+    roundEndedScoreEl.textContent = parts.length ? parts.join(" · ") : "";
+    roundEndedScoreEl.hidden = parts.length === 0;
+  }
+  if (roundEndedBoardEl) {
+    const rows = Array.isArray(msg.topTeams) ? msg.topTeams : [];
+    if (rows.length === 0) {
+      roundEndedBoardEl.innerHTML = "<p class=\"round-ended-overlay__next\" style=\"margin:0\">Таблица недоступна.</p>";
+    } else {
+      roundEndedBoardEl.innerHTML = rows
+        .map(
+          (r) =>
+            `<div class="round-ended-overlay__row"><span>#${r.rank} ${r.emoji || ""} ${escapeHtml(String(r.name || ""))}</span><span>${typeof r.score === "number" ? r.score : "—"} оч.</span></div>`
+        )
+        .join("");
+    }
+  }
+  const nextRi = typeof msg.roundIndex === "number" ? msg.roundIndex : roundIndexMeta;
+  const cap = typeof msg.maxPerTeam === "number" ? msg.maxPerTeam : maxPerTeam;
+  const stageNum = nextRi + 1;
+  if (roundEndedNextEl) {
+    roundEndedNextEl.textContent = msg.duel
+      ? `Дальше — финал 1×1 (этап ${stageNum} из 4). Карта меньше, в «команде» до ${cap} чел. Сначала снова разминка 2 мин.`
+      : `Следующий этап уже запущен: раунд ${stageNum} из 4, до ${cap} игроков в команде. Снова 2 мин разминки, затем бой.`;
+  }
+  roundEndedOverlayEl.hidden = false;
+}
+
+function escapeHtml(s) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function updateRoundTimer() {
   if (!roundTimerEl) return;
   try {
@@ -731,23 +1187,34 @@ function updateRoundTimer() {
     if (roundEndsAtMs == null && roundIndexMeta === 0) {
       roundTimerEl.hidden = false;
       roundTimerEl.textContent = "Ожидание старта\n«go» в боте";
+      syncTournamentWarmupOverlay();
       return;
     }
     if (roundEndsAtMs == null) {
       roundTimerEl.hidden = true;
+      syncTournamentWarmupOverlay();
       return;
     }
     roundTimerEl.hidden = false;
-    const ms = roundEndsAtMs - Date.now();
-    if (ms <= 0) {
-      roundTimerEl.textContent = "Конец раунда…";
-      return;
+    if (isClientWarmupPhase()) {
+      const wLeft = Math.max(0, (playStartsAtMs || 0) - Date.now());
+      const ws = Math.max(0, Math.ceil(wLeft / 1000));
+      const wm = Math.floor(ws / 60);
+      const wsec = ws % 60;
+      roundTimerEl.textContent = `Разминка ${wm}:${String(wsec).padStart(2, "0")}\nдо боя`;
+    } else {
+      const ms = roundEndsAtMs - Date.now();
+      if (ms <= 0) {
+        roundTimerEl.textContent = "Конец раунда…";
+      } else {
+        const s = Math.floor(ms / 1000);
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        roundTimerEl.textContent = h > 0 ? `Бой ${h}ч ${m}м` : m > 0 ? `Бой ${m}м ${sec}с` : `Бой ${sec}с`;
+      }
     }
-    const s = Math.floor(ms / 1000);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-    roundTimerEl.textContent = h > 0 ? `${h}ч ${m}м` : m > 0 ? `${m}м ${sec}с` : `${sec}с`;
+    syncTournamentWarmupOverlay();
   } finally {
     syncEventBanner();
     syncTeamBuffBanner();
@@ -823,6 +1290,9 @@ function setFooterMode() {
     teamBadgeColorEl.hidden = !showSwatch;
   }
   if (online && joined) updateTeamBadge();
+  if (btnToolbarBase) {
+    btnToolbarBase.hidden = !online || !joined || spectatorMode;
+  }
   refreshToolbarSessionButton();
   updateWalletBar();
   renderQuickBuyRail();
@@ -911,20 +1381,38 @@ function renderLeaderboard(msg) {
     setCompactTeamName(name, row.name || "");
     const meta = document.createElement("div");
     meta.className = "leaderboard__meta";
-    const pct = typeof row.percent === "number" ? row.percent : 0;
+    const share =
+      typeof row.scoreSharePercent === "number"
+        ? row.scoreSharePercent
+        : typeof row.percent === "number"
+          ? row.percent
+          : 0;
     const players = typeof row.players === "number" ? row.players : 0;
-    meta.textContent = `${formatPercent(pct)}% территории · ${players} чел.`;
+    const sc = typeof row.score === "number" ? row.score : null;
+    const behind =
+      typeof row.pointsBehindLeader === "number" && row.rank > 1 && row.pointsBehindLeader > 0
+        ? ` · −${Math.round(row.pointsBehindLeader * 1000) / 1000} до лидера по очкам`
+        : "";
+    meta.textContent =
+      sc != null
+        ? `Очки ${sc} · доля очков ${formatPercent(share)}%${behind} · ${players} чел.`
+        : `Доля очков ${formatPercent(share)}% · ${players} чел.`;
     li.append(top, name, meta);
     leaderboardListEl.appendChild(li);
   }
   if (myTeamId != null && !spectatorMode && !gameFinishedMeta) {
     const mine = (msg.rows || []).find((r) => r.teamId === myTeamId);
-    const pct = mine && typeof mine.percent === "number" ? mine.percent : 0;
-    if (lastMyTeamPercent != null && pct < lastMyTeamPercent - 1.5 && Date.now() > crisisCooldownUntil) {
+    const share =
+      mine && typeof mine.scoreSharePercent === "number"
+        ? mine.scoreSharePercent
+        : mine && typeof mine.percent === "number"
+          ? mine.percent
+          : 0;
+    if (lastMyTeamScoreShare != null && share < lastMyTeamScoreShare - 1.5 && Date.now() > crisisCooldownUntil) {
       crisisCooldownUntil = Date.now() + 120000;
       showCrisisOverlay();
     }
-    lastMyTeamPercent = pct;
+    lastMyTeamScoreShare = share;
   }
 }
 
@@ -1000,7 +1488,7 @@ function rebuildTeamList() {
   teamListEl.innerHTML = "";
   if (!teamsMeta) return;
   for (const t of teamsMeta) {
-    if (t.solo) continue;
+    if (t.solo || t.eliminated) continue;
     const cnt = teamCounts[t.id] ?? 0;
     const full = cnt >= maxPerTeam;
     const btn = document.createElement("button");
@@ -1188,6 +1676,46 @@ function showCrisisOverlay() {
 
 function hideCrisisOverlay() {
   if (crisisOverlayEl) crisisOverlayEl.hidden = true;
+}
+
+function hideDefeatOverlay() {
+  if (defeatOverlayEl) defeatOverlayEl.hidden = true;
+}
+
+function cancelTeamDefeatUiTimer() {
+  if (teamDefeatUiTimer) {
+    clearTimeout(teamDefeatUiTimer);
+    teamDefeatUiTimer = null;
+  }
+}
+
+/**
+ * @param {boolean} canReenter — раунд 0: можно снова создать/вступить в команду
+ */
+function scheduleTeamDefeatOverlay(canReenter) {
+  cancelTeamDefeatUiTimer();
+  if (!defeatOverlayEl || !defeatOverlayTextEl) return;
+  teamDefeatUiTimer = setTimeout(() => {
+    teamDefeatUiTimer = null;
+    hideCrisisOverlay();
+    hideReferralSplash();
+    hidePlacementFeedbackBanner();
+    if (defeatOverlayTitleEl) {
+      defeatOverlayTitleEl.textContent = "Команда уничтожена";
+    }
+    const base =
+      "Вы проиграли. Ваша команда потеряла всю территорию и уничтожена.";
+    if (canReenter) {
+      defeatOverlayTextEl.textContent = `${base}\n\nВы можете создать новую команду или вступить в другую.`;
+      if (defeatActionsReenterEl) defeatActionsReenterEl.hidden = false;
+      if (defeatActionsSpectatorEl) defeatActionsSpectatorEl.hidden = true;
+    } else {
+      defeatOverlayTextEl.textContent = `${base}\n\nВы выбыли из этого раунда.`;
+      if (defeatActionsReenterEl) defeatActionsReenterEl.hidden = true;
+      if (defeatActionsSpectatorEl) defeatActionsSpectatorEl.hidden = false;
+    }
+    defeatOverlayEl.hidden = false;
+  }, TEAM_DEFEAT_UI_DELAY_MS);
 }
 
 function syncCreateEmojiPresetHighlight() {
@@ -1400,6 +1928,33 @@ function setupCreateTeamUi() {
   crisisOverlayEl?.addEventListener("click", (e) => {
     if (e.target === crisisOverlayEl) hideCrisisOverlay();
   });
+  defeatBtnCreate?.addEventListener("click", () => {
+    hideDefeatOverlay();
+    openCreateTeamOverlay(true);
+  });
+  defeatBtnJoin?.addEventListener("click", () => {
+    hideDefeatOverlay();
+    if (teamOverlay) teamOverlay.hidden = false;
+  });
+  defeatBtnDismiss?.addEventListener("click", hideDefeatOverlay);
+  defeatOverlayEl?.addEventListener("click", (e) => {
+    if (e.target === defeatOverlayEl) hideDefeatOverlay();
+  });
+  roundEndedDismissBtn?.addEventListener("click", hideRoundEndedOverlay);
+  btnToolbarBase?.addEventListener("click", () => {
+    const sp = getMyTeamSpawn();
+    if (!sp) return;
+    focusCameraOnTeamSpawn(sp);
+    const now = Date.now();
+    baseReminderUntil = now + 6500;
+    teamSpawnOnboardUntil = Math.max(teamSpawnOnboardUntil, now + 4500);
+    if (cooldownLabel) {
+      cooldownLabel.hidden = false;
+      cooldownLabel.textContent =
+        "База 6×6 — расширяйтесь только на соседние клетки (включая диагональ).";
+    }
+    scheduleDraw();
+  });
 }
 
 function syncEmojiPresetHighlight() {
@@ -1499,11 +2054,18 @@ function onMeta(msg) {
 
   teamsMeta = msg.teams || [];
   invalidateTeamColorByIdCache();
+  syncFlagCaptureStateFromMeta(msg.flags);
   teamCounts = msg.teamCounts || {};
   maxPerTeam = msg.maxPerTeam ?? 200;
   gameFinishedMeta = !!msg.gameFinished;
   roundEndsAtMs =
     typeof msg.roundEndsAt === "number" && !Number.isNaN(msg.roundEndsAt) ? msg.roundEndsAt : null;
+  playStartsAtMs =
+    typeof msg.playStartsAt === "number" && !Number.isNaN(msg.playStartsAt)
+      ? msg.playStartsAt
+      : typeof msg.warmupEndsAt === "number" && !Number.isNaN(msg.warmupEndsAt)
+        ? msg.warmupEndsAt
+        : null;
   roundIndexMeta = typeof msg.roundIndex === "number" ? msg.roundIndex : 0;
   spectatorMode = msg.eligible === false || msg.gameFinished === true;
 
@@ -1517,6 +2079,7 @@ function onMeta(msg) {
   applyGridFromServer(gw, gh).then(() => {
     rebuildTeamList();
     updateRoundTimer();
+    syncTournamentWarmupOverlay();
     syncWelcomeForRound();
 
     if (spectatorMode) {
@@ -1530,7 +2093,8 @@ function onMeta(msg) {
     }
 
     const ref = getReferralTeamId();
-    const validRef = ref != null && teamsMeta.some((t) => t.id === ref && !t.solo);
+    const validRef =
+      ref != null && teamsMeta.some((t) => t.id === ref && !t.solo && !t.eliminated);
 
     if (validRef) {
       saveOnlineSession({ teamId: ref, solo: false });
@@ -1578,17 +2142,47 @@ function notifyReject(reason) {
     need_telegram: "Откройте игру из Telegram Mini App (нужна подпись initData).",
     rate_limited: "Слишком много действий подряд. Подождите секунду.",
     same_cell: "Для линии выберите другую клетку — так задаётся направление.",
+    not_adjacent:
+      "Сюда нельзя: ставьте только рядом с территорией команды (8 направлений, с базы 6×6).",
+    already_yours: "Эта клетка уже закрашена вашей командой.",
+    team_eliminated: "Команда уничтожена — территории не осталось.",
+    warmup: "Разминка: пиксели включатся, когда закончится отсчёт 2 минут.",
+    flag_rate: "Захват флага: слишком часто для вашей команды. Подождите мгновение.",
   };
-  const text = map[reason] || reason;
-  const tg = window.Telegram?.WebApp;
-  if (typeof tg?.showAlert === "function") tg.showAlert(text);
-  else {
-    cooldownLabel.hidden = false;
-    cooldownLabel.textContent = text;
-    setTimeout(() => {
-      cooldownLabel.hidden = true;
-    }, 1600);
+  const text = map[reason] || String(reason);
+  const hard =
+    reason === "no_team" ||
+    reason === "spectator" ||
+    reason === "not_eligible" ||
+    reason === "need_telegram" ||
+    reason === "team_eliminated";
+  const telegramAlert = hard && reason !== "team_eliminated";
+  showPlacementFeedback(text, hard ? "error" : "warn", { telegramAlert });
+  if (reason === "not_adjacent") remindInvalidPlacementBase(false);
+}
+
+function syncFlagCaptureStateFromMeta(flags) {
+  flagCaptureClientState = new Map();
+  if (!Array.isArray(flags)) return;
+  for (const f of flags) {
+    if (typeof f.teamId !== "number") continue;
+    flagCaptureClientState.set(f.teamId, {
+      progress: f.progress | 0,
+      attackerTeamId: f.attackerTeamId | 0,
+    });
   }
+}
+
+function showFlagAlertBanner(text) {
+  const el = document.getElementById("flag-alert-banner");
+  if (!el) return;
+  el.textContent = text;
+  el.hidden = false;
+  if (showFlagAlertBanner._hideTimer) clearTimeout(showFlagAlertBanner._hideTimer);
+  showFlagAlertBanner._hideTimer = setTimeout(() => {
+    el.hidden = true;
+    showFlagAlertBanner._hideTimer = null;
+  }, 4800);
 }
 
 function notifyPurchaseError(reason) {
@@ -1602,8 +2196,16 @@ function notifyPurchaseError(reason) {
     "bad request": "Некорректный запрос.",
     rate_limited: "Слишком частые покупки. Подождите несколько секунд.",
     no_playable_land: "В этой зоне нет суши для захвата.",
+    not_adjacent:
+      "Захват возможен только у клеток, соседних с территорией вашей команды (вся зона должна «прикасаться» к базе).",
+    team_eliminated: "Команда выбыла — эти покупки недоступны.",
+    warmup: "Разминка: покупки и бусты после старта боя.",
   };
-  notifyReject(m[reason] || reason);
+  const text = m[reason] || String(reason);
+  const severe =
+    reason === "team_eliminated" || reason === "bad request" || reason === "not available";
+  showPlacementFeedback(text, severe ? "error" : "warn", { telegramAlert: false });
+  if (reason === "not_adjacent") remindInvalidPlacementBase(false);
 }
 
 const ROUND_END_BANNER_MS = 10 * 60 * 1000;
@@ -2913,13 +3515,20 @@ function connectWs() {
       pendingLeaveToCreate = false;
       spectatorMode = true;
       gameFinishedMeta = true;
-      lastMyTeamPercent = null;
+      lastMyTeamScoreShare = null;
       const gw = typeof msg.grid?.w === "number" ? msg.grid.w : 64;
       const gh = typeof msg.grid?.h === "number" ? msg.grid.h : 64;
       applyGridFromServer(gw, gh).then(() => {
         const tg = window.Telegram?.WebApp;
-        const p = typeof msg.percent === "number" ? formatPercent(msg.percent) : "—";
-        const text = `Финал завершён. Победитель: «${msg.winnerName || "—"}» (${p}% территории).`;
+        const share =
+          typeof msg.scoreSharePercent === "number"
+            ? formatPercent(msg.scoreSharePercent)
+            : typeof msg.percent === "number"
+              ? formatPercent(msg.percent)
+              : "—";
+        const ws = typeof msg.winnerScore === "number" ? ` · счёт ${msg.winnerScore} оч.` : "";
+        const text = `Турнир завершён. Победитель: «${msg.winnerName || "—"}» (доля очков ${share}%${ws}). Приз $5000.`;
+        showPlacementFeedback(text, "error", { telegramAlert: true });
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         else if (typeof window.alert === "function") window.alert(text);
         setFooterMode();
@@ -2942,15 +3551,17 @@ function connectWs() {
       closeCreateTeamOverlay();
       pendingLeaveToTeamList = false;
       pendingLeaveToCreate = false;
-      lastMyTeamPercent = null;
+      lastMyTeamScoreShare = null;
       const gw = typeof msg.grid?.w === "number" ? msg.grid.w : gridW;
       const gh = typeof msg.grid?.h === "number" ? msg.grid.h : gridH;
       applyGridFromServer(gw, gh).then(() => {
+        showRoundEndedOverlay(msg);
         const tg = window.Telegram?.WebApp;
         const cap = typeof msg.maxPerTeam === "number" ? msg.maxPerTeam : maxPerTeam;
         const text = msg.duel
-          ? `Финал команд завершён. Победитель: «${msg.winnerName || "—"}». Дуэль 1 на 1 на той же сетке; в команде до ${cap} чел.`
-          : `Раунд завершён. Победитель: «${msg.winnerName || "—"}». Новая карта; в команде до ${cap} чел.`;
+          ? `Раунд завершён. Победитель: «${msg.winnerName || "—"}». Дальше дуэль 1×1, в команде до ${cap}.`
+          : `Раунд завершён. Победитель: «${msg.winnerName || "—"}». Следующий этап — до ${cap} в команде.`;
+        showPlacementFeedback(text, "warn", { telegramAlert: false });
         if (typeof tg?.showAlert === "function") tg.showAlert(text);
         else if (typeof window.alert === "function") window.alert(text);
         setFooterMode();
@@ -3022,6 +3633,81 @@ function connectWs() {
       syncTeamBuffBanner();
       return;
     }
+    if (msg.type === "flagCaptureProgress") {
+      const did = msg.defenderTeamId | 0;
+      if (msg.reset) {
+        flagCaptureClientState.delete(did);
+      } else {
+        const p = msg.progress | 0;
+        if (p <= 0) flagCaptureClientState.delete(did);
+        else
+          flagCaptureClientState.set(did, {
+            progress: p,
+            attackerTeamId: msg.attackerTeamId | 0,
+          });
+      }
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "flagCaptureStopped") {
+      flagCaptureClientState.delete(msg.defenderTeamId | 0);
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "flagUnderAttack") {
+      if ((msg.defenderTeamId | 0) === (myTeamId | 0)) {
+        myFlagUnderAttackUntil = Date.now() + 14000;
+        showFlagAlertBanner("ВАШ ФЛАГ ПОД АТАКОЙ");
+      }
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "flagDefendWarn") {
+      if ((msg.defenderTeamId | 0) === (myTeamId | 0)) {
+        myFlagUnderAttackUntil = Date.now() + 16000;
+        const pr = msg.progress | 0;
+        showFlagAlertBanner(`Флаг: ${pr} / ${FLAG_CAPTURE_HITS_REQUIRED} — отбивайте базу!`);
+      }
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "flagCaptured") {
+      const aid = msg.attackerTeamId | 0;
+      const did = msg.defenderTeamId | 0;
+      flagCaptureClientState.delete(did);
+      for (const [k, v] of [...pixels.entries()]) {
+        const tid = typeof v === "number" ? v : v.teamId;
+        if ((tid | 0) === did) {
+          pixels.set(k, { teamId: aid, ownerPlayerKey: "", shieldedUntil: 0 });
+        }
+      }
+      if (boardVfx) {
+        const tr = getVfxTransform();
+        boardVfx.flagCaptureExplosion(
+          msg.gx | 0,
+          msg.gy | 0,
+          msg.attackerColor,
+          msg.defenderColor,
+          tr
+        );
+        flushBoardVfxFrame();
+        requestAnimationFrame(() => flushBoardVfxFrame());
+      }
+      const an = teamsMeta?.find((x) => x.id === aid)?.name || "атакующие";
+      const dn = teamsMeta?.find((x) => x.id === did)?.name || "защита";
+      showPlacementFeedback(`ФЛАГ ЗАХВАЧЕН. Команда «${dn}» проиграла — территория у «${an}».`, "error", {
+        telegramAlert: true,
+      });
+      scheduleDraw({ full: true });
+      schedulePersist();
+      return;
+    }
+    if (msg.type === "flagHitAck") {
+      const mx = typeof msg.max === "number" ? msg.max : FLAG_CAPTURE_HITS_REQUIRED;
+      showPlacementFeedback(`Захват флага… ${msg.progress | 0}/${mx}`, "warn", { telegramAlert: false });
+      scheduleDraw({ full: true });
+      return;
+    }
     if (msg.type === "stats") {
       renderLeaderboard(msg);
       return;
@@ -3043,9 +3729,20 @@ function connectWs() {
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
       invalidateTeamColorByIdCache();
+      const aliveIds = new Set((teamsMeta || []).map((x) => x.id));
+      for (const id of [...flagCaptureClientState.keys()]) {
+        if (!aliveIds.has(id)) flagCaptureClientState.delete(id);
+      }
+      for (const t of teamsMeta || []) {
+        if (t.solo || t.eliminated || !t.spawn) continue;
+        if (!flagCaptureClientState.has(t.id)) {
+          flagCaptureClientState.set(t.id, { progress: 0, attackerTeamId: 0 });
+        }
+      }
       rebuildTeamList();
       updateTeamBadge();
       cacheTeamDisplayInSession();
+      scheduleDraw({ full: true });
       return;
     }
     if (msg.type === "created") {
@@ -3071,7 +3768,17 @@ function connectWs() {
       setFooterMode();
       schedulePersist();
       showReferralSplash();
-      lastMyTeamPercent = null;
+      lastMyTeamScoreShare = null;
+      {
+        const sp = msg.team?.spawn ?? getMyTeamSpawn();
+        if (sp) {
+          requestAnimationFrame(() => {
+            focusCameraOnTeamSpawn(sp);
+            startTeamSpawnOnboarding(sp);
+            drawFull(performance.now());
+          });
+        }
+      }
       return;
     }
     if (msg.type === "setTeamColorError" || msg.type === "soloColorError") {
@@ -3153,6 +3860,8 @@ function connectWs() {
         fields: "Укажите название и смайлик команды.",
         limit: "Достигнут лимит команд на сервере.",
         duel: "Финальная дуэль 1 на 1 — публичные команды в этот момент недоступны.",
+        spawn_failed:
+          "Не удалось разместить стартовую базу 6×6 на карте (мало места). Попробуйте позже или сообщите администратору.",
       };
       const text = map[msg.reason] || "Не удалось создать команду.";
       const tg = window.Telegram?.WebApp;
@@ -3192,6 +3901,24 @@ function connectWs() {
       stripTeamFromUrl();
       setFooterMode();
       schedulePersist();
+      {
+        const sp =
+          msg.spawn && typeof msg.spawn.x0 === "number" && typeof msg.spawn.y0 === "number"
+            ? {
+                x0: msg.spawn.x0,
+                y0: msg.spawn.y0,
+                w: typeof msg.spawn.w === "number" ? msg.spawn.w : 6,
+                h: typeof msg.spawn.h === "number" ? msg.spawn.h : 6,
+              }
+            : getMyTeamSpawn();
+        if (sp) {
+          requestAnimationFrame(() => {
+            focusCameraOnTeamSpawn(sp);
+            startTeamSpawnOnboarding(sp);
+            drawFull(performance.now());
+          });
+        }
+      }
       return;
     }
     if (msg.type === "soloResumeError") {
@@ -3246,6 +3973,20 @@ function connectWs() {
       /* Уже в команде на сервере (часто после повторного joinTeam при каждом meta — не трогаем UI) */
       if (msg.reason === "already") {
         endSessionRestore();
+        try {
+          if (myTeamId != null && sessionStorage.getItem(`pixel-battle-spawn-onboard:${myTeamId}`) !== "done") {
+            const sp = getMyTeamSpawn();
+            if (sp) {
+              requestAnimationFrame(() => {
+                focusCameraOnTeamSpawn(sp);
+                startTeamSpawnOnboarding(sp);
+                drawFull(performance.now());
+              });
+            }
+          }
+        } catch {
+          /* ignore */
+        }
         return;
       }
       endSessionRestore();
@@ -3273,6 +4014,10 @@ function connectWs() {
       myTeamId = null;
       clearTeamIdentityFromSession();
       stripTeamFromUrl();
+      hidePlacementFeedbackBanner();
+      baseReminderUntil = 0;
+      myTerritoryDangerUntil = 0;
+      myTerritoryLastCellUntil = 0;
       const openTeamList = pendingLeaveToTeamList;
       const openCreate = pendingLeaveToCreate;
       pendingLeaveToTeamList = false;
@@ -3303,6 +4048,52 @@ function connectWs() {
       if (hadPendingIntent && welcomeOverlay) welcomeOverlay.hidden = false;
       return;
     }
+    if (msg.type === "teamEliminated") {
+      tryPlayTeamEliminationVfx(msg);
+      const tid = msg.teamId | 0;
+      if (myTeamId != null && myTeamId === tid) {
+        hidePlacementFeedbackBanner();
+        showPlacementFeedback("Команда уничтожена. Территории больше нет.", "error", { telegramAlert: false });
+        triggerDefeatScreenFlash();
+        triggerMapShake(920);
+        cancelTeamDefeatUiTimer();
+        revertOptimisticPixel();
+        revertOptimisticWeapon();
+        optimisticPixelPending = null;
+        optimisticWeaponPending = null;
+        myTeamId = null;
+        clearTeamIdentityFromSession();
+        stripTeamFromUrl();
+        teamSpawnOnboardUntil = 0;
+        baseReminderUntil = 0;
+        myTerritoryDangerUntil = 0;
+        myTerritoryLastCellUntil = 0;
+        if (teamSpawnHintTimer) {
+          clearTimeout(teamSpawnHintTimer);
+          teamSpawnHintTimer = 0;
+        }
+        const canReenter = msg.canReenter === true;
+        if (!canReenter) {
+          spectatorMode = true;
+        } else {
+          spectatorMode = false;
+        }
+        invalidateTeamColorByIdCache();
+        hideCrisisOverlay();
+        hideReferralSplash();
+        if (welcomeOverlay) welcomeOverlay.hidden = true;
+        if (teamOverlay) teamOverlay.hidden = true;
+        closeCreateTeamOverlay();
+        closeTeamSettings();
+        scheduleTeamDefeatOverlay(canReenter);
+        rebuildTeamList();
+        updateTeamBadge();
+        setFooterMode();
+        scheduleDraw();
+        schedulePersist();
+      }
+      return;
+    }
     if (msg.type === "full") {
       optimisticPixelPending = null;
       optimisticWeaponPending = null;
@@ -3323,6 +4114,9 @@ function connectWs() {
       scheduleDraw();
       if (wantOnline) flushToStorage();
       else schedulePersist();
+      if (wantOnline) {
+        requestAnimationFrame(() => maybeOnboardSpawnAfterFull());
+      }
       return;
     }
     if (msg.type === "pixel") {
@@ -3409,6 +4203,75 @@ function connectWs() {
       if (msg.kind === "teamRecovery") {
         applyGlobalPurchaseVfx({ kind: "teamRecovery", teamId: msg.teamId });
       }
+      return;
+    }
+    if (msg.type === "teamDanger") {
+      if ((msg.teamId | 0) !== (myTeamId | 0)) return;
+      const n = msg.cellsRemaining | 0;
+      myTerritoryDangerUntil = Date.now() + 9000;
+      const lines = [
+        `⚠ Мало территории: осталось ${n} клет. База под угрозой!`,
+        "⚠ Команда сжимается — держите линию, иначе вылет!",
+        "⚠ Последние клетки! Защищайте остаток карты!",
+      ];
+      showTerritoryDramaBanner(lines[Math.floor(Math.random() * lines.length)], 4500, false);
+      try {
+        window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("warning");
+      } catch {
+        /* ignore */
+      }
+      scheduleDraw();
+      return;
+    }
+    if (msg.type === "teamLastCell") {
+      if ((msg.teamId | 0) !== (myTeamId | 0)) return;
+      const now = Date.now();
+      myTerritoryLastCellUntil = now + 14000;
+      myTerritoryDangerUntil = Math.max(myTerritoryDangerUntil, now + 14000);
+      showTerritoryDramaBanner("ПОСЛЕДНЯЯ КЛЕТКА! ПОТЕРЯЕТЕ ЕЁ — ВЫ ЛЕТИТЕ!", 6200, true);
+      try {
+        window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
+      } catch {
+        /* ignore */
+      }
+      triggerMapShake(520);
+      scheduleDraw();
+      return;
+    }
+    if (msg.type === "invalidPlacement") {
+      if ((msg.teamId | 0) !== (myTeamId | 0)) return;
+      if (msg.reason === "not_adjacent") {
+        remindInvalidPlacementBase(true);
+      }
+      return;
+    }
+    if (msg.type === "teamBaseHighlighted") {
+      if ((msg.teamId | 0) !== (myTeamId | 0)) return;
+      const sp0 = msg.spawn;
+      if (sp0 && typeof sp0.x0 === "number" && typeof sp0.y0 === "number") {
+        const sp = {
+          x0: sp0.x0,
+          y0: sp0.y0,
+          w: typeof sp0.w === "number" ? sp0.w : 6,
+          h: typeof sp0.h === "number" ? sp0.h : 6,
+        };
+        requestAnimationFrame(() => {
+          focusCameraOnTeamSpawn(sp);
+          startTeamSpawnOnboarding(sp);
+          drawFull(performance.now());
+        });
+      }
+      return;
+    }
+    if (msg.type === "teamCreated") {
+      return;
+    }
+    if (msg.type === "roundPlayStarted") {
+      const ri = typeof msg.roundIndex === "number" ? msg.roundIndex : roundIndexMeta;
+      showRoundStartSplash(ri);
+      syncTournamentWarmupOverlay();
+      updateRoundTimer();
+      scheduleDraw();
       return;
     }
     if (msg.type === "pixelReject") {
@@ -3758,9 +4621,18 @@ function planClientCaptureCells(kind, cx, cy) {
 }
 
 function applyOptimisticWeapon(kind, cx, cy) {
-  if (myTeamId == null) return;
-  const keys = planClientCaptureCells(kind, cx, cy);
-  if (!keys.length) return;
+  if (myTeamId == null) return false;
+  let keys = planClientCaptureCells(kind, cx, cy);
+  if (!keys.length) {
+    notifyReject("water");
+    return false;
+  }
+  const connected = filterClientKeysReachableFromTeam(keys, myTeamId);
+  if (connected.length !== keys.length) {
+    notifyReject("not_adjacent");
+    return false;
+  }
+  keys = connected;
   revertOptimisticWeapon();
   const prev = new Map();
   for (const k of keys) {
@@ -3780,6 +4652,7 @@ function applyOptimisticWeapon(kind, cx, cy) {
   }
   const dr = dirtyRectFromKeys(keys);
   scheduleDraw(dr ? { dirty: dr } : undefined);
+  return true;
 }
 
 function revertOptimisticWeapon() {
@@ -3925,6 +4798,26 @@ function draw(time = performance.now(), drawOpts = {}) {
             ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
             ctx.shadowBlur = 0;
           }
+          const dramaT = lite ? 0 : time;
+          const nowD = shNow;
+          const lastCellPulse =
+            !lite &&
+            myTeamId != null &&
+            tid === myTeamId &&
+            nowD < myTerritoryLastCellUntil;
+          const dangerPulse =
+            !lite && myTeamId != null && tid === myTeamId && nowD < myTerritoryDangerUntil;
+          if (lastCellPulse || dangerPulse) {
+            const amp = lastCellPulse ? 0.42 + 0.58 * Math.sin(dramaT * 0.022) : 0.18 + 0.22 * Math.sin(dramaT * 0.014);
+            const a = lastCellPulse ? amp * 0.52 : amp * 0.32;
+            ctx.fillStyle = `rgba(255, 45, 45, ${a})`;
+            ctx.fillRect(px, py, cw, ch);
+            if (lastCellPulse) {
+              ctx.strokeStyle = `rgba(255, 200, 200, ${0.35 + amp * 0.35})`;
+              ctx.lineWidth = Math.max(1, cell * 0.08);
+              ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+            }
+          }
           /* В lite (пан/зум) щиты и лишние stroke убраны — меньше работы на горячем пути. */
           if (!lite) {
             const sh = typeof owner === "object" && owner ? owner.shieldedUntil || 0 : 0;
@@ -3942,6 +4835,90 @@ function draw(time = performance.now(), drawOpts = {}) {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
           ctx.fillRect(px, py, cw, ch);
         }
+      }
+    }
+  }
+
+  /* Допустимые клетки для следующего пикселя: пустая суша, 8-соседство с вашей территорией. */
+  const drawExpansionFrontier =
+    !lite &&
+    !partial &&
+    online &&
+    myTeamId != null &&
+    !spectatorMode &&
+    cell >= 2.5 &&
+    visibleCellCount <= 14000;
+  if (drawExpansionFrontier) {
+    const fp = 0.5 + 0.5 * Math.sin(time * 0.0033);
+    for (let gy = y0; gy <= y1; gy++) {
+      for (let gx = x0; gx <= x1; gx++) {
+        const pk = `${gx},${gy}`;
+        if (pixels.has(pk)) continue;
+        if (!isClientLandCell(gx, gy)) continue;
+        if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId)) continue;
+        const px = offsetX + gx * cell;
+        const py = offsetY + gy * cell;
+        const cw = Math.ceil(cell);
+        const ch = Math.ceil(cell);
+        ctx.fillStyle = `rgba(72, 255, 160, ${0.1 + fp * 0.1})`;
+        ctx.fillRect(px, py, cw, ch);
+        ctx.strokeStyle = `rgba(180, 255, 210, ${0.22 + fp * 0.18})`;
+        ctx.lineWidth = Math.max(1, cell * 0.07);
+        ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+      }
+    }
+  }
+
+  /* Флаги баз (захват): маркер, прогресс, подсветка атакующего цвета. */
+  if (!lite && online && teamsMeta && cell >= 2) {
+    const shNowF = Date.now();
+    const tmap = getTeamColorByIdMap();
+    for (const t of teamsMeta) {
+      if (t.solo || t.eliminated || !t.spawn) continue;
+      const sp = t.spawn;
+      const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
+      if (fgx < x0 || fgx > x1 || fgy < y0 || fgy > y1) continue;
+      const st = flagCaptureClientState.get(t.id) || { progress: 0, attackerTeamId: 0 };
+      const pr = st.progress | 0;
+      const atk = st.attackerTeamId | 0;
+      const px = offsetX + fgx * cell;
+      const py = offsetY + fgy * cell;
+      const cw = Math.ceil(cell);
+      const ch = Math.ceil(cell);
+      const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + pr * 0.2);
+      if (pr > 0 && atk > 0) {
+        const atkHex = tmap?.get(atk) || teamColor(atk);
+        const { r, g, b } = hexToRgb(atkHex);
+        const blend = pr / FLAG_CAPTURE_HITS_REQUIRED;
+        ctx.fillStyle = `rgba(${r},${g},${b},${0.2 + blend * 0.32 + pulseF * 0.08})`;
+        ctx.fillRect(px, py, cw, ch);
+      }
+      if (myTeamId != null && t.id === myTeamId && shNowF < myFlagUnderAttackUntil && pr > 0) {
+        const flash = 0.22 + 0.22 * Math.sin(time * 0.028);
+        ctx.fillStyle = `rgba(255, 35, 60, ${flash})`;
+        ctx.fillRect(px, py, cw, ch);
+      }
+      ctx.fillStyle = `rgba(255, 255, 245, ${0.88 + pulseF * 0.08})`;
+      ctx.beginPath();
+      ctx.moveTo(px + cw * 0.5, py + ch * 0.1);
+      ctx.lineTo(px + cw * 0.78, py + ch * 0.42);
+      ctx.lineTo(px + cw * 0.5, py + ch * 0.34);
+      ctx.lineTo(px + cw * 0.22, py + ch * 0.42);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.4)";
+      ctx.lineWidth = Math.max(1, cell * 0.045);
+      ctx.stroke();
+      if (pr > 0) {
+        const barW = cw * 0.88;
+        const barH = Math.max(3, cell * 0.15);
+        const bx = px + (cw - barW) / 2;
+        const by = py + ch - barH - 2;
+        ctx.fillStyle = "rgba(0,0,0,0.5)";
+        ctx.fillRect(bx, by, barW, barH);
+        const barCol = atk > 0 ? teamColor(atk) : "#ffee66";
+        ctx.fillStyle = barCol;
+        ctx.fillRect(bx, by, (barW * pr) / FLAG_CAPTURE_HITS_REQUIRED, barH);
       }
     }
   }
@@ -4007,11 +4984,83 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
+  if (!lite && !partial && online && myTeamId != null && !spectatorMode && cell >= 2) {
+    const sp = getMyTeamSpawn();
+    const tm = teamsMeta?.find((x) => x.id === myTeamId);
+    if (sp && tm) {
+      const px0 = offsetX + sp.x0 * cell;
+      const py0 = offsetY + sp.y0 * cell;
+      const pw = sp.w * cell;
+      const ph = sp.h * cell;
+      const nowMs = Date.now();
+      const showBaseGuide = nowMs < teamSpawnOnboardUntil || nowMs < baseReminderUntil;
+      const teamHex = tm.color || "#ffd54a";
+      const slowPulse = 0.5 + 0.5 * Math.sin(time * 0.0042);
+      /* Постоянная «якорная» рамка базы — игрок всегда видит, где центр команды. */
+      ctx.save();
+      ctx.setLineDash([Math.max(3, cell * 0.35), Math.max(2, cell * 0.22)]);
+      const hexRing =
+        typeof teamHex === "string" && /^#[0-9a-fA-F]{6}$/.test(teamHex)
+          ? `${teamHex}${showBaseGuide ? "cc" : "55"}`
+          : null;
+      ctx.strokeStyle =
+        hexRing ||
+        (showBaseGuide ? "rgba(255, 213, 74, 0.72)" : "rgba(255, 213, 74, 0.38)");
+      ctx.lineWidth = Math.max(1, cell * 0.08);
+      ctx.strokeRect(px0 + 0.5, py0 + 0.5, pw - 1, ph - 1);
+      ctx.restore();
+      if (showBaseGuide) {
+        const pulse = 0.5 + 0.5 * Math.sin(time * 0.01);
+        ctx.strokeStyle = `rgba(255, 214, 80, ${0.42 + pulse * 0.38})`;
+        ctx.lineWidth = Math.max(2, cell * 0.14);
+        ctx.strokeRect(px0 - 2, py0 - 2, pw + 4, ph + 4);
+        ctx.strokeStyle = `rgba(255, 240, 160, ${0.2 + slowPulse * 0.12})`;
+        ctx.lineWidth = Math.max(1, cell * 0.05);
+        ctx.strokeRect(px0 - 5, py0 - 5, pw + 10, ph + 10);
+        const ax = offsetX + (sp.x0 + sp.w / 2) * cell;
+        const ay = py0 - cell * (1.15 + pulse * 0.4);
+        ctx.fillStyle = `rgba(255, 230, 120, ${0.88 + pulse * 0.08})`;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay + cell * 0.95);
+        ctx.lineTo(ax - cell * 0.58, ay);
+        ctx.lineTo(ax + cell * 0.58, ay);
+        ctx.closePath();
+        ctx.fill();
+      }
+      const cx = px0 + pw / 2;
+      const cy = py0 + ph / 2;
+      const label = `${tm.emoji ? `${tm.emoji} ` : ""}${tm.name || "База"}`.trim();
+      const fs = Math.min(15, Math.max(9, cell * 0.42));
+      ctx.font = `600 ${fs}px system-ui, -apple-system, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const textW = Math.min(pw - 8, ctx.measureText(label).width + 10);
+      const textH = Math.min(ph * 0.55, Math.max(16, fs + 8));
+      ctx.fillStyle = "rgba(4, 10, 28, 0.78)";
+      ctx.fillRect(cx - textW / 2, cy - textH / 2, textW, textH);
+      ctx.strokeStyle = `${tm.color || "#ffffff"}aa`;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx - textW / 2 + 0.5, cy - textH / 2 + 0.5, textW - 1, textH - 1);
+      ctx.fillStyle = "#f2f6ff";
+      const short = label.length > 36 ? `${label.slice(0, 34)}…` : label;
+      ctx.fillText(short, cx, cy);
+    }
+  }
+
   if (partial) {
     ctx.restore();
   }
 
   lastDrawVisibleCellCount = visibleCellCount;
+  if (teamBadge && online && myTeamId != null && !spectatorMode) {
+    const nowHud = Date.now();
+    const lastCell = nowHud < myTerritoryLastCellUntil;
+    const danger = nowHud < myTerritoryDangerUntil;
+    teamBadge.classList.toggle("team-badge--last-cell", lastCell);
+    teamBadge.classList.toggle("team-badge--danger", danger && !lastCell);
+  } else if (teamBadge) {
+    teamBadge.classList.remove("team-badge--last-cell", "team-badge--danger");
+  }
   if (perfDebug) perfRecordDraw(performance.now() - _perf0, lite);
 }
 
@@ -4039,11 +5088,20 @@ function placePixel(gx, gy) {
     }
   }
 
+  if (online && isClientWarmupPhase()) {
+    notifyReject("warmup");
+    return;
+  }
+
   if (online && pendingMapAction) {
     if (pendingMapAction.type === "zoneCapture") {
       lastZoneGx = gx - 1;
       lastZoneGy = gy - 1;
-      applyOptimisticWeapon("zoneCapture", gx, gy);
+      if (!applyOptimisticWeapon("zoneCapture", gx, gy)) {
+        pendingMapAction = null;
+        setPendingHint();
+        return;
+      }
       wsSendJson({ type: "purchaseZoneCapture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -4052,7 +5110,11 @@ function placePixel(gx, gy) {
     if (pendingMapAction.type === "massCapture") {
       lastZoneGx = gx - 2;
       lastZoneGy = gy - 2;
-      applyOptimisticWeapon("massCapture", gx, gy);
+      if (!applyOptimisticWeapon("massCapture", gx, gy)) {
+        pendingMapAction = null;
+        setPendingHint();
+        return;
+      }
       wsSendJson({ type: "purchaseMassCapture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -4061,7 +5123,11 @@ function placePixel(gx, gy) {
     if (pendingMapAction.type === "zone12Capture") {
       lastZoneGx = gx - 5;
       lastZoneGy = gy - 5;
-      applyOptimisticWeapon("zone12Capture", gx, gy);
+      if (!applyOptimisticWeapon("zone12Capture", gx, gy)) {
+        pendingMapAction = null;
+        setPendingHint();
+        return;
+      }
       wsSendJson({ type: "purchaseZone12Capture", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
@@ -4085,6 +5151,16 @@ function placePixel(gx, gy) {
 
   if (online) {
     const pk = `${gx},${gy}`;
+    if (clientPixelTeamIdAt(gx, gy) === myTeamId) {
+      notifyReject("already_yours");
+      lastPlaceAt = 0;
+      return;
+    }
+    if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId)) {
+      notifyReject("not_adjacent");
+      lastPlaceAt = 0;
+      return;
+    }
     optimisticPixelPending = { key: pk, prev: snapshotPixelCell(pk) };
     pixels.set(pk, { teamId: myTeamId, shieldedUntil: 0 });
     if (boardVfx) {
