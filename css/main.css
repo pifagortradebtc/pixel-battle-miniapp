@@ -32,6 +32,32 @@ body {
   color: var(--tg-text);
 }
 
+/* Ускорение турнирного времени (бот: speed) — только тест; таймеры раунда сжаты, не игровой баланс. */
+.dev-time-scale-banner {
+  position: fixed;
+  z-index: 9998;
+  left: 50%;
+  top: max(6px, var(--safe-top));
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #1a1205;
+  background: linear-gradient(135deg, #ffcc33, #ff9933);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  max-width: 92vw;
+  text-align: center;
+}
+
+.dev-time-scale-banner[hidden] {
+  display: none !important;
+}
+
 .app {
   position: relative;
   display: block;

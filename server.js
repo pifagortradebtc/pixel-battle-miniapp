@@ -29,6 +29,11 @@ import {
   API_BASE_SANDBOX,
 } from "./lib/nowpayments-api.js";
 import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
+import {
+  clampTournamentTimeScale,
+  reanchorRoundStartForScaleChange,
+  TOURNAMENT_TIME_SCALE_DEFAULT,
+} from "./lib/tournament-time.js";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
 import {
   WARMUP_MS,
@@ -309,6 +314,12 @@ let roundStartMs = Date.now();
  * В старых сохранениях отсутствует: тогда = roundStartMs (без отдельной разминки).
  */
 let playStartMs = Date.now();
+/**
+ * Только для сохранения в JSON (кэш); логика — {@link getPlayStartMs}.
+ * Dev-only: сжимает на реальной оси разминку, длительность боя и конец раунда.
+ * Не ускоряет кулдауны, реген HP базы, лимиты ударов по флагу и прочий combat-время.
+ */
+let tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
 /** Первый раунд: таймер не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO) */
 let roundTimerStarted = true;
 /** @type {Set<string>} токены победителей прошлого раунда — для claim при переподключении */
@@ -679,6 +690,7 @@ function getMaxPerTeam() {
 
 function saveRoundState() {
   try {
+    playStartMs = getPlayStartMs();
     fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
     fs.writeFileSync(
       ROUND_STATE_PATH,
@@ -687,6 +699,7 @@ function saveRoundState() {
         roundStartMs,
         playStartMs,
         roundDurationMs,
+        tournamentTimeScale: getTournamentTimeScale(),
         roundTimerStarted,
         eligibleTokens: [...eligibleTokenSet],
         eligiblePlayerKeys: [...eligiblePlayerKeys],
@@ -716,6 +729,11 @@ function loadRoundState() {
       } else {
         roundDurationMs = battleDurationForRound(roundIndex);
       }
+      if (typeof j.tournamentTimeScale === "number" && j.tournamentTimeScale >= 1) {
+        tournamentTimeScale = clampTournamentTimeScale(j.tournamentTimeScale);
+      } else {
+        tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+      }
       if (typeof j.roundTimerStarted === "boolean") {
         roundTimerStarted = j.roundTimerStarted;
       } else {
@@ -743,9 +761,11 @@ function loadRoundState() {
         eligiblePlayerKeys = new Set(Object.keys(winnerTokensByPlayerKey).map(sanitizePlayerKey).filter(Boolean));
       }
       if (roundIndex >= 1 || gameFinished) roundTimerStarted = true;
+      playStartMs = getPlayStartMs();
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
+      tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
       playStartMs = roundStartMs;
       roundDurationMs = battleDurationForRound(0);
       eligibleTokenSet = new Set();
@@ -758,6 +778,7 @@ function loadRoundState() {
     console.warn("round-state load:", e.message);
     roundIndex = 0;
     roundStartMs = Date.now();
+    tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
     playStartMs = roundStartMs;
     roundDurationMs = battleDurationForRound(0);
     eligibleTokenSet = new Set();
@@ -919,8 +940,44 @@ function recalculateAllTeamScores() {
   return { agg, totalAvailableScore };
 }
 
+function getTournamentTimeScale() {
+  return tournamentTimeScale >= 1 ? tournamentTimeScale : TOURNAMENT_TIME_SCALE_DEFAULT;
+}
+
+/** Реальный timestamp начала боя (пиксели): roundStart + разминка в игровых мс, сжатых по scale. */
 function getPlayStartMs() {
-  return typeof playStartMs === "number" && Number.isFinite(playStartMs) ? playStartMs : roundStartMs;
+  return roundStartMs + Math.round(WARMUP_MS / getTournamentTimeScale());
+}
+
+/** Реальный timestamp конца фазы боя текущего раунда. */
+function getRoundBattleEndRealMs() {
+  return getPlayStartMs() + Math.round(roundDurationMs / getTournamentTimeScale());
+}
+
+function applyTournamentTimeScale(newScaleRaw) {
+  const next = clampTournamentTimeScale(newScaleRaw);
+  const prev = getTournamentTimeScale();
+  const now = Date.now();
+  if (roundTimerStarted && !gameFinished && next !== prev) {
+    roundStartMs = reanchorRoundStartForScaleChange(now, roundStartMs, prev, next);
+  }
+  tournamentTimeScale = next;
+  playStartMs = getPlayStartMs();
+  saveRoundState();
+  schedulePlayStartBroadcast();
+  broadcastTournamentTimeScaleToClients();
+  return next;
+}
+
+function broadcastTournamentTimeScaleToClients() {
+  broadcast({
+    type: "tournamentTimeScale",
+    tournamentTimeScale: getTournamentTimeScale(),
+    roundStartMs,
+    roundEndsAt: roundEndsAtForMeta(),
+    playStartsAt: getPlayStartMs(),
+    warmupEndsAt: getPlayStartMs(),
+  });
 }
 
 function isWarmupPhaseNow() {
@@ -1394,6 +1451,18 @@ function applyClusterGameReplication(msg) {
       return;
     case "roundPlayStarted":
       return;
+    case "tournamentTimeScale": {
+      tournamentTimeScale =
+        typeof msg.tournamentTimeScale === "number"
+          ? clampTournamentTimeScale(msg.tournamentTimeScale)
+          : TOURNAMENT_TIME_SCALE_DEFAULT;
+      if (typeof msg.roundStartMs === "number" && Number.isFinite(msg.roundStartMs)) {
+        roundStartMs = msg.roundStartMs;
+      }
+      playStartMs = getPlayStartMs();
+      schedulePlayStartBroadcast();
+      return;
+    }
     default:
       return;
   }
@@ -1471,11 +1540,14 @@ function isFlagCaptureMechanicEnabled(now) {
   if (roundIndex === 0 && !roundTimerStarted) return false;
   if (isWarmupPhaseNow()) return false;
   const start = getPlayStartMs();
-  const end = start + roundDurationMs;
+  const end = getRoundBattleEndRealMs();
   if (!Number.isFinite(start) || !Number.isFinite(end) || now < start || now >= end) return false;
-  const elapsed = now - start;
-  const need = roundDurationMs * FLAG_CAPTURE_ENABLE_AFTER_BATTLE_FRACTION;
-  return elapsed >= need;
+  /* Доля фазы боя по обычным (реальным) мс внутри окна боя — окно уже сжато scale для турнира.
+     Не умножаем на scale ещё раз: HP/реген/кулдауны флага остаются в реальном времени. */
+  const battleRealSpan = end - start;
+  const elapsedReal = now - start;
+  const needReal = battleRealSpan * FLAG_CAPTURE_ENABLE_AFTER_BATTLE_FRACTION;
+  return elapsedReal >= needReal;
 }
 
 function buildFlagsSnapshot() {
@@ -2300,9 +2372,9 @@ function assertCanPlay(ws) {
 
 /** Конец фазы боя (после разминки). null — 1-й раунд ждёт «go». */
 function roundEndsAtForMeta() {
-  if (gameFinished) return getPlayStartMs() + roundDurationMs;
+  if (gameFinished) return getRoundBattleEndRealMs();
   if (roundIndex === 0 && !roundTimerStarted) return null;
-  return getPlayStartMs() + roundDurationMs;
+  return getRoundBattleEndRealMs();
 }
 
 async function sendConnectionMeta(ws) {
@@ -2328,6 +2400,7 @@ async function sendConnectionMeta(ws) {
     tournamentStage: tournamentStage(roundIndex, gameFinished),
     discussionChatUrl: getDiscussionChatUrlForClient(),
     flags: buildFlagsSnapshot(),
+    tournamentTimeScale: getTournamentTimeScale(),
   });
   safeSend(ws, await buildWalletPayload(ws));
 }
@@ -2367,8 +2440,8 @@ async function finalizeGameEnd(winnerRow) {
     saveDynamicTeams();
 
     gameFinished = true;
+    tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
     roundStartMs = Date.now();
-    playStartMs = roundStartMs;
     if (playStartBroadcastTimer) {
       clearTimeout(playStartBroadcastTimer);
       playStartBroadcastTimer = null;
@@ -2469,7 +2542,6 @@ async function advanceToDuelRound(winnerRow) {
     roundIndex = 3;
     roundTimerStarted = true;
     roundStartMs = Date.now();
-    playStartMs = roundStartMs + WARMUP_MS;
     roundDurationMs = battleDurationForRound(3);
     clearTiebreakSnapshots();
     rebuildLandFromRound(3);
@@ -2485,7 +2557,7 @@ async function advanceToDuelRound(winnerRow) {
       winnerScoreSharePercent: winnerScoreShare,
       winnerPercent: winnerScoreShare,
       topTeams,
-      roundEndsAt: getPlayStartMs() + roundDurationMs,
+      roundEndsAt: getRoundBattleEndRealMs(),
       maxPerTeam: getMaxPerTeam(),
       grid: { w: gridW, h: gridH },
       duel: true,
@@ -2523,13 +2595,12 @@ async function runMaybeEndRound() {
   if (roundEnding) return;
   if (gameFinished) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
-  if (Date.now() < getPlayStartMs() + roundDurationMs) return;
+  if (Date.now() < getRoundBattleEndRealMs()) return;
   /* Авторитетный итог: полный пересчёт очков по pixels внутри buildStatsPayload (recalculateAllTeamScores). */
   const stats = buildStatsPayload();
   const rows = stats.rows || [];
   if (rows.length === 0) {
     roundStartMs = Date.now();
-    playStartMs = roundStartMs;
     saveRoundState();
     return;
   }
@@ -2538,7 +2609,6 @@ async function runMaybeEndRound() {
     const top = rows[0];
     if (!top || typeof top.teamId !== "number") {
       roundStartMs = Date.now();
-      playStartMs = roundStartMs;
       saveRoundState();
       return;
     }
@@ -2549,7 +2619,6 @@ async function runMaybeEndRound() {
     const top = rows[0];
     if (!top || typeof top.teamId !== "number") {
       roundStartMs = Date.now();
-      playStartMs = roundStartMs;
       saveRoundState();
       return;
     }
@@ -2615,7 +2684,6 @@ async function runMaybeEndRound() {
     roundIndex++;
     roundTimerStarted = true;
     roundStartMs = Date.now();
-    playStartMs = roundStartMs + WARMUP_MS;
     roundDurationMs = battleDurationForRound(roundIndex);
     clearTiebreakSnapshots();
     rebuildLandFromRound(roundIndex);
@@ -2642,7 +2710,7 @@ async function runMaybeEndRound() {
       winnerScoreSharePercent: winnerScoreShare,
       winnerPercent: winnerScoreShare,
       topTeams,
-      roundEndsAt: getPlayStartMs() + roundDurationMs,
+      roundEndsAt: getRoundBattleEndRealMs(),
       maxPerTeam: getMaxPerTeam(),
       grid: { w: gridW, h: gridH },
     });
@@ -3497,7 +3565,6 @@ async function startRoundOneTimer(durationHours) {
   roundDurationMs = ms;
   roundTimerStarted = true;
   roundStartMs = Date.now();
-  playStartMs = roundStartMs + WARMUP_MS;
   clearTiebreakSnapshots();
   saveRoundState();
   schedulePlayStartBroadcast();
@@ -3565,6 +3632,37 @@ async function telegramPollLoop() {
           .toLowerCase()
           .replace(/^\/+/, "")
           .replace(/\s+/g, " ");
+        const speedCmd = restartNorm.replace(/^\/speed\b/, "speed").trim();
+        if (speedCmd === "speed" || speedCmd.startsWith("speed ")) {
+          const parts = speedCmd.split(/\s+/).filter(Boolean);
+          const sub = (parts[1] || "").toLowerCase();
+          let target = 60;
+          if (parts.length === 1) {
+            target = getTournamentTimeScale() > 1 ? TOURNAMENT_TIME_SCALE_DEFAULT : 60;
+          } else if (sub === "off" || sub === "0") {
+            target = TOURNAMENT_TIME_SCALE_DEFAULT;
+          } else {
+            const n = parseFloat(parts[1].replace(",", "."));
+            if (!Number.isFinite(n) || n < 1) {
+              await telegramSendMessage(
+                chatId,
+                "speed — ускорение турнира для теста. Примеры: speed (×60 или выкл), speed off, speed 1, speed 120."
+              );
+              continue;
+            }
+            target = n;
+          }
+          const applied = applyTournamentTimeScale(target);
+          if (applied <= 1) {
+            await telegramSendMessage(chatId, "Speed mode: OFF (таймеры раунда в реальном времени).");
+          } else {
+            await telegramSendMessage(
+              chatId,
+              `Speed mode: ×${applied} (1 реальная минута ≈ 1 игровой час). Сжаты только разминка/бой/конец раунда. Кулдауны, реген HP базы и темп ударов по флагу — как в обычном времени.`
+            );
+          }
+          continue;
+        }
         if (restartNorm === "рестарт" || restartNorm === "restart") {
           if (TELEGRAM_ENABLE_PROCESS_RESTART) {
             await telegramSendMessage(chatId, "Перезапуск приложения…");
@@ -3599,7 +3697,13 @@ async function telegramPollLoop() {
         let reply;
         if (result.ok) {
           const h = (result.durationMs ?? roundDurationMs) / 3600000;
-          reply = `Раунд 1: сначала разминка 2 мин (без пикселей), затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Пиксели с ${new Date(playStartMs).toISOString()}`;
+          const sc = getTournamentTimeScale();
+          const warmRealSec = Math.round(WARMUP_MS / sc / 1000);
+          const battleRealMin = Math.round(result.durationMs / sc / 60000);
+          reply =
+            sc > 1
+              ? `Раунд 1 (TEST ×${sc}): разминка ~${warmRealSec} с реальных, затем бой ~${battleRealMin} мин реальных (${h.toFixed(h < 1 ? 2 : 1)} игр. ч). Пиксели с ${new Date(getPlayStartMs()).toISOString()}`
+              : `Раунд 1: сначала разминка 2 мин (без пикселей), затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
         } else if (result.reason === "already_started") {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {
@@ -3665,7 +3769,7 @@ server.listen(PORT, () => {
     }
     if (WAIT_FOR_TELEGRAM_GO) {
       console.log(
-        'Первый раунд: в личку боту — «go», «го», «гол» + часы: go 100, го 50, го 0.1. Перезапуск процесса по «рестарт»/restart — только если TELEGRAM_ENABLE_PROCESS_RESTART=true.'
+        'Первый раунд: «go» + часы; ускорение теста турнира: «speed» (×60 / выкл), speed off, speed 120. Рестарт процесса — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
       );
     } else if (TELEGRAM_ADMIN_IDS.size === 0) {
       console.warn(

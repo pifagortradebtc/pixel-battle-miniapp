@@ -510,6 +510,8 @@ let spectatorMode = false;
 let roundEndsAtMs = null;
 /** Когда включаются пиксели (конец 2-мин разминки); null — нет отдельной фазы */
 let playStartsAtMs = null;
+/** Сервер: tournamentTimeScale > 1 — ускоренный турнирный таймлайн (бот speed). */
+let tournamentTimeScaleClient = 1;
 let roundIndexMeta = 0;
 /** С сервера: игра полностью завершена (финал) */
 let gameFinishedMeta = false;
@@ -2043,6 +2045,17 @@ function openDiscussionChatLink(ev) {
   else window.open(url, "_blank", "noopener,noreferrer");
 }
 
+function syncDevTimeScaleBanner() {
+  const el = document.getElementById("dev-time-scale-banner");
+  if (!el) return;
+  if (tournamentTimeScaleClient > 1) {
+    el.hidden = false;
+    el.textContent = `TEST MODE ×${tournamentTimeScaleClient}`;
+  } else {
+    el.hidden = true;
+  }
+}
+
 function syncDiscussionChatLinks() {
   const url = discussionChatUrl;
   const show = Boolean(url);
@@ -2074,6 +2087,11 @@ function onMeta(msg) {
         ? msg.warmupEndsAt
         : null;
   roundIndexMeta = typeof msg.roundIndex === "number" ? msg.roundIndex : 0;
+  tournamentTimeScaleClient =
+    typeof msg.tournamentTimeScale === "number" && msg.tournamentTimeScale >= 1
+      ? msg.tournamentTimeScale | 0
+      : 1;
+  syncDevTimeScaleBanner();
   spectatorMode = msg.eligible === false || msg.gameFinished === true;
 
   if (msg.eligible === false && !msg.gameFinished) {
@@ -3639,6 +3657,24 @@ function connectWs() {
       return;
     }
 
+    if (msg.type === "tournamentTimeScale") {
+      tournamentTimeScaleClient =
+        typeof msg.tournamentTimeScale === "number" && msg.tournamentTimeScale >= 1
+          ? msg.tournamentTimeScale | 0
+          : 1;
+      if (typeof msg.roundEndsAt === "number" && !Number.isNaN(msg.roundEndsAt)) {
+        roundEndsAtMs = msg.roundEndsAt;
+      }
+      if (typeof msg.playStartsAt === "number" && !Number.isNaN(msg.playStartsAt)) {
+        playStartsAtMs = msg.playStartsAt;
+      } else if (typeof msg.warmupEndsAt === "number" && !Number.isNaN(msg.warmupEndsAt)) {
+        playStartsAtMs = msg.warmupEndsAt;
+      }
+      syncDevTimeScaleBanner();
+      updateRoundTimer();
+      syncTournamentWarmupOverlay();
+      return;
+    }
     if (msg.type === "meta") {
       onMeta(msg);
       return;
