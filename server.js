@@ -53,6 +53,10 @@ const ROOT = __dirname;
 const PORT = Number(process.env.PORT) || 3847;
 const WS_PATH = "/ws";
 
+/** Создаётся после http.createServer; до этого broadcast/stats не трогают клиентов. */
+/** @type {import("ws").WebSocketServer | null} */
+let wss = null;
+
 const DATA_DIR = path.join(ROOT, "data");
 /** @type {Awaited<ReturnType<typeof createWalletBackend>>} */
 const walletStore = await createWalletBackend(DATA_DIR);
@@ -802,6 +806,23 @@ let landWeightTotal = GRID_SIZE_MASS * GRID_SIZE_MASS;
 const teamPeakScoreForTiebreak = new Map();
 const teamFirstHitPeakAt = new Map();
 
+/**
+ * Захват флага: прогресс по защищающейся команде. Объявлено до rebuildLandFromRound (старт модуля вызывает rebuild).
+ * @type {Map<number, { progress: number, lastHitAt: number, attackerTeamId: number, nextDecayAt: number | null }>}
+ */
+const flagCaptureByDefender = new Map();
+
+function clearAllFlagCaptureState() {
+  flagCaptureByDefender.clear();
+}
+
+function clearFlagCaptureStateForDefender(defenderId) {
+  flagCaptureByDefender.delete(defenderId | 0);
+}
+
+/** Снимок числа клеток по командам до последнего изменения (драма). До rebuildLandFromRound. */
+let lastTerritoryCountSnapshot = new Map();
+
 function gridSizeForRoundIndex(ri) {
   if (ri <= 0) return GRID_SIZE_MASS;
   if (ri === 1) return GRID_SIZE_SEMI;
@@ -933,9 +954,11 @@ function schedulePlayStartBroadcast() {
       roundIndex,
       tournamentStage: tournamentStage(roundIndex, false),
     });
-    void Promise.all(
-      [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
-    );
+    if (wss) {
+      void Promise.all(
+        [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
+      );
+    }
   }, delay);
 }
 
@@ -1289,13 +1312,15 @@ function applyClusterGameReplication(msg) {
       teamEffects.delete(tid);
       teamMemberKeys.delete(tid);
       teamPlayerCounts.delete(tid);
-      for (const c of wss.clients) {
-        if (c.readyState === 1 && c.teamId === tid) {
-          c.teamId = null;
-          if (ri === 0) {
-            applyEligibilityFromServerState(c);
-          } else {
-            c.eligible = false;
+      if (wss) {
+        for (const c of wss.clients) {
+          if (c.readyState === 1 && c.teamId === tid) {
+            c.teamId = null;
+            if (ri === 0) {
+              applyEligibilityFromServerState(c);
+            } else {
+              c.eligible = false;
+            }
           }
         }
       }
@@ -1373,6 +1398,7 @@ function applyClusterGameReplication(msg) {
 }
 
 function broadcastToWebSocketClients(raw) {
+  if (!wss) return;
   for (const client of wss.clients) {
     if (client.readyState !== 1) continue;
     try {
@@ -1414,20 +1440,6 @@ function cellTouchesTeamTerritory(x, y, teamId) {
 /** Псевдоним для правил размещения: можно ставить, если среди 8 соседей есть своя клетка. */
 function canPlaceForTeam(x, y, teamId) {
   return cellTouchesTeamTerritory(x, y, teamId);
-}
-
-/**
- * Захват флага у базы 6×6: прогресс по защищающейся команде.
- * @type {Map<number, { progress: number, lastHitAt: number, attackerTeamId: number, nextDecayAt: number | null }>}
- */
-const flagCaptureByDefender = new Map();
-
-function clearAllFlagCaptureState() {
-  flagCaptureByDefender.clear();
-}
-
-function clearFlagCaptureStateForDefender(defenderId) {
-  flagCaptureByDefender.delete(defenderId | 0);
 }
 
 /** @param {boolean} emitStopped — false при репликации кластера (без повторного broadcast). */
@@ -1836,9 +1848,6 @@ function computeTeamTerritoryCounts() {
   return byTeam;
 }
 
-/** Снимок числа клеток по командам до последнего изменения (драма: мало территории / последняя клетка). */
-let lastTerritoryCountSnapshot = new Map();
-
 function notifyTerritoryDramaEvents(prev, next) {
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
@@ -1909,17 +1918,19 @@ function eliminateTeamByTerritoryLoss(teamId) {
     destroyGy,
     teamColor: dt.color || "#888888",
   };
-  for (const c of wss.clients) {
-    if (c.readyState !== 1) continue;
-    if (c.teamId === teamId) {
-      c.teamId = null;
-      if (roundIndex === 0) {
-        applyEligibilityFromServerState(c);
-      } else {
-        c.eligible = false;
+  if (wss) {
+    for (const c of wss.clients) {
+      if (c.readyState !== 1) continue;
+      if (c.teamId === teamId) {
+        c.teamId = null;
+        if (roundIndex === 0) {
+          applyEligibilityFromServerState(c);
+        } else {
+          c.eligible = false;
+        }
+        safeSend(c, payload);
+        void sendConnectionMeta(c);
       }
-      safeSend(c, payload);
-      void sendConnectionMeta(c);
     }
   }
   broadcast(payload);
@@ -2161,7 +2172,7 @@ const server = http.createServer((req, res) => {
 
 let wsConnSeq = 0;
 
-const wss = new WebSocketServer({
+wss = new WebSocketServer({
   server,
   path: WS_PATH,
   maxPayload: 131072,
@@ -2200,6 +2211,7 @@ function scheduleBroadcastWalletDebounced() {
 }
 
 function countOnlineClients() {
+  if (!wss) return 0;
   let n = 0;
   for (const c of wss.clients) {
     if (c.readyState === 1) n++;
