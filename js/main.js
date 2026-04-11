@@ -12,8 +12,8 @@ import {
   PRICES_QUANT,
 } from "../lib/tournament-economy.js";
 
-let gridW = 640;
-let gridH = 640;
+let gridW = 360;
+let gridH = 360;
 const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
@@ -477,6 +477,12 @@ function b64ToUint8(b64) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+function isClientLandCell(x, y) {
+  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
+  if (!regionCells || regionCells.length !== gridW * gridH) return true;
+  return regionCells[y * gridW + x] !== 0;
 }
 
 async function loadRegions() {
@@ -1555,6 +1561,7 @@ const MSG_WATCH_ONLY = "Остались сильнейшие, просто на
 function notifyReject(reason) {
   const map = {
     out_of_bounds: "Сюда нельзя (вне карты).",
+    water: "Нельзя ставить пиксель на воду.",
     cooldown: "Слишком часто.",
     "cooldown not ready": "Интервал между действиями: подождите до следующего хода.",
     "pixel is shielded": "Пиксель под щитом.",
@@ -1587,6 +1594,7 @@ function notifyPurchaseError(reason) {
     "cooldown not ready": "Сначала дождитесь обычного интервала между действиями.",
     "bad request": "Некорректный запрос.",
     rate_limited: "Слишком частые покупки. Подождите несколько секунд.",
+    no_playable_land: "В этой зоне нет суши для захвата.",
   };
   notifyReject(m[reason] || reason);
 }
@@ -3725,7 +3733,7 @@ function planClientCaptureCells(kind, cx, cy) {
   const keys = [];
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+      if (!isClientLandCell(x, y)) continue;
       keys.push(`${x},${y}`);
     }
   }
@@ -3863,14 +3871,8 @@ function draw(time = performance.now(), drawOpts = {}) {
       const idx = regionCells ? regionCells[gy * gridW + gx] : 2;
       let base;
       if (regionRgb && regionRgb.length === gridW * gridH * 3) {
-        if (idx === 0) {
-          base = countryColor(0);
-        } else if (idx === 1) {
-          base = countryColor(1);
-        } else {
-          const ri = (gy * gridW + gx) * 3;
-          base = `rgb(${regionRgb[ri]},${regionRgb[ri + 1]},${regionRgb[ri + 2]})`;
-        }
+        const ri = (gy * gridW + gx) * 3;
+        base = `rgb(${regionRgb[ri]},${regionRgb[ri + 1]},${regionRgb[ri + 2]})`;
       } else {
         base = countryColor(idx);
       }
@@ -3999,6 +4001,10 @@ function draw(time = performance.now(), drawOpts = {}) {
 function placePixel(gx, gy) {
   if (gx < 0 || gx >= gridW || gy < 0 || gy >= gridH) {
     notifyReject("out_of_bounds");
+    return;
+  }
+  if (!isClientLandCell(gx, gy)) {
+    notifyReject("water");
     return;
   }
 

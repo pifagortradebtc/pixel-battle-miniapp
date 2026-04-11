@@ -121,10 +121,10 @@ function getClientIpFromReq(req) {
   return raw.slice(0, 64) || "0.0.0.0";
 }
 
-/** Разрешение исходной карты `data/regions-320.json` (даунсэмпл на меньшие раунды, надсэмпл на массовый). */
-const BASE_GRID = 320;
+/** Разрешение исходной карты `data/regions-360.json` (даунсэмпл на меньшие раунды). */
+const BASE_GRID = 360;
 /** Сторона сетки по раунду: 0 массовый, 1 полуфинал, 2 финал команд, 3 дуэль. */
-const GRID_SIZE_MASS = 640;
+const GRID_SIZE_MASS = 360;
 const GRID_SIZE_SEMI = 320;
 const GRID_SIZE_FINAL_TEAMS = 160;
 const GRID_SIZE_DUEL = 64;
@@ -678,23 +678,23 @@ const MIME = {
   ".webp": "image/webp",
 };
 
-/** @type {Uint8Array | null} исходный регион 320×320 (для даунсэмплинга под раунд) */
-let baseRegion320 = null;
+/** @type {Uint8Array | null} исходный регион 360×360 (даунсэмпл под раунд; 0 вода, ≥2 суша). */
+let baseRegion360 = null;
 try {
-  const raw = fs.readFileSync(path.join(ROOT, "data", "regions-320.json"), "utf8");
+  const raw = fs.readFileSync(path.join(ROOT, "data", "regions-360.json"), "utf8");
   const j = JSON.parse(raw);
-  baseRegion320 = Uint8Array.from(Buffer.from(j.cellsBase64, "base64"));
-  if (baseRegion320.length !== BASE_GRID * BASE_GRID) {
-    console.warn("regions-320.json: неверный размер сетки");
-    baseRegion320 = null;
+  baseRegion360 = Uint8Array.from(Buffer.from(j.cellsBase64, "base64"));
+  if (baseRegion360.length !== BASE_GRID * BASE_GRID) {
+    console.warn("regions-360.json: неверный размер сетки");
+    baseRegion360 = null;
   }
 } catch (e) {
-  console.warn("Нет data/regions-320.json — npm run build-map или npm run rasterize-poster", e.message);
+  console.warn("Нет data/regions-360.json — npm run rasterize-world-map", e.message);
 }
 
-/** @type {Uint8Array | null} регион: 0 океан, 1 река, ≥2 — регионы (для справки; закрасить можно любую клетку сетки). */
+/** @type {Uint8Array | null} маска: 0 вода (нельзя ставить пиксель), ≠0 — суша. */
 let landGrid = null;
-/** Знаменатель для «% территории» — все клетки текущей сетки (w×h). */
+/** Знаменатель для «% территории» — число игровых клеток суши на текущей сетке. */
 let landPixelsTotal = GRID_SIZE_MASS * GRID_SIZE_MASS;
 
 function gridSizeForRoundIndex(ri) {
@@ -705,14 +705,14 @@ function gridSizeForRoundIndex(ri) {
   return GRID_SIZE_DUEL;
 }
 
-/** @param {number} ri — размеры: массовый 640, полуфинал 320, финал команд 160, дуэль 64 */
+/** @param {number} ri — размеры: массовый 360, полуфинал 320, финал команд 160, дуэль 64 */
 function rebuildLandFromRound(ri) {
   const w = gridSizeForRoundIndex(ri);
   const h = w;
   gridW = w;
   gridH = h;
 
-  if (!baseRegion320 || baseRegion320.length !== BASE_GRID * BASE_GRID) {
+  if (!baseRegion360 || baseRegion360.length !== BASE_GRID * BASE_GRID) {
     landGrid = null;
     landPixelsTotal = gridW * gridH;
     return;
@@ -723,12 +723,33 @@ function rebuildLandFromRound(ri) {
     for (let x = 0; x < gridW; x++) {
       const bx = Math.min(BASE_GRID - 1, Math.floor(((x + 0.5) / gridW) * BASE_GRID));
       const by = Math.min(BASE_GRID - 1, Math.floor(((y + 0.5) / gridH) * BASE_GRID));
-      landGrid[y * gridW + x] = baseRegion320[by * BASE_GRID + bx];
+      landGrid[y * gridW + x] = baseRegion360[by * BASE_GRID + bx];
     }
   }
   applyRoundShapeMask(ri, landGrid, gridW, gridH);
-  /** Знаменатель % территории: все клетки сетки (океан и реки тоже можно закрашивать). */
-  landPixelsTotal = gridW * gridH;
+  let landN = 0;
+  for (let i = 0; i < landGrid.length; i++) {
+    if (landGrid[i] !== 0) landN++;
+  }
+  landPixelsTotal = landN;
+  for (const key of [...pixels.keys()]) {
+    const parts = key.split(",");
+    const px = Number(parts[0]);
+    const py = Number(parts[1]);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) {
+      pixels.delete(key);
+      continue;
+    }
+    if (px < 0 || px >= gridW || py < 0 || py >= gridH || landGrid[py * gridW + px] === 0) {
+      pixels.delete(key);
+    }
+  }
+}
+
+function cellIsLand(x, y) {
+  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
+  if (!landGrid) return true;
+  return landGrid[y * gridW + x] !== 0;
 }
 
 /**
@@ -818,7 +839,7 @@ function planCaptureRect(x0, y0, x1, y1) {
   const planned = [];
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+      if (!cellIsLand(x, y)) continue;
       planned.push([x, y]);
     }
   }
@@ -951,6 +972,7 @@ function applyFullMessageToPixelsCluster(msg) {
     if (!Array.isArray(p) || p.length < 3) continue;
     const x = p[0] | 0;
     const y = p[1] | 0;
+    if (landGrid && (x < 0 || x >= gridW || y < 0 || y >= gridH || landGrid[y * gridW + x] === 0)) continue;
     if (fmt === "v2" && p.length >= 5) {
       const t = p[2] | 0;
       const opk = String(p[3] || "").slice(0, 128);
@@ -973,6 +995,7 @@ function applyClusterGameReplication(msg) {
       const x = msg.x | 0;
       const y = msg.y | 0;
       if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
+      if (landGrid && landGrid[y * gridW + x] === 0) return;
       pixels.set(`${x},${y}`, {
         teamId: msg.t | 0,
         ownerPlayerKey: String(msg.ownerPlayerKey || "").slice(0, 128),
@@ -1357,7 +1380,22 @@ function countOnlineClients() {
 function buildStatsPayload() {
   /** @type {Map<number, number>} */
   const byTeam = new Map();
-  for (const val of pixels.values()) {
+  for (const [key, val] of pixels.entries()) {
+    const parts = key.split(",");
+    const px = Number(parts[0]);
+    const py = Number(parts[1]);
+    if (
+      landGrid &&
+      (!Number.isFinite(px) ||
+        !Number.isFinite(py) ||
+        px < 0 ||
+        px >= gridW ||
+        py < 0 ||
+        py >= gridH ||
+        landGrid[py * gridW + px] === 0)
+    ) {
+      continue;
+    }
     const tid = pixelTeam(val);
     byTeam.set(tid, (byTeam.get(tid) || 0) + 1);
   }
@@ -2123,7 +2161,7 @@ wss.on("connection", (ws, req) => {
       const r = zoneRect4(cx, cy);
       const planned = planCaptureRect(r.x0, r.y0, r.x1, r.y1);
       if (planned.length === 0) {
-        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        safeSend(ws, { type: "purchaseError", reason: "no_playable_land" });
         return;
       }
       const priceQuant = PRICES_QUANT.zone4;
@@ -2178,7 +2216,7 @@ wss.on("connection", (ws, req) => {
       const cy = msg.y | 0;
       const planned = planCaptureRect(cx - 2, cy - 2, cx + 3, cy + 3);
       if (planned.length === 0) {
-        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        safeSend(ws, { type: "purchaseError", reason: "no_playable_land" });
         return;
       }
       const priceQuant = PRICES_QUANT.zone6;
@@ -2233,7 +2271,7 @@ wss.on("connection", (ws, req) => {
       const cy = msg.y | 0;
       const planned = planCaptureRect(cx - 5, cy - 5, cx + 6, cy + 6);
       if (planned.length === 0) {
-        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        safeSend(ws, { type: "purchaseError", reason: "no_playable_land" });
         return;
       }
       const priceQuant = PRICES_QUANT.zone12;
@@ -2322,6 +2360,10 @@ wss.on("connection", (ws, req) => {
       const teamId = ws.teamId;
       if (x < 0 || x >= gridW || y < 0 || y >= gridH) {
         safeSend(ws, { type: "pixelReject", reason: "out_of_bounds" });
+        return;
+      }
+      if (!cellIsLand(x, y)) {
+        safeSend(ws, { type: "pixelReject", reason: "water" });
         return;
       }
 
