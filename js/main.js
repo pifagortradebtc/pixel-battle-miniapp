@@ -11,7 +11,11 @@ import {
   getEffectiveRecoverySec,
   PRICES_QUANT,
 } from "../lib/tournament-economy.js";
-import { flagCellFromSpawn, FLAG_CAPTURE_HITS_REQUIRED } from "../lib/flag-capture.js";
+import {
+  flagCellFromSpawn,
+  FLAG_CAPTURE_HITS_REQUIRED,
+  FLAG_VISUAL_CELLS_ABOVE,
+} from "../lib/flag-capture.js";
 
 let gridW = 360;
 let gridH = 360;
@@ -4590,6 +4594,30 @@ function revertOptimisticPixel() {
   else pixels.set(key, prev);
 }
 
+function clientPixelOwnerTeamAt(gx, gy) {
+  const pix = pixels.get(`${gx},${gy}`);
+  if (pix == null) return null;
+  return typeof pix === "number" ? pix : pix.teamId ?? null;
+}
+
+/**
+ * Клетка якоря флага чужой команды, всё ещё её по локальной карте — как isEnemyOwnedFlagBaseCell на сервере.
+ * Не трогаем её оптимистичным зонным захватом (сервер тоже пропускает).
+ */
+function isClientEnemyOwnedFlagAnchor(attackerTeamId, gx, gy) {
+  if (teamsMeta == null || attackerTeamId == null) return false;
+  const aid = attackerTeamId | 0;
+  for (const t of teamsMeta) {
+    if (t.solo || t.eliminated || !t.spawn) continue;
+    if ((t.id | 0) === aid) continue;
+    const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+    if (fx !== gx || fy !== gy) continue;
+    const owner = clientPixelOwnerTeamAt(gx, gy);
+    return owner === (t.id | 0);
+  }
+  return false;
+}
+
 /** Список клеток в прямоугольнике захвата — как на сервере (planCaptureRect). */
 function planClientCaptureCells(kind, cx, cy) {
   let x0;
@@ -4638,15 +4666,19 @@ function applyOptimisticWeapon(kind, cx, cy) {
   }
   keys = connected;
   revertOptimisticWeapon();
+  const paintKeys = keys.filter((k) => {
+    const [x, y] = k.split(",").map(Number);
+    return !isClientEnemyOwnedFlagAnchor(myTeamId, x, y);
+  });
   const prev = new Map();
-  for (const k of keys) {
+  for (const k of paintKeys) {
     prev.set(k, snapshotPixelCell(k));
     pixels.set(k, { teamId: myTeamId, shieldedUntil: 0 });
   }
   const gx0 = kind === "zoneCapture" ? cx - 1 : kind === "massCapture" ? cx - 2 : cx - 5;
   const gy0 = kind === "zoneCapture" ? cy - 1 : kind === "massCapture" ? cy - 2 : cy - 5;
   const size = kind === "zoneCapture" ? 4 : kind === "massCapture" ? 6 : 12;
-  optimisticWeaponPending = { kind, gx: gx0, gy: gy0, size, keys, prev };
+  optimisticWeaponPending = { kind, gx: gx0, gy: gy0, size, keys: paintKeys, prev };
   if (boardVfx) {
     const tr = getVfxTransform();
     const col = teamColor(myTeamId);
@@ -4873,7 +4905,7 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
-  /* Флаги баз (захват): маркер, прогресс, подсветка атакующего цвета. */
+  /* Флаги баз (захват): высокий флаг цветом команды, якорь = клетка 20 ударов; прогресс. */
   if (!lite && online && teamsMeta && cell >= 2) {
     const shNowF = Date.now();
     const tmap = getTeamColorByIdMap();
@@ -4881,7 +4913,8 @@ function draw(time = performance.now(), drawOpts = {}) {
       if (t.solo || t.eliminated || !t.spawn) continue;
       const sp = t.spawn;
       const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
-      if (fgx < x0 || fgx > x1 || fgy < y0 || fgy > y1) continue;
+      const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
+      if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) continue;
       const st = flagCaptureClientState.get(t.id) || { progress: 0, attackerTeamId: 0 };
       const pr = st.progress | 0;
       const atk = st.attackerTeamId | 0;
@@ -4890,11 +4923,38 @@ function draw(time = performance.now(), drawOpts = {}) {
       const cw = Math.ceil(cell);
       const ch = Math.ceil(cell);
       const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + pr * 0.2);
+      const teamHex = t.color || teamColor(t.id);
+      const { r, g, b } = hexToRgb(teamHex);
+      const mastW = Math.max(2.5, cell * 0.14);
+      const mastX = px + cw * 0.72;
+      const topY = py - FLAG_VISUAL_CELLS_ABOVE * ch;
+      const wave = Math.sin(time * 0.0033 + fgx * 0.35 + fgy * 0.22) * ch * 0.09;
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(mastX + 1.2, topY + 1.2, mastW, py + ch - topY);
+      ctx.fillStyle = "rgba(32,32,36,0.94)";
+      ctx.fillRect(mastX, topY, mastW, py + ch - topY);
+      const cLeft = px + cw * 0.05;
+      const cTop = topY + ch * 0.12;
+      const cW = cw * 0.64;
+      const cH = py + ch * 0.9 - cTop;
+      ctx.beginPath();
+      ctx.moveTo(mastX, cTop + wave * 0.25);
+      ctx.lineTo(cLeft + cW, cTop + wave);
+      ctx.lineTo(cLeft + cW * 0.9, cTop + cH + wave * 0.15);
+      ctx.lineTo(cLeft, cTop + cH * 0.96);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(${r},${g},${b},${0.88 + pulseF * 0.08})`;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.48)";
+      ctx.lineWidth = Math.max(1, cell * 0.05);
+      ctx.stroke();
+      ctx.restore();
       if (pr > 0 && atk > 0) {
         const atkHex = tmap?.get(atk) || teamColor(atk);
-        const { r, g, b } = hexToRgb(atkHex);
+        const ar = hexToRgb(atkHex);
         const blend = pr / FLAG_CAPTURE_HITS_REQUIRED;
-        ctx.fillStyle = `rgba(${r},${g},${b},${0.2 + blend * 0.32 + pulseF * 0.08})`;
+        ctx.fillStyle = `rgba(${ar.r},${ar.g},${ar.b},${0.2 + blend * 0.32 + pulseF * 0.08})`;
         ctx.fillRect(px, py, cw, ch);
       }
       if (myTeamId != null && t.id === myTeamId && shNowF < myFlagUnderAttackUntil && pr > 0) {
@@ -4902,17 +4962,9 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.fillStyle = `rgba(255, 35, 60, ${flash})`;
         ctx.fillRect(px, py, cw, ch);
       }
-      ctx.fillStyle = `rgba(255, 255, 245, ${0.88 + pulseF * 0.08})`;
-      ctx.beginPath();
-      ctx.moveTo(px + cw * 0.5, py + ch * 0.1);
-      ctx.lineTo(px + cw * 0.78, py + ch * 0.42);
-      ctx.lineTo(px + cw * 0.5, py + ch * 0.34);
-      ctx.lineTo(px + cw * 0.22, py + ch * 0.42);
-      ctx.closePath();
-      ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,0.4)";
-      ctx.lineWidth = Math.max(1, cell * 0.045);
-      ctx.stroke();
+      ctx.strokeStyle = `rgba(0,0,0,${0.35 + pulseF * 0.12})`;
+      ctx.lineWidth = Math.max(1, cell * 0.06);
+      ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
       if (pr > 0) {
         const barW = cw * 0.88;
         const barH = Math.max(3, cell * 0.15);
