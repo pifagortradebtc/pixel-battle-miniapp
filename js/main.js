@@ -6,6 +6,15 @@
 
 import { createBoardVfx, spawnFloatingText } from "./vfx.js";
 import {
+  initEventPresentation,
+  resetEventPresentationForRound,
+  notifyRoundEventFromServer,
+  notifySeismicPreview,
+  syncPremiumBattlePresentation,
+  enqueueBaseCapturedPresentation,
+  fillPremiumAlertPanel,
+} from "./event-presentation.js";
+import {
   BASE_ACTION_COOLDOWN_SEC,
   getCurrentCooldownMs,
   getEffectiveRecoverySec,
@@ -17,6 +26,7 @@ import {
   FLAG_VISUAL_CELLS_ABOVE,
   computeEffectiveBaseHp,
 } from "../lib/flag-capture.js";
+import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
 
 let gridW = 360;
 let gridH = 360;
@@ -503,6 +513,10 @@ function endSessionRestore() {
 /** Мета с сервера */
 let teamsMeta = null;
 let teamCounts = {};
+/** Последние строки рейтинга (stats) — подсказка «вы впереди / отстаёте» в финале. */
+let lastLeaderboardRows = [];
+/** Сброс кинематографии событий при смене раунда. */
+let lastRoundIndexForPresentation = -1;
 let maxPerTeam = 200;
 /** Сервер: false — только просмотр, без пикселей и команд */
 let spectatorMode = false;
@@ -523,6 +537,10 @@ let pendingLeaveToCreate = false;
 /** Экономика с сервера */
 let walletState = null;
 let lastStatsGlobalEvent = null;
+/** Предупреждение сейсмики: подсветка зон до удара. */
+let seismicPreviewClient = null;
+/** Визуальный «хвост» после удара (пыль / трещины). */
+let seismicAftermathUntilMs = 0;
 /** Доля доступных очков (score share), для кризис-оверлея при просадке. */
 let lastMyTeamScoreShare = null;
 /** Прогресс захвата флага по защищающейся команде: teamId → { progress, attackerTeamId }. */
@@ -754,7 +772,14 @@ function triggerMapShake(ms = 560) {
 
 function showTerritoryDramaBanner(text, durationMs = 3200, critical = false) {
   if (!territoryDramaBannerEl) return;
-  territoryDramaBannerEl.textContent = text;
+  const title = critical ? "LAST CELL" : "LAST 6 CELLS";
+  const sub = String(text || "");
+  fillPremiumAlertPanel(
+    territoryDramaBannerEl,
+    escapeHtml(title),
+    escapeHtml(sub),
+    critical ? "territory-crit" : "territory-warn"
+  );
   territoryDramaBannerEl.hidden = false;
   territoryDramaBannerEl.classList.toggle("event-banner--critical", critical);
   if (territoryBannerHideTimer) {
@@ -1044,25 +1069,25 @@ const TOURNAMENT_ROUND_COPY = [
     title: "РАУНД 1 — МАССОВАЯ БИТВА",
     splashKicker: "МАССОВАЯ БИТВА",
     splashTitle: "РАУНД 1 СТАРТОВАЛ",
-    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li>После части раунда: <strong>флаг в центре базы</strong> — 20 ударов по клетке флага захватывают всю команду</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
+    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li><strong>Чужая база</strong> с начала боя: бейте по <strong>клетке флага</strong> (центр базы 6×6) — снимаете HP; обычным пикселем базу не перекрасить; 20 попаданий + финальный удар — захват всей команды</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
   },
   {
     title: "РАУНД 2 — КОМАНДНЫЙ БОЙ",
     splashKicker: "КОМАНДНЫЙ БОЙ",
     splashTitle: "РАУНД 2 СТАРТОВАЛ",
-    bodyHtml: `<ul><li>До <strong>10</strong> игроков в команде</li><li>Бой: <strong>5 ч</strong></li><li>Цель: максимальный счёт</li><li>Дальше проходит только <strong>одна</strong> победившая команда</li></ul>`,
+    bodyHtml: `<ul><li>До <strong>10</strong> игроков в команде</li><li>Бой: <strong>5 ч</strong></li><li>Цель: максимальный счёт</li><li><strong>Захват базы</strong> — с первой секунды боя: удары по клетке флага врага (смежно с вашей территорией)</li><li>Дальше проходит только <strong>одна</strong> победившая команда</li></ul>`,
   },
   {
     title: "РАУНД 3 — ПАРЫ",
     splashKicker: "СТАДИЯ ПАР",
     splashTitle: "РАУНД 3 СТАРТОВАЛ",
-    bodyHtml: `<ul><li>Команды по <strong>2</strong> игрока</li><li>Бой: <strong>4 ч</strong></li><li>Счёт и захват как раньше</li><li>Дальше проходит только <strong>одна пара</strong></li></ul>`,
+    bodyHtml: `<ul><li>Команды по <strong>2</strong> игрока</li><li>Бой: <strong>4 ч</strong></li><li>Счёт и захват как раньше; <strong>база врага</strong> уязвима со старта боя (клетка флага)</li><li>Дальше проходит только <strong>одна пара</strong></li></ul>`,
   },
   {
     title: "ФИНАЛ — 1 НА 1",
     splashKicker: "ДУЭЛЬ",
     splashTitle: "ФИНАЛ СТАРТОВАЛ",
-    bodyHtml: `<ul><li><strong>2</strong> игрока, бой <strong>75 мин</strong></li><li>Без донатов и бустов — только скилл</li><li>Победа: больший счёт <strong>или</strong> ≥60% всех доступных очков на карте мгновенно</li></ul>`,
+    bodyHtml: `<ul><li><strong>2</strong> игрока, бой <strong>75 мин</strong></li><li>Без донатов и бустов — только скилл</li><li><strong>База</strong>: удары по клетке флага с начала боя</li><li>Победа: больший счёт <strong>или</strong> ≥60% всех доступных очков на карте мгновенно</li></ul>`,
   },
 ];
 
@@ -1368,7 +1393,11 @@ function formatPercent(pct) {
 
 function renderLeaderboard(msg) {
   if (!onlineCountEl || !leaderboardListEl) return;
-  if (msg.globalEvent) lastStatsGlobalEvent = msg.globalEvent;
+  if (msg.globalEvent) {
+    lastStatsGlobalEvent = msg.globalEvent;
+    if (walletState) walletState.globalEvent = msg.globalEvent;
+  }
+  lastLeaderboardRows = Array.isArray(msg.rows) ? msg.rows : [];
   onlineCountEl.textContent = String(msg.online ?? 0);
   leaderboardListEl.replaceChildren();
   for (const row of msg.rows || []) {
@@ -1423,6 +1452,7 @@ function renderLeaderboard(msg) {
     }
     lastMyTeamScoreShare = share;
   }
+  syncEventBanner();
 }
 
 function applyTeamDisplay(teamId, name, emoji, color) {
@@ -2086,7 +2116,12 @@ function onMeta(msg) {
       : typeof msg.warmupEndsAt === "number" && !Number.isNaN(msg.warmupEndsAt)
         ? msg.warmupEndsAt
         : null;
-  roundIndexMeta = typeof msg.roundIndex === "number" ? msg.roundIndex : 0;
+  const nextRi = typeof msg.roundIndex === "number" ? msg.roundIndex : 0;
+  if (nextRi !== lastRoundIndexForPresentation) {
+    lastRoundIndexForPresentation = nextRi;
+    resetEventPresentationForRound();
+  }
+  roundIndexMeta = nextRi;
   tournamentTimeScaleClient =
     typeof msg.tournamentTimeScale === "number" && msg.tournamentTimeScale >= 1
       ? msg.tournamentTimeScale | 0
@@ -2173,10 +2208,10 @@ function notifyReject(reason) {
     team_eliminated: "Команда уничтожена — территории не осталось.",
     warmup: "Разминка: пиксели включатся, когда закончится отсчёт 2 минут.",
     flag_rate: "Захват флага: слишком часто для вашей команды. Подождите мгновение.",
-    enemy_base_locked:
-      "База врага: снимайте HP ударами по клетке флага (механика откроется позже в раунде). Обычным пикселем базу не перекрасить.",
+    enemy_base_not_adjacent:
+      "Сначала расширьтесь к базе врага: ваши клетки должны быть рядом с клеткой флага (8 направлений). Обычным пикселем базу не перекрасить.",
     enemy_base:
-      "База врага: бейте по клетке флага рядом с вашей территорией — снимайте HP до 0, затем финальный удар захватывает всю команду.",
+      "Чужая база доступна с начала раунда: бейте по клетке флага, чтобы снимать HP. Обычным пикселем базу не перекрасить. Доведите HP до 0, затем финальный удар захватывает всю команду.",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -2213,13 +2248,30 @@ function syncFlagCaptureStateFromMeta(flags) {
 function showFlagAlertBanner(text) {
   const el = document.getElementById("flag-alert-banner");
   if (!el) return;
-  el.textContent = text;
+  const raw = String(text || "");
+  let title = raw;
+  let sub = "";
+  const dash = raw.indexOf(" — ");
+  if (dash > 0) {
+    title = raw.slice(0, dash).trim();
+    sub = raw.slice(dash + 3).trim();
+  }
+  let variant = "flag-warn";
+  const hpM = raw.match(/(\d+)\s*\/\s*(\d+)\s*HP/i);
+  if (/КРИТИЧНО|FINISH!|0\s*\/\s*\d+\s*HP/i.test(raw)) variant = "flag-crit";
+  else if (hpM) {
+    const cur = Number(hpM[1]);
+    if (cur <= 1) variant = "flag-crit";
+    else if (cur <= 5) variant = "flag-danger";
+    else if (cur <= 10) variant = "flag-warn";
+  }
+  fillPremiumAlertPanel(el, escapeHtml(title), escapeHtml(sub), variant);
   el.hidden = false;
   if (showFlagAlertBanner._hideTimer) clearTimeout(showFlagAlertBanner._hideTimer);
   showFlagAlertBanner._hideTimer = setTimeout(() => {
     el.hidden = true;
     showFlagAlertBanner._hideTimer = null;
-  }, 4800);
+  }, 5200);
 }
 
 function notifyPurchaseError(reason) {
@@ -2247,12 +2299,128 @@ function notifyPurchaseError(reason) {
 
 const ROUND_END_BANNER_MS = 10 * 60 * 1000;
 
+function computeLeaderboardGapHint() {
+  if (myTeamId == null || !lastLeaderboardRows.length) return "";
+  const mine = lastLeaderboardRows.find((r) => (r.teamId | 0) === (myTeamId | 0));
+  if (!mine) return "";
+  const rank = mine.rank | 0;
+  const leader = lastLeaderboardRows[0];
+  if (!leader) return "";
+  if (rank === 1) return "Вы лидируете";
+  const shareMine =
+    typeof mine.scoreSharePercent === "number"
+      ? mine.scoreSharePercent
+      : typeof mine.percent === "number"
+        ? mine.percent
+        : 0;
+  const shareLead =
+    typeof leader.scoreSharePercent === "number"
+      ? leader.scoreSharePercent
+      : typeof leader.percent === "number"
+        ? leader.percent
+        : 0;
+  const gap = shareLead - shareMine;
+  if (gap > 0.05) return `До лидера ~${gap.toFixed(1)} п.п.`;
+  if (gap < -0.05) return "Вы впереди по доле";
+  return "";
+}
+
+function formatBattleCountdown(untilMs) {
+  const left = untilMs - Date.now();
+  if (left <= 0) return "0:00";
+  const s = Math.max(0, Math.ceil(left / 1000));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function getClientGlobalEventSnapshot() {
+  return walletState?.globalEvent || lastStatsGlobalEvent;
+}
+
 function syncEventBanner() {
   if (!eventBannerEl) return;
   const online = wantOnline && getWsUrl();
   if (!online || spectatorMode || gameFinishedMeta) {
     eventBannerEl.hidden = true;
+    seismicPreviewClient = null;
+    syncPremiumBattlePresentation({
+      ge: null,
+      seismicPreview: null,
+      online: false,
+      spectator: true,
+      gameFinished: true,
+      roundEndsAtMs: null,
+      leaderboardHint: "",
+    });
     return;
+  }
+  const ge = getClientGlobalEventSnapshot();
+  const layersHint = ge?.battleEvents?.layers;
+  const dramaticL =
+    Array.isArray(layersHint) && layersHint.find((l) => l && l.kind === "dramatic_pressure");
+  const finalTitleForHint = dramaticL?.title
+    ? String(dramaticL.title)
+    : ge && ge.title
+      ? String(ge.title)
+      : "";
+  const finalHint =
+    dramaticL &&
+    (/FINAL\s*10|FINAL\s*HOUR|10\s*MINUTES/i.test(finalTitleForHint) ||
+      /decides everything|every point/i.test(String(dramaticL.subtitle || "")))
+      ? computeLeaderboardGapHint()
+      : "";
+  const hideLegacyBattle = syncPremiumBattlePresentation({
+    ge,
+    seismicPreview: seismicPreviewClient,
+    online: true,
+    spectator: false,
+    gameFinished: false,
+    roundEndsAtMs,
+    leaderboardHint: finalHint,
+  });
+
+  if (hideLegacyBattle) {
+    if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
+      seismicPreviewClient = null;
+    }
+    const leftR = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : 0;
+    if (leftR > 0 && leftR <= ROUND_END_BANNER_MS) {
+      eventBannerEl.hidden = false;
+      eventBannerEl.className = "event-banner event-banner--mini-round";
+      const m = Math.max(1, Math.ceil(leftR / 60000));
+      eventBannerEl.textContent = `⏱ До конца раунда · ещё ~${m} мин`;
+      return;
+    }
+    eventBannerEl.hidden = true;
+    return;
+  }
+
+  const dramatic = ge?.battleEvents?.primary?.dramatic === true;
+  if (ge && ge.active && ge.title && typeof ge.until === "number" && ge.until > Date.now()) {
+    eventBannerEl.hidden = false;
+    eventBannerEl.className =
+      dramatic && /FINAL|HOUR|MINUTES|PHASE/i.test(String(ge.title))
+        ? "event-banner event-banner--battle event-banner--dramatic"
+        : "event-banner event-banner--battle";
+    const sub = ge.subtitle ? String(ge.subtitle) : "";
+    const timer = formatBattleCountdown(ge.until);
+    eventBannerEl.innerHTML = `<strong>${escapeHtml(String(ge.title))}</strong><div class="event-banner__sub">${escapeHtml(sub)}</div><div class="event-banner__timer">${escapeHtml(timer)}</div>`;
+    return;
+  }
+  if (
+    seismicPreviewClient &&
+    typeof seismicPreviewClient.impactAtMs === "number" &&
+    seismicPreviewClient.impactAtMs > Date.now()
+  ) {
+    eventBannerEl.hidden = false;
+    eventBannerEl.className = "event-banner event-banner--seismic-warn";
+    const timer = formatBattleCountdown(seismicPreviewClient.impactAtMs);
+    eventBannerEl.innerHTML = `<strong>${escapeHtml("SEISMIC ACTIVITY")}</strong><div class="event-banner__sub">${escapeHtml("Some territories will collapse and become neutral")}</div><div class="event-banner__timer">${escapeHtml(timer)}</div>`;
+    return;
+  }
+  if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
+    seismicPreviewClient = null;
   }
   if (roundEndsAtMs == null) {
     eventBannerEl.hidden = true;
@@ -2264,6 +2432,7 @@ function syncEventBanner() {
     return;
   }
   eventBannerEl.hidden = false;
+  eventBannerEl.className = "event-banner";
   const m = Math.max(1, Math.ceil(left / 60000));
   eventBannerEl.textContent = `⏱ До конца раунда · ещё ~${m} мин`;
 }
@@ -3537,6 +3706,7 @@ function connectWs() {
 
     if (msg.type === "gameEnded") {
       endSessionRestore();
+      seismicPreviewClient = null;
       try {
         localStorage.removeItem(SESSION_TEAM_EDIT);
       } catch {
@@ -3575,6 +3745,7 @@ function connectWs() {
     }
     if (msg.type === "roundEnded") {
       endSessionRestore();
+      seismicPreviewClient = null;
       try {
         localStorage.removeItem(SESSION_TEAM_EDIT);
       } catch {
@@ -3679,13 +3850,52 @@ function connectWs() {
       onMeta(msg);
       return;
     }
-    if (msg.type === "globalEvent") {
-      if (walletState) {
-        walletState.globalEvent = { active: false, kind: null, until: 0 };
+    if (msg.type === "roundEvent") {
+      if (msg.phase === "start" && typeof window !== "undefined" && window.console?.debug) {
+        console.debug("[roundEvent]", msg.phase, msg.eventId, msg.title);
       }
-      lastStatsGlobalEvent = { active: false, kind: null, until: 0 };
+      if (msg.phase === "start") notifyRoundEventFromServer(msg);
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "globalEvent") {
+      if (msg.globalEvent && typeof msg.globalEvent === "object") {
+        if (walletState) walletState.globalEvent = msg.globalEvent;
+        lastStatsGlobalEvent = msg.globalEvent;
+      }
       syncEventBanner();
       syncTeamBuffBanner();
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "seismicPreview") {
+      seismicPreviewClient = {
+        eventId: typeof msg.eventId === "string" ? msg.eventId : "",
+        regions: Array.isArray(msg.regions) ? msg.regions : [],
+        impactAtMs: typeof msg.impactAtMs === "number" ? msg.impactAtMs : 0,
+      };
+      notifySeismicPreview(seismicPreviewClient);
+      syncEventBanner();
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "seismicImpact") {
+      seismicPreviewClient = null;
+      const au = typeof msg.aftermathUntilMs === "number" ? msg.aftermathUntilMs : 0;
+      if (au > Date.now()) seismicAftermathUntilMs = au;
+      const cells = Array.isArray(msg.cells) ? msg.cells : [];
+      for (let i = 0; i < cells.length; i++) {
+        const p = cells[i];
+        if (!Array.isArray(p) || p.length < 2) continue;
+        pixels.delete(`${p[0] | 0},${p[1] | 0}`);
+      }
+      if (boardVfx && cells.length) {
+        boardVfx.seismicCrackBurst(cells);
+        flushBoardVfxFrame();
+      }
+      triggerMapShake(850);
+      syncEventBanner();
+      scheduleDraw({ full: true });
       return;
     }
     if (msg.type === "flagCaptureProgress") {
@@ -3797,7 +4007,8 @@ function connectWs() {
       const an = teamsMeta?.find((x) => x.id === aid)?.name || "атакующие";
       const dn = teamsMeta?.find((x) => x.id === did)?.name || "защита";
       triggerMapShake(1200);
-      showFlagAlertBanner("BASE CAPTURED — БАЗА ЗАХВАЧЕНА");
+      enqueueBaseCapturedPresentation(String(an), String(dn));
+      showFlagAlertBanner(`BASE CAPTURED — база «${dn}» уничтожена`);
       showPlacementFeedback(
         `BASE CAPTURED / БАЗА ЗАХВАЧЕНА. «${dn}» уничтожена — вся территория у «${an}».`,
         "error",
@@ -4976,6 +5187,159 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
+  /* События боя: золото / сжатие / экономика / предпросмотр сейсмики (сервер задаёт зоны). */
+  if (!lite && online) {
+    const ge = getClientGlobalEventSnapshot();
+    const layers = ge?.battleEvents?.layers;
+    const compLayer = layers && layers.find((l) => l.kind === "map_compression");
+    const pulseEv = 0.5 + 0.5 * Math.sin(time * 0.0022);
+    function cellInEconomicLayer(L, gx, gy) {
+      if (Array.isArray(L.rects) && L.rects.length) {
+        for (let ri = 0; ri < L.rects.length; ri++) {
+          const rr = L.rects[ri];
+          if (rr && pointInRect(gx, gy, rr)) return rr.mult > 1 ? "boom" : "rec";
+        }
+        return null;
+      }
+      if (L.rect && pointInRect(gx, gy, L.rect)) {
+        if (L.kind === "trade_boom" || L.mult > 1) return "boom";
+        if (L.kind === "recession" || L.mult < 1) return "rec";
+      }
+      return null;
+    }
+    if (layers && layers.length) {
+      for (let gy = y0; gy <= y1; gy++) {
+        for (let gx = x0; gx <= x1; gx++) {
+          if (!isClientLandCell(gx, gy)) continue;
+          const px = offsetX + gx * cell;
+          const py = offsetY + gy * cell;
+          const cw = Math.ceil(cell);
+          const ch = Math.ceil(cell);
+          for (let li = 0; li < layers.length; li++) {
+            const L = layers[li];
+            const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
+            if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
+              ctx.fillStyle = `rgba(255, 198, 70, ${0.12 + pulseEv * 0.1})`;
+              ctx.fillRect(px, py, cw, ch);
+              ctx.strokeStyle = `rgba(255, 210, 120, ${0.2 + pulseEv * 0.1})`;
+              ctx.lineWidth = Math.max(1, cell * 0.14);
+              ctx.strokeRect(px - 0.5, py - 0.5, cw + 1, ch + 1);
+              ctx.strokeStyle = `rgba(255, 245, 200, ${0.42 + pulseEv * 0.22})`;
+              ctx.lineWidth = Math.max(1, cell * 0.07);
+              ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+            }
+            const econKinds = [
+              "trade_boom",
+              "recession",
+              "economic_shift",
+              "economic_rotation",
+              "resource_surge",
+            ];
+            if (econKinds.includes(L.kind)) {
+              const zone = cellInEconomicLayer(L, gx, gy);
+              if (zone === "boom") {
+                ctx.fillStyle = `rgba(70, 220, 130, ${0.09 + pulseEv * 0.06})`;
+                ctx.fillRect(px, py, cw, ch);
+                if (((gx + gy * 3 + ((time / 140) | 0)) & 7) === 0) {
+                  ctx.fillStyle = `rgba(200, 255, 220, ${0.1 + pulseEv * 0.07})`;
+                  ctx.fillRect(px + cw * 0.42, py, Math.max(1, cw * 0.16), ch * 0.42);
+                }
+              } else if (zone === "rec") {
+                ctx.fillStyle = `rgba(100, 140, 200, ${0.12 + pulseEv * 0.06})`;
+                ctx.fillRect(px, py, cw, ch);
+                if (((gx * 3 + gy + ((time / 160) | 0)) & 7) === 1) {
+                  ctx.fillStyle = `rgba(130, 150, 200, ${0.14})`;
+                  ctx.fillRect(px + cw * 0.1, py + ch * 0.62, cw * 0.8, Math.max(1, ch * 0.1));
+                }
+              }
+            }
+          }
+          if (compLayer && compLayer.compression) {
+            const m = tournamentCompressionMultiplierForCell(gx, gy, gridW, gridH, compLayer.compression);
+            if (m < 0.92) {
+              ctx.fillStyle = `rgba(20, 35, 65, ${Math.min(0.4, (1 - m) * 0.5)})`;
+              ctx.fillRect(px, py, cw, ch);
+            } else if (m > 1.08) {
+              ctx.fillStyle = `rgba(255, 185, 95, ${Math.min(0.24, (m - 1) * 0.38)})`;
+              ctx.fillRect(px, py, cw, ch);
+            }
+          }
+        }
+      }
+    }
+    if (layers && layers.length) {
+      const goldL = layers.find((l) => ["gold_zone", "target_zone", "duel_zone"].includes(l.kind) && l.rect);
+      if (goldL && goldL.rect) {
+        const r = goldL.rect;
+        const gx0 = r.x0 | 0;
+        const gy0 = r.y0 | 0;
+        const gw = Math.max(1, r.w | 0);
+        const gh = Math.max(1, r.h | 0);
+        const sx0 = offsetX + gx0 * cell;
+        const sy0 = offsetY + gy0 * cell;
+        const sw = gw * cell;
+        const sh = gh * cell;
+        const sweep = (time * 0.00055) % 1;
+        ctx.save();
+        const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
+        grd.addColorStop(0, "rgba(255,255,255,0)");
+        grd.addColorStop(0.5, "rgba(255,235,170,0.2)");
+        grd.addColorStop(1, "rgba(255,255,255,0)");
+        ctx.fillStyle = grd;
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillRect(sx0, sy0, sw, sh);
+        ctx.restore();
+      }
+      if (compLayer && compLayer.compression) {
+        const cx = offsetX + (gridW * 0.5) * cell;
+        const cy = offsetY + (gridH * 0.5) * cell;
+        const maxR = Math.min(w, h) * 0.58;
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        for (let ring = 0; ring < 3; ring++) {
+          const phase = (time * 0.00032 + ring * 0.34) % 1;
+          const rad = maxR * (0.22 + phase * 0.75);
+          const a = 0.055 * (1 - phase);
+          ctx.strokeStyle = `rgba(255,150,100,${a})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+    if (seismicPreviewClient?.regions?.length) {
+      for (let gy = y0; gy <= y1; gy++) {
+        for (let gx = x0; gx <= x1; gx++) {
+          if (!isClientLandCell(gx, gy)) continue;
+          for (let ri = 0; ri < seismicPreviewClient.regions.length; ri++) {
+            const reg = seismicPreviewClient.regions[ri];
+            if (reg.kind === "manhattan_ball") {
+              const d = Math.abs(gx - (reg.cx | 0)) + Math.abs(gy - (reg.cy | 0));
+              if (d <= (reg.r | 0)) {
+                const px = offsetX + gx * cell;
+                const py = offsetY + gy * cell;
+                const cw = Math.ceil(cell);
+                const ch = Math.ceil(cell);
+                const pulseS = 0.5 + 0.5 * Math.sin(time * 0.006);
+                ctx.fillStyle = `rgba(255, 85, 45, ${0.13 + pulseS * 0.11})`;
+                ctx.fillRect(px, py, cw, ch);
+              }
+            }
+          }
+        }
+      }
+    }
+    const aft = Date.now();
+    if (aft < seismicAftermathUntilMs) {
+      const fade = Math.min(1, (seismicAftermathUntilMs - aft) / 20_000);
+      const dust = 0.06 * fade + 0.04 * fade * Math.sin(time * 0.01);
+      ctx.fillStyle = `rgba(180, 150, 120, ${dust})`;
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+
   /* Допустимые клетки для следующего пикселя: пустая суша, 8-соседство с вашей территорией. */
   const drawExpansionFrontier =
     !lite &&
@@ -5632,6 +5996,7 @@ async function bootstrap() {
   initTelegram();
   await loadRegions();
   loadFromStorage();
+  initEventPresentation();
   migrateLegacySessionStorage();
   clearSoloFromSession();
   wantOnline = !!getWsUrl();

@@ -9,6 +9,7 @@
   <meta name="pixel-battle-tg-app" content="" />
   <title>Pixel Battle</title>
   <link rel="stylesheet" href="css/main.css" />
+  <link rel="stylesheet" href="css/event-presentation.css" />
   <link rel="stylesheet" href="css/shop.css" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
@@ -17,7 +18,7 @@
   <div class="event-banner-stack" aria-live="polite">
     <div id="event-banner" class="event-banner" hidden role="status"></div>
     <div id="team-buff-banner" class="event-banner event-banner--team" hidden role="status"></div>
-    <div id="territory-drama-banner" class="event-banner event-banner--danger" hidden role="alert"></div>
+    <div id="territory-drama-banner" class="event-banner event-banner--danger" hidden role="alert" aria-live="assertive"></div>
     <div
       id="placement-feedback-banner"
       class="event-banner event-banner--feedback"
@@ -27,6 +28,22 @@
     ></div>
     <div id="flag-alert-banner" class="event-banner event-banner--flag" hidden role="alert" aria-live="assertive"></div>
   </div>
+
+  <div id="cinematic-event-overlay" class="cinematic-event" hidden aria-live="assertive">
+    <div class="cinematic-event__backdrop" aria-hidden="true"></div>
+    <div class="cinematic-event__scanlines" aria-hidden="true"></div>
+    <div class="cinematic-event__column">
+      <div class="cinematic-event__kicker">LIVE EVENT</div>
+      <div class="cinematic-event__panel cinematic-event__panel--default">
+        <div class="cinematic-event__icon" aria-hidden="true">◆</div>
+        <h2 class="cinematic-event__title"></h2>
+        <p class="cinematic-event__subtitle"></p>
+        <div class="cinematic-event__ribbon" aria-hidden="true"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="event-hud-dock" class="event-hud-dock" hidden aria-live="polite"></div>
 
   <div id="round-start-splash" class="round-start-splash" hidden aria-live="polite">
     <div class="round-start-splash__panel">
@@ -582,6 +599,8 @@
           </div>
         </div>
       </header>
+
+      <div id="final-pressure-strip" class="final-pressure-strip" hidden role="status" aria-live="polite"></div>
 
       <main class="stage-wrap" id="stage-wrap">
         <div id="defeat-flash" class="defeat-flash" aria-hidden="true"></div>

@@ -1466,6 +1466,62 @@ body {
   background: linear-gradient(90deg, rgba(180, 83, 9, 0.92), rgba(217, 119, 6, 0.88), rgba(180, 83, 9, 0.92));
   border-bottom: 1px solid rgba(251, 191, 36, 0.35);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  line-height: 1.35;
+}
+
+.event-banner__sub {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  opacity: 0.92;
+  margin-top: 2px;
+  letter-spacing: 0.01em;
+}
+
+.event-banner__timer {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 800;
+  margin-top: 3px;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+}
+
+.event-banner--battle {
+  color: #fffbeb;
+  background: linear-gradient(90deg, rgba(146, 90, 10, 0.95), rgba(202, 138, 4, 0.92), rgba(146, 90, 10, 0.95));
+  border-bottom-color: rgba(253, 224, 71, 0.45);
+}
+
+.event-banner--dramatic {
+  color: #fff5f5;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: linear-gradient(90deg, rgba(90, 20, 40, 0.97), rgba(160, 30, 50, 0.95), rgba(90, 20, 40, 0.97));
+  border-bottom: 2px solid rgba(255, 160, 160, 0.55);
+  animation: territory-danger-pulse 0.85s ease-in-out infinite;
+}
+
+.event-banner--mini-round {
+  font-size: 0.64rem;
+  padding: 4px 8px 5px;
+  font-weight: 700;
+  color: #e8ecff;
+  background: linear-gradient(90deg, rgba(35, 42, 62, 0.94), rgba(55, 62, 92, 0.9), rgba(35, 42, 62, 0.94));
+  border-bottom: 1px solid rgba(160, 180, 255, 0.25);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  animation: none;
+}
+
+.event-banner--seismic-warn {
+  color: #fff1f2;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: linear-gradient(90deg, rgba(120, 40, 30, 0.96), rgba(180, 60, 40, 0.94), rgba(120, 40, 30, 0.96));
+  border-bottom: 1px solid rgba(252, 165, 165, 0.5);
+  animation: territory-danger-pulse 1s ease-in-out infinite;
 }
 
 .event-banner--team {

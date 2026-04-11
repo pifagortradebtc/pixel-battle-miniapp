@@ -39,6 +39,8 @@ export function createBoardVfx(canvas) {
   let shields = [];
   /** @type {{ t0: number, gx: number, gy: number, n: number, color: string }[]} */
   let zoneFlashes = [];
+  /** @type {{ t0: number, segments: { gx1: number; gy1: number; gx2: number; gy2: number }[] }[]} */
+  let crackBursts = [];
 
   function hexToRgb(hex) {
     const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -267,6 +269,33 @@ export function createBoardVfx(canvas) {
     lightningBurst(transform);
   }
 
+  /**
+   * Трещины сейсмики по затронутым клеткам (лёгкие сегменты, без спама).
+   * @param {[number, number][]} cells
+   */
+  function seismicCrackBurst(cells) {
+    if (!cells || cells.length === 0) return;
+    const now = performance.now();
+    const nCells = cells.length;
+    const maxSeg = Math.min(56, 10 + (nCells >> 1));
+    const segs = [];
+    for (let i = 0; i < maxSeg; i++) {
+      const c = cells[(Math.random() * nCells) | 0];
+      if (!Array.isArray(c) || c.length < 2) continue;
+      const gx = (c[0] | 0) + 0.5;
+      const gy = (c[1] | 0) + 0.5;
+      const ang = Math.random() * Math.PI * 2;
+      const len = 0.22 + Math.random() * 1.05;
+      segs.push({
+        gx1: gx - Math.cos(ang) * len * 0.5,
+        gy1: gy - Math.sin(ang) * len * 0.5,
+        gx2: gx + Math.cos(ang) * len * 0.5,
+        gy2: gy + Math.sin(ang) * len * 0.5,
+      });
+    }
+    if (segs.length) crackBursts.push({ t0: now, segments: segs });
+  }
+
   function countActiveVfx() {
     return (
       ripples.length +
@@ -275,7 +304,8 @@ export function createBoardVfx(canvas) {
       shockwaves.length +
       bolts.length +
       shields.length +
-      zoneFlashes.length
+      zoneFlashes.length +
+      crackBursts.length
     );
   }
 
@@ -297,6 +327,7 @@ export function createBoardVfx(canvas) {
     const BOLTS = 3;
     const SHIELDS = 8;
     const ZONES = 8;
+    const CRACKS = 4;
     while (ripples.length > RIPPLES) ripples.shift();
     while (particles.length > PARTICLES) particles.shift();
     while (beams.length > BEAMS) beams.shift();
@@ -304,6 +335,7 @@ export function createBoardVfx(canvas) {
     while (bolts.length > BOLTS) bolts.shift();
     while (shields.length > SHIELDS) shields.shift();
     while (zoneFlashes.length > ZONES) zoneFlashes.shift();
+    while (crackBursts.length > CRACKS) crackBursts.shift();
   }
 
   function pruneExpiredAndIntegrate(now, cellPx) {
@@ -322,6 +354,7 @@ export function createBoardVfx(canvas) {
     bolts = bolts.filter((b) => now - b.t0 <= 500);
     shields = shields.filter((s) => now - s.t0 <= 900);
     zoneFlashes = zoneFlashes.filter((z) => now - z.t0 <= 500);
+    crackBursts = crackBursts.filter((c) => now - c.t0 <= 720);
     enforceVfxCaps();
   }
 
@@ -446,6 +479,34 @@ export function createBoardVfx(canvas) {
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, side, side);
     }
+
+    for (let i = 0; i < crackBursts.length; i++) {
+      const cb = crackBursts[i];
+      const age = now - cb.t0;
+      const t = age / 720;
+      const fade = 1 - t;
+      const flash = age < 90 ? 1.15 : 1;
+      ctx.lineCap = "round";
+      for (let j = 0; j < cb.segments.length; j++) {
+        const s = cb.segments[j];
+        const sx1 = transform.offsetX + s.gx1 * cellPx;
+        const sy1 = transform.offsetY + s.gy1 * cellPx;
+        const sx2 = transform.offsetX + s.gx2 * cellPx;
+        const sy2 = transform.offsetY + s.gy2 * cellPx;
+        ctx.strokeStyle = `rgba(45,32,22,${0.55 * fade * flash})`;
+        ctx.lineWidth = Math.max(1, cellPx * 0.07 * fade);
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.stroke();
+        ctx.strokeStyle = `rgba(200,150,100,${0.35 * fade})`;
+        ctx.lineWidth = Math.max(0.8, cellPx * 0.04 * fade);
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.stroke();
+      }
+    }
   }
 
   function render(now, transform) {
@@ -520,6 +581,7 @@ export function createBoardVfx(canvas) {
     defeatExplosion,
     flagBaseHitImpact,
     flagCaptureExplosion,
+    seismicCrackBurst,
     render,
     hasWork,
   };

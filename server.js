@@ -45,8 +45,17 @@ import {
   computeTotalAvailableScore,
 } from "./lib/scoring.js";
 import {
+  buildBattleEventsClientPayload,
+  cellsInManhattanBall,
+  computeBattleScoringSnapshot,
+  computeSeismicManhattanBalls,
+  eventWindowEndMs,
+  getNextTimelineEvent,
+  getRoundTimeline,
+  isEventActiveAt,
+} from "./lib/battle-events.js";
+import {
   FLAG_BASE_MAX_HP,
-  FLAG_CAPTURE_ENABLE_AFTER_BATTLE_FRACTION,
   FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC,
   FLAG_REGEN_IDLE_MS,
   FLAG_WARN_THRESHOLDS,
@@ -116,6 +125,9 @@ const flagTeamHitLimiter = new SlidingWindowRateLimiter();
 /** Покупки по WebSocket: защита от спама кликов / мультивкладок (на ключ игрока). */
 const wsPurchaseLimiter = new SlidingWindowRateLimiter();
 const WS_PURCHASE_PER_10S = Math.min(40, Math.max(4, Number(process.env.WS_PURCHASE_PER_10S) || 12));
+
+/** Лог таймлайна событий раунда (elapsed / активные / следующее). */
+const DEBUG_ROUND_EVENTS = /^true$/i.test(String(process.env.DEBUG_ROUND_EVENTS || "").trim());
 
 /** Redis Pub/Sub: общий канал для нескольких инстансов (Render scale). Пусто — режим один процесс. */
 const REDIS_URL = (process.env.REDIS_URL || "").trim();
@@ -387,11 +399,6 @@ function ensureWsOnlineTracked(ws) {
   trackOnlinePk(pk);
 }
 
-/** Зарезервировано под кошелёк; отдельных «событий карты» на сервере нет (плашка на клиенте — по таймеру раунда). */
-function getGlobalEventPayload() {
-  return { active: false, kind: null, until: 0 };
-}
-
 function attachPlayerKey(ws, msg) {
   if (ws.telegramVerified) return;
   /** В продакшене playerKey задаётся только через verifyTelegramWebAppInitData в rememberPlayerProfile. */
@@ -601,6 +608,253 @@ function pickAutoTeamColor(name, emoji, salt) {
 const TEAM_SPAWN_SIZE = 6;
 const TEAM_SPAWN_GAP = 1;
 
+/** Сохранённые одноразовые шаги событий (сейсмика / предупреждение). */
+let battleEventsApplied = {};
+
+/** Чтобы не слать повторно roundEvent start/end при каждом тике. */
+let lastAnnouncedActiveEventIds = new Set();
+
+function getBattleEventsContext(nowMs) {
+  if (gameFinished) return null;
+  if (isWarmupPhaseNow()) return null;
+  if (roundIndex === 0 && !roundTimerStarted) return null;
+  if (!landGrid) return null;
+  const playStartMs = getPlayStartMs();
+  const battleEndMs = getRoundBattleEndRealMs();
+  if (nowMs < playStartMs || nowMs >= battleEndMs) return null;
+  return {
+    roundIndex,
+    playStartMs,
+    battleEndMs,
+    gridW,
+    gridH,
+    landGrid,
+  };
+}
+
+function countOnlineMembersForTeam(teamId) {
+  const keys = teamMemberKeys.get(teamId);
+  if (!keys || keys.size === 0) return 0;
+  let n = 0;
+  for (const pk of keys) {
+    if (isPlayerKeyOnline(pk)) n++;
+  }
+  return n;
+}
+
+/**
+ * Множитель синергии по командам (только очки территории), см. round timeline.
+ * @param {import("./lib/battle-events.js").BattleScoringSnapshot} snap
+ */
+function buildSynergyMultByTeamMap(snap) {
+  if (!snap?.teamSynergy?.active) return null;
+  const minO = snap.teamSynergy.minOnline | 0;
+  const mult = typeof snap.teamSynergy.mult === "number" ? snap.teamSynergy.mult : 1.12;
+  /** @type {Map<number, number>} */
+  const m = new Map();
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    if (countOnlineMembersForTeam(tid) >= minO) m.set(tid, mult);
+    else m.set(tid, 1);
+  }
+  return m;
+}
+
+function getGlobalEventPayload(nowMs = Date.now()) {
+  const ctx = getBattleEventsContext(nowMs);
+  if (!ctx) {
+    return {
+      active: false,
+      kind: null,
+      title: "",
+      subtitle: "",
+      until: 0,
+      battleEvents: { serverNow: nowMs, active: false, layers: [], primary: null, battleEndsAt: 0 },
+      debugRoundEvents: DEBUG_ROUND_EVENTS ? { note: "warmup_or_idle" } : undefined,
+    };
+  }
+  const snap = computeBattleScoringSnapshot(nowMs, ctx);
+  const be = buildBattleEventsClientPayload(snap, nowMs, ctx.battleEndMs);
+  const pr = be.primary;
+  /** @type {Record<string, unknown> | undefined} */
+  let debugRoundEvents;
+  if (DEBUG_ROUND_EVENTS) {
+    const elapsed = nowMs - ctx.playStartMs;
+    const timeline = getRoundTimeline(roundIndex);
+    const activeIds = [];
+    for (const ev of timeline) {
+      if (isEventActiveAt(nowMs, ctx.playStartMs, ctx.battleEndMs, ev)) activeIds.push(ev.eventId);
+    }
+    debugRoundEvents = {
+      roundIndex,
+      elapsedMs: elapsed,
+      activeEventIds: activeIds,
+      next: getNextTimelineEvent(nowMs, roundIndex, ctx.playStartMs, ctx.battleEndMs),
+    };
+  }
+  return {
+    active: !!be.active,
+    kind: pr ? pr.kind : null,
+    title: pr && pr.title ? pr.title : "",
+    subtitle: pr && pr.subtitle ? pr.subtitle : "",
+    until: pr && typeof pr.untilMs === "number" ? pr.untilMs : 0,
+    battleEvents: be,
+    debugRoundEvents,
+  };
+}
+
+function buildBattleProtectedMask() {
+  const mask = new Uint8Array(gridW * gridH);
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
+    for (let yy = t.spawnY0; yy < t.spawnY0 + TEAM_SPAWN_SIZE; yy++) {
+      for (let xx = t.spawnX0; xx < t.spawnX0 + TEAM_SPAWN_SIZE; xx++) {
+        if (xx >= 0 && xx < gridW && yy >= 0 && yy < gridH) mask[yy * gridW + xx] = 1;
+      }
+    }
+  }
+  return mask;
+}
+
+function applySeismicForLeader(defId, uniqueEventKey) {
+  const play = getPlayStartMs();
+  const protectedMask = buildBattleProtectedMask();
+  const balls = computeSeismicManhattanBalls(roundIndex, play, defId, gridW, gridH, landGrid, protectedMask);
+  /** @type [number, number][] */
+  const cells = [];
+  for (const b of balls) {
+    const part = cellsInManhattanBall(b, landGrid, protectedMask, gridW, gridH);
+    for (let i = 0; i < part.length; i++) cells.push(part[i]);
+  }
+  const seen = new Set();
+  /** @type [number, number][] */
+  const unique = [];
+  for (let i = 0; i < cells.length; i++) {
+    const x = cells[i][0] | 0;
+    const y = cells[i][1] | 0;
+    const k = `${x},${y}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    unique.push([x, y]);
+  }
+  /** @type [number, number][] */
+  const cleared = [];
+  for (let i = 0; i < unique.length; i++) {
+    const x = unique[i][0];
+    const y = unique[i][1];
+    const key = `${x},${y}`;
+    const v = pixels.get(key);
+    if (v == null) continue;
+    if ((pixelTeam(v) | 0) === 0) continue;
+    pixels.delete(key);
+    cleared.push([x, y]);
+  }
+  if (!cleared.length) return;
+  const tl = getRoundTimeline(roundIndex);
+  const sev = tl.find((e) => e.eventType === "seismic");
+  const aftermathMs =
+    sev && typeof sev.payload?.aftermathMs === "number" ? sev.payload.aftermathMs | 0 : 20_000;
+  const impactNow = Date.now();
+  broadcast({
+    type: "seismicImpact",
+    eventId: uniqueEventKey,
+    cells: cleared,
+    aftermathUntilMs: impactNow + aftermathMs,
+  });
+  afterTerritoryMutation();
+}
+
+function tickRoundEventTransitions(nowMs) {
+  if (!isClusterLeader()) return;
+  const ctx = getBattleEventsContext(nowMs);
+  if (!ctx) return;
+  const timeline = getRoundTimeline(roundIndex);
+  /** @type {Set<string>} */
+  const active = new Set();
+  for (let i = 0; i < timeline.length; i++) {
+    const ev = timeline[i];
+    if (ev.eventType === "seismic") continue;
+    if (!isEventActiveAt(nowMs, ctx.playStartMs, ctx.battleEndMs, ev)) continue;
+    active.add(ev.eventId);
+    if (!lastAnnouncedActiveEventIds.has(ev.eventId)) {
+      const until = eventWindowEndMs(ev, ctx.playStartMs, ctx.battleEndMs);
+      broadcast({
+        type: "roundEvent",
+        phase: "start",
+        eventId: ev.eventId,
+        eventType: ev.eventType,
+        title: ev.uiTitle,
+        subtitle: ev.uiSubtitle,
+        untilMs: until,
+        roundIndex,
+      });
+    }
+  }
+  for (const prev of lastAnnouncedActiveEventIds) {
+    if (!active.has(prev)) {
+      broadcast({ type: "roundEvent", phase: "end", eventId: prev, roundIndex });
+    }
+  }
+  lastAnnouncedActiveEventIds = active;
+
+  if (DEBUG_ROUND_EVENTS && Math.floor(nowMs / 10_000) !== tickRoundEventTransitions._lastLogDeca) {
+    tickRoundEventTransitions._lastLogDeca = Math.floor(nowMs / 10_000);
+    const elapsed = nowMs - ctx.playStartMs;
+    const next = getNextTimelineEvent(nowMs, roundIndex, ctx.playStartMs, ctx.battleEndMs);
+    console.log(
+      `[round-events] ri=${roundIndex} elapsed=${(elapsed / 60000).toFixed(1)}m active=${[...active].join(",") || "—"} next=${next.next?.eventId ?? "—"}`
+    );
+  }
+}
+tickRoundEventTransitions._lastLogDeca = -1;
+
+function tickBattleEvents(nowMs) {
+  if (!isClusterLeader()) return;
+  if (gameFinished || isWarmupPhaseNow()) return;
+  if (roundIndex === 0 && !roundTimerStarted) return;
+  const ctx = getBattleEventsContext(nowMs);
+  if (!ctx) return;
+
+  tickRoundEventTransitions(nowMs);
+
+  const timeline = getRoundTimeline(roundIndex);
+  for (let i = 0; i < timeline.length; i++) {
+    const def = timeline[i];
+    if (def.eventType !== "seismic") continue;
+    const id = def.eventId;
+    const warnKey = `${id}__warn`;
+    const atMs = ctx.playStartMs + def.startOffsetMs;
+    const warnLead = Math.max(3500, Number(def.warnLeadMs) || 4500);
+
+    if (!battleEventsApplied[warnKey] && nowMs >= atMs - warnLead && nowMs < atMs) {
+      battleEventsApplied[warnKey] = true;
+      const protectedMask = buildBattleProtectedMask();
+      const balls = computeSeismicManhattanBalls(roundIndex, ctx.playStartMs, id, gridW, gridH, landGrid, protectedMask);
+      const regions = balls.map((b) => ({
+        kind: "manhattan_ball",
+        cx: b.cx,
+        cy: b.cy,
+        r: b.r,
+      }));
+      broadcast({ type: "seismicPreview", eventId: id, regions, impactAtMs: atMs });
+      saveRoundState();
+    }
+
+    if (!battleEventsApplied[id] && nowMs >= atMs) {
+      battleEventsApplied[id] = true;
+      applySeismicForLeader(id, id);
+      saveRoundState();
+    }
+  }
+}
+
+function resetBattleEventsStateForNewBattleRound() {
+  battleEventsApplied = {};
+  lastAnnouncedActiveEventIds = new Set();
+}
+
 function teamsForMeta() {
   return dynamicTeams.map((t) => ({
     id: t.id,
@@ -705,6 +959,7 @@ function saveRoundState() {
         eligiblePlayerKeys: [...eligiblePlayerKeys],
         gameFinished,
         winnerTokensByPlayerKey,
+        battleEventsApplied,
       }),
       "utf8"
     );
@@ -762,6 +1017,11 @@ function loadRoundState() {
       }
       if (roundIndex >= 1 || gameFinished) roundTimerStarted = true;
       playStartMs = getPlayStartMs();
+      if (j.battleEventsApplied && typeof j.battleEventsApplied === "object" && !Array.isArray(j.battleEventsApplied)) {
+        battleEventsApplied = { ...j.battleEventsApplied };
+      } else {
+        battleEventsApplied = {};
+      }
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
@@ -771,6 +1031,7 @@ function loadRoundState() {
       eligibleTokenSet = new Set();
       gameFinished = false;
       winnerTokensByPlayerKey = {};
+      battleEventsApplied = {};
       roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
       saveRoundState();
     }
@@ -784,6 +1045,7 @@ function loadRoundState() {
     eligibleTokenSet = new Set();
     gameFinished = false;
     winnerTokensByPlayerKey = {};
+    battleEventsApplied = {};
     roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
   }
 }
@@ -915,16 +1177,20 @@ function cellIsLand(x, y) {
   return landGrid[y * gridW + x] !== 0;
 }
 
-/** Контекст для lib/scoring.js: roundIndex, сетка, суша, базовые веса клеток, глобальное событие. */
-function buildScoringContext() {
+/** Контекст для lib/scoring.js: roundIndex, сетка, суша, снимок событий боя. */
+function buildScoringContext(nowMs = Date.now()) {
   if (!landGrid) return null;
+  const ctxEv = getBattleEventsContext(nowMs);
+  const battle = ctxEv ? computeBattleScoringSnapshot(nowMs, ctxEv) : null;
+  const synergyMultByTeamId = battle ? buildSynergyMultByTeamMap(battle) : null;
   return {
     roundIndex,
     gridW,
     gridH,
     landGrid,
     baseValueGrid: scoreWeightGrid,
-    globalEvent: getGlobalEventPayload(),
+    battle,
+    synergyMultByTeamId,
   };
 }
 
@@ -932,8 +1198,8 @@ function buildScoringContext() {
  * Полный авторитетный пересчёт: очки и число занятых клеток по текущему `pixels` и getCellValue.
  * Вызывается из buildStatsPayload; при конце раунда — тот же путь (без отдельного кэша на кластере).
  */
-function recalculateAllTeamScores() {
-  const ctx = buildScoringContext();
+function recalculateAllTeamScores(nowMs = Date.now()) {
+  const ctx = buildScoringContext(nowMs);
   if (!ctx) return { agg: new Map(), totalAvailableScore: 0 };
   const agg = aggregateScoresFromPixels(pixels, pixelTeam, ctx);
   const totalAvailableScore = computeTotalAvailableScore(ctx);
@@ -1240,7 +1506,7 @@ async function buildWalletPayload(ws) {
     lastMassCaptureAt: u.lastMassCaptureAt ?? 0,
     lastZone12CaptureAt: u.lastZone12CaptureAt ?? 0,
     referralBonusActive: !!(ref && isPlayerKeyOnline(ref)),
-    globalEvent: getGlobalEventPayload(),
+    globalEvent: getGlobalEventPayload(now),
     tournamentStage: st,
     roundIndex,
     devUnlimited: !!devUnl,
@@ -1340,6 +1606,22 @@ function applyClusterGameReplication(msg) {
         }
       }
       return;
+    case "seismicPreview":
+      return;
+    case "roundEvent":
+      return;
+    case "seismicImpact": {
+      const list = Array.isArray(msg.cells) ? msg.cells : [];
+      for (let i = 0; i < list.length; i++) {
+        const pair = list[i];
+        if (!Array.isArray(pair) || pair.length < 2) continue;
+        const x = pair[0] | 0;
+        const y = pair[1] | 0;
+        if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+        pixels.delete(`${x},${y}`);
+      }
+      return;
+    }
     case "globalEvent":
       return;
     case "teamDisplay": {
@@ -1535,21 +1817,6 @@ function isEnemyOwnedFlagBaseCell(attackerTeamId, x, y) {
   return owner === (def.id | 0);
 }
 
-function isFlagCaptureMechanicEnabled(now) {
-  if (gameFinished || roundEnding) return false;
-  if (roundIndex === 0 && !roundTimerStarted) return false;
-  if (isWarmupPhaseNow()) return false;
-  const start = getPlayStartMs();
-  const end = getRoundBattleEndRealMs();
-  if (!Number.isFinite(start) || !Number.isFinite(end) || now < start || now >= end) return false;
-  /* Доля фазы боя по обычным (реальным) мс внутри окна боя — окно уже сжато scale для турнира.
-     Не умножаем на scale ещё раз: HP/реген/кулдауны флага остаются в реальном времени. */
-  const battleRealSpan = end - start;
-  const elapsedReal = now - start;
-  const needReal = battleRealSpan * FLAG_CAPTURE_ENABLE_AFTER_BATTLE_FRACTION;
-  return elapsedReal >= needReal;
-}
-
 function buildFlagsSnapshot() {
   const out = [];
   const now = Date.now();
@@ -1577,7 +1844,7 @@ function buildFlagsSnapshot() {
 
 function tickFlagBaseRegen(now) {
   if (!isClusterLeader()) return;
-  if (!isFlagCaptureMechanicEnabled(now)) return;
+  if (gameFinished || roundEnding) return;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
     const eff = computeEffectiveBaseHp(st, now);
@@ -1611,7 +1878,8 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   const defTeam = findDefenderTeamAtFlagCell(x, y);
   if (!defTeam || defTeam.id === attackerTeamId) return null;
   if (isTeamEliminated(attackerTeamId) || isTeamEliminated(defTeam.id)) return null;
-  if (!isFlagCaptureMechanicEnabled(now)) return null;
+  /* Без отдельных таймеров/фаз: удар по флагу возможен в том же запросе pixel, что и обычный ход
+   * (разминка, кулдаун, соседство, вода и т.д. уже проверены выше по коду). */
   if (!canPlaceForTeam(x, y, attackerTeamId)) return null;
 
   const existing = pixels.get(`${x},${y}`);
@@ -2282,7 +2550,8 @@ function countOnlineClients() {
 }
 
 function buildStatsPayload() {
-  const { agg, totalAvailableScore } = recalculateAllTeamScores();
+  const nowMs = Date.now();
+  const { agg, totalAvailableScore } = recalculateAllTeamScores(nowMs);
   const list = teamsForMeta().filter((t) => !t.solo && !t.eliminated);
   const rows = list.map((t) => {
     const a = agg.get(t.id) || { score: 0, cells: 0 };
@@ -2326,7 +2595,7 @@ function buildStatsPayload() {
     landTotal: landPixelsTotal,
     landWeightTotal,
     totalAvailableScore,
-    globalEvent: getGlobalEventPayload(),
+    globalEvent: getGlobalEventPayload(nowMs),
     rows,
   };
 }
@@ -2544,6 +2813,7 @@ async function advanceToDuelRound(winnerRow) {
     roundStartMs = Date.now();
     roundDurationMs = battleDurationForRound(3);
     clearTiebreakSnapshots();
+    resetBattleEventsStateForNewBattleRound();
     rebuildLandFromRound(3);
     saveRoundState();
 
@@ -2686,6 +2956,7 @@ async function runMaybeEndRound() {
     roundStartMs = Date.now();
     roundDurationMs = battleDurationForRound(roundIndex);
     clearTiebreakSnapshots();
+    resetBattleEventsStateForNewBattleRound();
     rebuildLandFromRound(roundIndex);
     saveRoundState();
 
@@ -2748,6 +3019,7 @@ function maybeEndRound() {
 
 setInterval(() => maybeEndRound(), 30000);
 setInterval(() => tickFlagBaseRegen(Date.now()), 500);
+setInterval(() => tickBattleEvents(Date.now()), 1000);
 
 wss.on("connection", (ws, req) => {
   const ip = getClientIpFromReq(req);
@@ -3440,8 +3712,8 @@ wss.on("connection", (ws, req) => {
 
       if (isEnemyOwnedFlagBaseCell(teamId, x, y)) {
         await walletStore.save();
-        const locked = !isFlagCaptureMechanicEnabled(now);
-        const r = locked ? "enemy_base_locked" : "enemy_base";
+        const adjacent = canPlaceForTeam(x, y, teamId);
+        const r = adjacent ? "enemy_base" : "enemy_base_not_adjacent";
         safeSend(ws, { type: "invalidPlacement", teamId, reason: r });
         safeSend(ws, { type: "pixelReject", reason: r });
         return;
