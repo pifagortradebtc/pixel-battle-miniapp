@@ -8,32 +8,16 @@ const VFX_DEBUG =
   typeof window !== "undefined" &&
   (() => {
     try {
-      return new URLSearchParams(window.location.search).get("vfxdebug") === "1";
+      if (new URLSearchParams(window.location.search).get("vfxdebug") === "1") return true;
+      if (typeof localStorage !== "undefined" && localStorage.getItem("pixel-battle-vfxdebug") === "1")
+        return true;
     } catch {
-      return false;
+      /* ignore */
     }
+    return false;
   })();
 
-/**
- * Сброс состояния 2D-контекста: clip/shadow/composite не должны урезать clearRect.
- */
-function hardResetCanvas2DState(c) {
-  if (typeof c.reset === "function") {
-    c.reset();
-    return;
-  }
-  c.setTransform(1, 0, 0, 1, 0, 0);
-  c.globalAlpha = 1;
-  c.globalCompositeOperation = "source-over";
-  c.shadowBlur = 0;
-  c.shadowColor = "transparent";
-  c.filter = "none";
-  c.strokeStyle = "#000";
-  c.fillStyle = "#000";
-  c.lineWidth = 1;
-  c.setLineDash([]);
-  c.beginPath();
-}
+let vfxDebugFrame = 0;
 
 /**
  * @param {HTMLCanvasElement} canvas
@@ -210,20 +194,43 @@ export function createBoardVfx(canvas) {
     });
   }
 
+  function countActiveVfx() {
+    return (
+      ripples.length +
+      particles.length +
+      beams.length +
+      shockwaves.length +
+      bolts.length +
+      shields.length +
+      zoneFlashes.length
+    );
+  }
+
   /**
-   * Кадр board-vfx — строгая последовательность (никаких «старых» пикселей между кадрами):
-   * 1) Сброс матрицы/состояния контекста.
-   * 2) Полная очистка bitmap через clearRect (без composite «copy» — в WebView даёт тёмную пелену на карте).
-   * 3) Обновление мира: интеграция частиц + удаление истёкших из массивов (без отрисовки).
-   * 4) Матрица DPR для координат в CSS px, как у #board.
-   * 5) Отрисовка только текущих активных эффектов: world/grid → screen через камеру transform.
+   * Полная очистка bitmap по HTML: присвоение width/height сбрасывает пиксели в прозрачный чёрный
+   * и состояние контекста. Надёжнее clearRect+reset() в части WebView/Telegram.
    */
-  function wipeBitmapIdentity(ctx2, bw, bh) {
-    hardResetCanvas2DState(ctx2);
-    ctx2.setTransform(1, 0, 0, 1, 0, 0);
-    ctx2.globalCompositeOperation = "source-over";
-    ctx2.globalAlpha = 1;
-    ctx2.clearRect(0, 0, bw, bh);
+  function resetCanvasBitmapToSize(canvasEl, bw, bh) {
+    canvasEl.width = bw;
+    canvasEl.height = bh;
+  }
+
+  /** Лимиты очередей: при лавине broadcast/оптимистичных VFX не копим сотни слоёв (артефакты в WebView). */
+  function enforceVfxCaps() {
+    const RIPPLES = 100;
+    const PARTICLES = 260;
+    const BEAMS = 24;
+    const SHOCKS = 12;
+    const BOLTS = 3;
+    const SHIELDS = 8;
+    const ZONES = 8;
+    while (ripples.length > RIPPLES) ripples.shift();
+    while (particles.length > PARTICLES) particles.shift();
+    while (beams.length > BEAMS) beams.shift();
+    while (shockwaves.length > SHOCKS) shockwaves.shift();
+    while (bolts.length > BOLTS) bolts.shift();
+    while (shields.length > SHIELDS) shields.shift();
+    while (zoneFlashes.length > ZONES) zoneFlashes.shift();
   }
 
   function pruneExpiredAndIntegrate(now, cellPx) {
@@ -242,6 +249,7 @@ export function createBoardVfx(canvas) {
     bolts = bolts.filter((b) => now - b.t0 <= 500);
     shields = shields.filter((s) => now - s.t0 <= 900);
     zoneFlashes = zoneFlashes.filter((z) => now - z.t0 <= 500);
+    enforceVfxCaps();
   }
 
   function paintActiveEffects(now, transform, cellPx) {
@@ -374,15 +382,28 @@ export function createBoardVfx(canvas) {
     const dpr =
       typeof transform.dpr === "number" && transform.dpr > 0 ? transform.dpr : dprGuess;
 
-    const cellPx = transform.BASE_CELL * transform.scale;
+    const cellPx = Math.max(1e-6, (Number(transform.BASE_CELL) || 1) * (Number(transform.scale) || 1));
 
-    /* 1–2: identity + полная зачистка bitmap */
-    wipeBitmapIdentity(ctx, bw, bh);
-
-    /* 3 + 5: сначала убрать мёртвое и сдвинуть частицы в world; списки — только активные */
+    const beforePrune = countActiveVfx();
     pruneExpiredAndIntegrate(now, cellPx);
+    const afterPrune = countActiveVfx();
 
-    /* 4: матрица отрисовки (логические px карты) */
+    if (bw < 1 || bh < 1) {
+      if (VFX_DEBUG) {
+        console.log("[vfxdebug] zero bitmap — prune only", { bw, bh, beforePrune, afterPrune });
+      }
+      return;
+    }
+
+    /*
+     * Порядок (корректность):
+     * 1) prune — истёкшее выкинуто из массивов, частицы сдвинуты в world.
+     * 2) canvas.width/height — ПОЛНЫЙ сброс bitmap + состояния ctx (внутренние пиксели, не CSS).
+     * 3) setTransform(dpr) — как у #board.
+     * 4) отрисовка только оставшихся активных эффектов (world → screen этим кадром).
+     */
+    resetCanvasBitmapToSize(canvas, bw, bh);
+
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = 1;
@@ -391,22 +412,19 @@ export function createBoardVfx(canvas) {
     ctx.filter = "none";
     ctx.imageSmoothingEnabled = false;
 
-    /* 5 (продолжение): только активные, world → screen этим кадром */
     paintActiveEffects(now, transform, cellPx);
 
     if (VFX_DEBUG) {
-      const n =
-        ripples.length +
-        particles.length +
-        beams.length +
-        shockwaves.length +
-        bolts.length +
-        shields.length +
-        zoneFlashes.length;
-      if (n > 0) {
-        console.log("[vfxdebug]", {
-          active: n,
-          bitmap: `${bw}x${bh}`,
+      vfxDebugFrame++;
+      const logEvery = 30;
+      if (vfxDebugFrame % logEvery === 0 || afterPrune > 0) {
+        console.log("[vfxdebug] frame", {
+          frame: vfxDebugFrame,
+          bitmapInternal: `${bw}x${bh}`,
+          cssSize: `${canvas.clientWidth}x${canvas.clientHeight}`,
+          clear: "reset via canvas.width/height",
+          activeBeforePrune: beforePrune,
+          activeAfterPrune: afterPrune,
           dpr,
           cam: { ox: transform.offsetX, oy: transform.offsetY, sc: transform.scale },
         });
@@ -415,16 +433,7 @@ export function createBoardVfx(canvas) {
   }
 
   function hasWork() {
-    return (
-      ripples.length +
-        particles.length +
-        beams.length +
-        shockwaves.length +
-        bolts.length +
-        shields.length +
-        zoneFlashes.length >
-      0
-    );
+    return countActiveVfx() > 0;
   }
 
   return {

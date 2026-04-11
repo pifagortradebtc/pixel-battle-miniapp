@@ -8,6 +8,8 @@
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   /* Плавающая шапка и низ — карта на весь экран под ними */
   --toolbar-h: 34px;
+  /* Жёсткий потолок высоты шапки: иначе длинный текст + sync --toolbar-h раздувают тёмную полосу на пол-экрана */
+  --toolbar-h-max: 58px;
   --hud-bg: rgba(5, 10, 18, 0.42);
   --hud-border: rgba(255, 255, 255, 0.08);
 }
@@ -173,7 +175,8 @@ body {
   align-items: center;
   gap: 4px;
   column-gap: 6px;
-  min-height: var(--toolbar-h);
+  min-height: 34px;
+  max-height: var(--toolbar-h-max);
   padding: 4px calc(8px + env(safe-area-inset-right, 0px)) 4px calc(8px + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--hud-border);
   /* Без backdrop-filter: в Telegram WebView размытие часто «тянется» на пол-экрана над картой */
@@ -181,7 +184,7 @@ body {
   pointer-events: auto;
   min-width: 0;
   box-sizing: border-box;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .toolbar__lead {
@@ -201,11 +204,15 @@ body {
   color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
   max-width: 100% !important;
   width: 100%;
-  white-space: pre-line !important;
+  white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;
-  overflow: visible !important;
-  text-overflow: clip !important;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  text-overflow: ellipsis;
 }
 
 .toolbar__round--lead[hidden] {

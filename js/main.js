@@ -1787,14 +1787,15 @@ function updateToolbarHud() {
   syncToolbarHeightCssVar();
 }
 
-/** Синхронизирует --toolbar-h с реальной высотой шапки (несколько строк, баффы). */
+/** Высота шапки для отступа лидерборда; всегда в пределах [34px … --toolbar-h-max], без раздувания на весь экран. */
 function syncToolbarHeightCssVar() {
   const tb = document.querySelector(".toolbar");
   if (!tb) return;
-  const h = Math.ceil(tb.getBoundingClientRect().height);
-  if (h > 0) {
-    document.documentElement.style.setProperty("--toolbar-h", `${h}px`);
-  }
+  const root = getComputedStyle(document.documentElement);
+  const cap = parseFloat(root.getPropertyValue("--toolbar-h-max")) || 58;
+  const raw = Math.ceil(tb.getBoundingClientRect().height);
+  const h = Math.min(Math.max(raw, 34), cap);
+  document.documentElement.style.setProperty("--toolbar-h", `${h}px`);
 }
 
 function updateToolbarPixelTimer() {
@@ -1929,8 +1930,8 @@ function flushBoardVfxFrame() {
   if (!boardVfx || !canvasVfx) return;
   try {
     boardVfx.render(performance.now(), getVfxTransform());
-  } catch {
-    /* ignore */
+  } catch (e) {
+    console.error("[board-vfx] flushBoardVfxFrame render error", e);
   }
 }
 
@@ -1986,7 +1987,6 @@ function applyGlobalPurchaseVfx(msg) {
         ? msg.size | 0
         : 6;
     boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    boardVfx.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
     return;
@@ -1997,7 +1997,6 @@ function applyGlobalPurchaseVfx(msg) {
         ? msg.size | 0
         : 12;
     boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    boardVfx.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
     return;
@@ -2421,8 +2420,13 @@ function stopMapAnimLoop() {
 }
 
 function vfxLoop(now) {
-  if (boardVfx && canvasVfx) {
-    boardVfx.render(now || performance.now(), getVfxTransform());
+  try {
+    if (boardVfx && canvasVfx) {
+      boardVfx.render(now || performance.now(), getVfxTransform());
+    }
+  } catch (e) {
+    /* Исключение здесь раньше рвало цепочку rAF — последний кадр VFX «залипал» на экране навсегда. */
+    console.error("[board-vfx] vfxLoop render error (loop continues)", e);
   }
   requestAnimationFrame(vfxLoop);
 }
@@ -3746,9 +3750,6 @@ function applyOptimisticWeapon(kind, cx, cy) {
     const tr = getVfxTransform();
     const col = teamColor(myTeamId);
     boardVfx.zoneFlash(gx0, gy0, col, tr, size);
-    if (kind !== "zoneCapture") {
-      boardVfx.lightningBurst(getVfxTransform());
-    }
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
   }
