@@ -2434,6 +2434,8 @@ function notifyReject(reason) {
       "Сначала расширьтесь к базе врага: ваши клетки должны быть рядом с клеткой флага (8 направлений).",
     enemy_base:
       "Чужая база: бейте по клетке флага, чтобы снимать HP. Обычным пикселем базу не перекрасить.",
+    not_leader:
+      "Сервер занят (реплика кластера). Обновите страницу или подождите — ход обрабатывает основной инстанс.",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -2453,17 +2455,20 @@ function syncFlagCaptureStateFromMeta(flags) {
   flagCaptureClientState = new Map();
   if (!Array.isArray(flags)) return;
   for (const f of flags) {
-    if (typeof f.teamId !== "number") continue;
+    const tid = Number(f.teamId) | 0;
+    if (tid <= 0) continue;
     const maxHp = typeof f.maxHp === "number" ? f.maxHp | 0 : FLAG_BASE_MAX_HP;
     let hp =
       typeof f.hp === "number"
         ? f.hp | 0
         : Math.max(0, maxHp - (f.progress | 0));
     if (hp >= maxHp) continue;
-    flagCaptureClientState.set(f.teamId, {
+    const lh =
+      typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt) ? f.lastHitAt | 0 : 0;
+    flagCaptureClientState.set(tid, {
       hp,
       maxHp,
-      lastHitAt: typeof f.lastHitAt === "number" ? f.lastHitAt | 0 : 0,
+      lastHitAt: lh,
       attackerTeamId: f.attackerTeamId | 0,
     });
   }

@@ -62,6 +62,7 @@ import {
 import {
   FLAG_BASE_MAX_HP,
   FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC,
+  FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
   FLAG_REGEN_IDLE_MS,
   FLAG_WARN_THRESHOLDS,
   computeEffectiveBaseHp,
@@ -318,10 +319,11 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   norm = norm.replace(/^\/go\b/, "go");
   norm = norm.replace(/^гол(\s+)/, "go$1").replace(/^гол(\d)/, "go $1");
   norm = norm.replace(/^го(\s+)/u, "go$1").replace(/^го(\d)/u, "go $1");
-  const fw = norm.split(/\s+/)[0] || "";
+  const fw = (norm.split(/\s+/)[0] || "").replace(/@\w+$/i, "");
   if (fw === "go" || norm === "go" || norm.startsWith("go ")) return true;
   if (fw === "speed") return true;
   if (fw === "restart" || fw === "рестарт") return true;
+  if (fw === "paint") return true;
   if (fw === "evt" || fw === "event") return true;
   return MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw);
 }
@@ -971,6 +973,7 @@ function loadDynamicTeams() {
         const color = hex || (raw || "#888888");
         return {
           ...t,
+          id: Number(t.id) | 0,
           color,
           solo: !!t.solo,
           eliminated: !!t.eliminated,
@@ -2024,17 +2027,29 @@ function applyClusterGameReplication(msg) {
         flagCaptureByDefender.delete(did);
         return;
       }
-      const hp =
-        typeof msg.hp === "number" && Number.isFinite(msg.hp)
-          ? msg.hp | 0
-          : Math.max(0, FLAG_BASE_MAX_HP - (msg.progress | 0));
+      let hp;
+      const rawHp = msg.hp;
+      if (typeof rawHp === "number" && Number.isFinite(rawHp)) hp = rawHp | 0;
+      else if (typeof rawHp === "string" && String(rawHp).trim() !== "") {
+        const n = Number(rawHp);
+        if (Number.isFinite(n)) hp = n | 0;
+      }
+      if (hp === undefined) hp = Math.max(0, FLAG_BASE_MAX_HP - (msg.progress | 0));
       if (hp >= FLAG_BASE_MAX_HP) {
         flagCaptureByDefender.delete(did);
         return;
       }
+      let lastHitAt = Date.now();
+      const rawLh = msg.lastHitAt;
+      if (typeof rawLh === "number" && Number.isFinite(rawLh)) lastHitAt = rawLh | 0;
+      else if (typeof rawLh === "string" && String(rawLh).trim() !== "") {
+        const n = Number(rawLh);
+        if (Number.isFinite(n)) lastHitAt = n | 0;
+      }
+      if (lastHitAt < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) lastHitAt = Date.now();
       flagCaptureByDefender.set(did, {
         hp,
-        lastHitAt: typeof msg.lastHitAt === "number" ? msg.lastHitAt | 0 : Date.now(),
+        lastHitAt,
         attackerTeamId: msg.attackerTeamId | 0,
       });
       return;
@@ -2220,7 +2235,7 @@ function buildFlagsSnapshot() {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
     const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
-    const st = flagCaptureByDefender.get(t.id);
+    const st = flagCaptureByDefender.get(Number(t.id) | 0);
     const eff = computeEffectiveBaseHp(st, now);
     const hp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
     const attackerTeamId = (st?.attackerTeamId | 0) || 0;
@@ -2297,6 +2312,10 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   }
 
   let st = flagCaptureByDefender.get(did);
+  if (st) {
+    const lh = Number(st.lastHitAt) | 0;
+    if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) st.lastHitAt = now;
+  }
   const curHpFloat = computeEffectiveBaseHp(st, now);
   const curHp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(curHpFloat + 1e-9)));
 
@@ -4067,6 +4086,10 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg.type === "pixel") {
+      if (REDIS_URL && !isClusterLeader()) {
+        safeSend(ws, { type: "pixelReject", reason: "not_leader" });
+        return;
+      }
       if (!assertCanPlay(ws)) return;
       if (ws.teamId == null) {
         safeSend(ws,{ type: "pixelReject", reason: "no_team" });
@@ -4321,6 +4344,96 @@ async function telegramSendMessage(chatId, text, extra = {}) {
   if (!data.ok) console.warn("Telegram sendMessage:", data.description || res.status);
 }
 
+/** Команда paint: playerKey в игре = tg_<Telegram user id>. */
+function findTeamIdForTelegramUid(uid) {
+  const pk = sanitizePlayerKey(`tg_${uid}`);
+  if (!pk) return null;
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    const set = teamMemberKeys.get(t.id | 0);
+    if (set) {
+      for (const k of set) {
+        if (sanitizePlayerKey(k) === pk) return t.id | 0;
+      }
+    }
+  }
+  if (wss) {
+    for (const c of wss.clients) {
+      if (c.readyState !== 1) continue;
+      if (sanitizePlayerKey(c.playerKey) !== pk) continue;
+      const tid = c.teamId | 0;
+      if (tid) return tid;
+    }
+  }
+  return null;
+}
+
+/** Свободная суша: нет записи в pixels или teamId 0. Не перекрашивает чужие/свои клетки. */
+function isLandCellUnclaimedPixel(x, y) {
+  if (!cellIsLand(x, y)) return false;
+  const k = `${x},${y}`;
+  if (!pixels.has(k)) return true;
+  return pixelTeam(pixels.get(k)) === 0;
+}
+
+/**
+ * Закрасить всю свободную сушу в цвет команды (только для админской команды paint в Telegram).
+ * @returns {number} сколько клеток закрашено
+ */
+function paintAllFreeLandPixelsForTeam(teamId, ownerPlayerKey) {
+  const tid = teamId | 0;
+  const pk = sanitizePlayerKey(ownerPlayerKey);
+  let n = 0;
+  for (let y = 0; y < gridH; y++) {
+    for (let x = 0; x < gridW; x++) {
+      if (!isLandCellUnclaimedPixel(x, y)) continue;
+      const key = `${x},${y}`;
+      pixels.set(key, { teamId: tid, ownerPlayerKey: pk, shieldedUntil: 0 });
+      n++;
+    }
+  }
+  afterTerritoryMutation();
+  scheduleStatsBroadcast();
+  broadcast(JSON.parse(fullPayload()));
+  return n;
+}
+
+/** Только TELEGRAM_ADMIN_IDS; карта — цвет команды, в которой состоит этот Telegram-аккаунт (Mini App). */
+async function handleTelegramPaintCommand(chatId, telegramUid) {
+  if (!isClusterLeader()) {
+    await telegramSendMessage(
+      chatId,
+      "Команда paint выполняется только на лидере кластера (CLUSTER_LEADER=true на одном инстансе)."
+    );
+    return;
+  }
+  if (gameFinished) {
+    await telegramSendMessage(chatId, "Игра завершена — paint недоступен.");
+    return;
+  }
+  const teamId = findTeamIdForTelegramUid(telegramUid);
+  if (!teamId) {
+    await telegramSendMessage(
+      chatId,
+      "Не найдена ваша команда: зайдите в Mini App и вступите в команду (нужна привязка аккаунта tg_" +
+        telegramUid +
+        ")."
+    );
+    return;
+  }
+  const dt = dynamicTeams.find((t) => (t.id | 0) === teamId);
+  if (!dt || dt.eliminated) {
+    await telegramSendMessage(chatId, "Команда выбыла или недоступна.");
+    return;
+  }
+  const ownerPk = sanitizePlayerKey(`tg_${telegramUid}`);
+  const painted = paintAllFreeLandPixelsForTeam(teamId, ownerPk);
+  await telegramSendMessage(
+    chatId,
+    `paint: закрашено свободных клеток: ${painted}. Цвет команды «${dt.name || ""}» (id ${teamId}).`
+  );
+}
+
 /**
  * Ручное включение событий карты (только TELEGRAM_ADMIN_IDS, только лидер кластера).
  * Сообщения: evt gold, gold, evt mapcomp 45 (минут), gold off, evt off, seismic, evt help.
@@ -4505,6 +4618,14 @@ async function telegramPollLoop() {
           continue;
         }
 
+        {
+          const paintWord = (restartNorm.split(/\s+/)[0] || "").replace(/@\w+$/i, "");
+          if (paintWord === "paint" && restartNorm.split(/\s+/).length === 1) {
+            await handleTelegramPaintCommand(chatId, uid);
+            continue;
+          }
+        }
+
         let manualBattleLine = null;
         if (restartNorm.startsWith("evt ") || restartNorm.startsWith("event ")) {
           manualBattleLine = restartNorm.replace(/^(evt|event)\s+/i, "").trim();
@@ -4537,7 +4658,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start, go [часы], speed, restart, evt help, gold, seismic…"
+              "Неизвестная команда. Админ: /start, go [часы], speed, paint, restart, evt help, gold, seismic…"
             );
           }
           continue;

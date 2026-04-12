@@ -3,8 +3,7 @@
  * — cellsBase64: 0 = вода (не игровая), 2 = суша;
  * — rgbBase64: цвет фона карты на клетку.
  *
- * Классификация: вода = выраженный «океанский» синий (B доминирует над R/G с порогами),
- * суша = всё остальное (в т.ч. бледный лёд, белые границы провинций).
+ * Классификация: lib/world-map-water.js (океан vs лёд/кристаллы/фиолетовые биомы).
  *
  * Запуск: npm run rasterize-world-map
  */
@@ -13,28 +12,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import sharp from "sharp";
+import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
 const SRC = path.join(root, "data", "world-map-source.png");
 const BASE = 360;
-const ALPHA_CUTOFF = 24;
-
-/** @returns {boolean} true = вода */
-function isWaterPixel(r, g, b, a) {
-  if (a < ALPHA_CUTOFF) return true;
-  const maxc = Math.max(r, g, b);
-  const mr = Math.max(r, g);
-  /* Тёмный/почти чёрный океан: раньше maxc < 22 сразу давал «сушу» — захват 12×12 заливал «воду». */
-  if (maxc < 56) {
-    if (b >= r && b >= g && b - mr >= 2) return true;
-    return false;
-  }
-  if (b > 135 && b > r + 14 && b > g + 10) return true;
-  if (b > 100 && b > r + 28 && b > g + 20) return true;
-  if (b === maxc && b > 88 && b > r + 6 && b > g + 4 && r + g < b + 75) return true;
-  return false;
-}
 
 function downsampleCellsAndRgb(cellsSrc, rgbSrc, w, srcBase) {
   const h = w;
@@ -99,7 +82,7 @@ async function main() {
     const g = data[o + 1];
     const b = data[o + 2];
     const a = channels >= 4 ? data[o + 3] : 255;
-    const water = isWaterPixel(r, g, b, a);
+    const water = isWorldMapWaterPixel(r, g, b, a);
     if (water) {
       cells[i] = 0;
       rgb[i * 3] = r;
