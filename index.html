@@ -17,6 +17,13 @@
 <body>
   <div id="dev-time-scale-banner" class="dev-time-scale-banner" hidden aria-live="polite" role="status"></div>
   <div class="event-banner-stack" aria-live="polite">
+    <div
+      id="server-announcement-banner"
+      class="event-banner event-banner--server-say"
+      hidden
+      role="status"
+      aria-live="polite"
+    ></div>
     <div id="event-banner" class="event-banner" hidden role="status"></div>
     <div id="team-buff-banner" class="event-banner event-banner--team" hidden role="status"></div>
     <div id="territory-drama-banner" class="event-banner event-banner--danger" hidden role="alert" aria-live="assertive"></div>
@@ -603,10 +610,6 @@
       <header class="toolbar">
         <div class="toolbar__lead" aria-label="Раунд и интервал пикселя">
           <div class="hud-lead-stack">
-            <div class="hud-lead-stack__row">
-              <span id="hud-round-badge" class="hud-round-badge" hidden></span>
-              <span id="hud-my-score" class="hud-my-score" hidden title="Ваши очки в рейтинге"></span>
-            </div>
             <span
               id="round-timer"
               class="toolbar__round toolbar__round--lead"
@@ -691,21 +694,30 @@
             >
               <span class="btn-session-door__icon" aria-hidden="true">
                 <svg class="btn-session-door__svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <!-- косяк / стена -->
+                  <!-- проём: левый косяк, перемычка, порог -->
                   <path
-                    d="M4 3h11v18H4V3z"
+                    d="M4.5 5.5v13M4.5 5.5h7.25M4.5 18.5h7.25"
                     stroke="currentColor"
                     stroke-width="1.75"
+                    stroke-linecap="round"
                     stroke-linejoin="round"
                   />
-                  <!-- дверь приоткрыта -->
+                  <!-- створка открыта наружу (петля у косяка) -->
                   <path
-                    d="M15 3.5l6.2 2.2v12.6L15 20.5V3.5z"
+                    d="M11.75 5.75L16.1 8.1L16.1 15.9L11.75 18.25Z"
                     stroke="currentColor"
                     stroke-width="1.75"
+                    stroke-linecap="round"
                     stroke-linejoin="round"
                   />
-                  <circle cx="18.2" cy="12" r="0.9" fill="currentColor" />
+                  <!-- выход: стрелка вправо из проёма -->
+                  <path
+                    d="M16.75 12H21M19 9.25L21.25 12 19 14.75"
+                    stroke="currentColor"
+                    stroke-width="1.75"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
                 </svg>
               </span>
               <span class="btn-session-door__label"></span>

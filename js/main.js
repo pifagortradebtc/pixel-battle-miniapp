@@ -264,8 +264,6 @@ const leaderboardPanel = document.getElementById("leaderboard-panel");
 const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
 const leaderboardExpandBtn = document.getElementById("leaderboard-expand-btn");
-const hudRoundBadgeEl = document.getElementById("hud-round-badge");
-const hudMyScoreEl = document.getElementById("hud-my-score");
 const roundTimerEl = document.getElementById("round-timer");
 const spectatorBadgeEl = document.getElementById("spectator-badge");
 const walletBalanceEl = document.getElementById("wallet-balance");
@@ -274,6 +272,7 @@ const toolbarBuffsEl = document.getElementById("toolbar-buffs");
 const toolbarBuffPersonalEl = document.getElementById("toolbar-buff-personal");
 const toolbarBuffPersonalLabelEl = document.getElementById("toolbar-buff-personal-label");
 const toolbarBuffPersonalFillEl = document.getElementById("toolbar-buff-personal-fill");
+const serverAnnouncementBannerEl = document.getElementById("server-announcement-banner");
 const eventBannerEl = document.getElementById("event-banner");
 const teamBuffBannerEl = document.getElementById("team-buff-banner");
 const crisisOverlayEl = document.getElementById("crisis-overlay");
@@ -372,6 +371,8 @@ let myTerritoryLastCellUntil = 0;
 let territoryBannerHideTimer = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let seismicBannerHideTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let serverAnnouncementHideTimer = null;
 /** Автоскрытие алертов «база / последняя клетка» (мс). */
 const ALERT_AUTO_HIDE_MS = 2000;
 const ALERT_SWIPE_MIN_PX = 44;
@@ -735,7 +736,7 @@ let spectatorMode = false;
 let roundEndsAtMs = null;
 /** Когда начинается фаза боя после разминки; null — нет отсчёта (лобби до «go» и т.п.) */
 let playStartsAtMs = null;
-/** Сервер: tournamentTimeScale > 1 — ускоренный турнирный таймлайн (бот speed). */
+/** Сервер всегда шлёт 1×; раньше был тестовый «speed»-таймлайн. */
 let tournamentTimeScaleClient = 1;
 let roundIndexMeta = 0;
 /** Сервер: до команды «go» можно свободно играть на карте (meta.lobbyBeforeGo). */
@@ -1288,6 +1289,32 @@ function hideSeismicWarningBannerNow() {
   seismicWarningBannerEl.hidden = true;
 }
 
+function hideServerAnnouncementBannerNow() {
+  if (!serverAnnouncementBannerEl) return;
+  if (serverAnnouncementHideTimer) {
+    clearTimeout(serverAnnouncementHideTimer);
+    serverAnnouncementHideTimer = null;
+  }
+  serverAnnouncementBannerEl.hidden = true;
+  serverAnnouncementBannerEl.textContent = "";
+}
+
+function showServerAnnouncementBanner(text, durationMs = 5000) {
+  if (!serverAnnouncementBannerEl) return;
+  if (serverAnnouncementHideTimer) {
+    clearTimeout(serverAnnouncementHideTimer);
+    serverAnnouncementHideTimer = null;
+  }
+  serverAnnouncementBannerEl.textContent = String(text || "");
+  serverAnnouncementBannerEl.hidden = false;
+  const d =
+    typeof durationMs === "number" && !Number.isNaN(durationMs) && durationMs > 0 ? durationMs : 5000;
+  serverAnnouncementHideTimer = setTimeout(() => {
+    serverAnnouncementHideTimer = null;
+    hideServerAnnouncementBannerNow();
+  }, d);
+}
+
 function showSeismicWarningBanner(
   title,
   sub,
@@ -1673,6 +1700,27 @@ function showRoundStartSplash(roundIdx) {
   }, 2600);
 }
 
+/** Все очки в UI: сырой счёт с сервера × множитель (единый для всех игроков). */
+const HUD_SCORE_DISPLAY_SCALE = 0.0001;
+
+function formatHudScore(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const num = Number(n) * HUD_SCORE_DISPLAY_SCALE;
+  const ax = Math.abs(num);
+  if (ax >= 1_000_000) {
+    const v = num / 1_000_000;
+    const s = ax >= 10_000_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
+    return `${s}M`;
+  }
+  if (ax >= 1000) {
+    const v = num / 1000;
+    const s = ax >= 10_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
+    return `${s}K`;
+  }
+  const rounded = Math.round(num * 1000) / 1000;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
 function hideRoundEndedOverlay() {
   if (roundEndedOverlayEl) roundEndedOverlayEl.hidden = true;
 }
@@ -1692,7 +1740,7 @@ function showRoundEndedOverlay(msg) {
         : null;
   if (roundEndedScoreEl) {
     const parts = [];
-    if (sc != null) parts.push(`Счёт: ${sc} оч.`);
+    if (sc != null) parts.push(`Счёт: ${formatHudScore(sc)} оч.`);
     if (pc != null) parts.push(`Доля очков: ${pc.toFixed(2)}%`);
     roundEndedScoreEl.textContent = parts.length ? parts.join(" · ") : "";
     roundEndedScoreEl.hidden = parts.length === 0;
@@ -1705,7 +1753,7 @@ function showRoundEndedOverlay(msg) {
       roundEndedBoardEl.innerHTML = rows
         .map(
           (r) =>
-            `<div class="round-ended-overlay__row"><span>#${r.rank} ${r.emoji || ""} ${escapeHtml(String(r.name || ""))}</span><span>${typeof r.score === "number" ? r.score : "—"} оч.</span></div>`
+            `<div class="round-ended-overlay__row"><span>#${r.rank} ${r.emoji || ""} ${escapeHtml(String(r.name || ""))}</span><span>${typeof r.score === "number" ? formatHudScore(r.score) : "—"} оч.</span></div>`
         )
         .join("");
     }
@@ -1780,7 +1828,6 @@ function updateRoundTimer() {
     }
     syncTournamentWarmupOverlay();
   } finally {
-    syncHudRoundBadge();
     syncEventBanner();
     syncTeamBuffBanner();
     syncToolbarHeightCssVar();
@@ -1929,24 +1976,6 @@ function updateTeamBadge() {
   syncTeamBadgeColorSwatch();
 }
 
-function formatHudScore(n) {
-  if (n == null || !Number.isFinite(Number(n))) return "—";
-  const num = Number(n);
-  const ax = Math.abs(num);
-  if (ax >= 1_000_000) {
-    const v = num / 1_000_000;
-    const s = ax >= 10_000_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
-    return `${s}M`;
-  }
-  if (ax >= 1000) {
-    const v = num / 1000;
-    const s = ax >= 10_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
-    return `${s}K`;
-  }
-  const rounded = Math.round(num * 1000) / 1000;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
-}
-
 function syncLeaderboardPanelMode() {
   if (!leaderboardPanel || !leaderboardExpandBtn) return;
   leaderboardPanel.classList.toggle("lb-widget--expanded", leaderboardExpanded);
@@ -1956,19 +1985,6 @@ function syncLeaderboardPanelMode() {
     "aria-label",
     leaderboardExpanded ? "Свернуть рейтинг" : "Развернуть полный рейтинг"
   );
-}
-
-function syncHudRoundBadge() {
-  if (!hudRoundBadgeEl) return;
-  const online = wantOnline && getWsUrl();
-  if (!online || gameFinishedMeta) {
-    hudRoundBadgeEl.hidden = true;
-    return;
-  }
-  const labels = ["Массовый", "Полуфинал", "Финал команд", "Дуэль 1×1"];
-  const ri = Math.min(Math.max(roundIndexMeta | 0, 0), 3);
-  hudRoundBadgeEl.textContent = labels[ri] || `Раунд ${ri + 1}`;
-  hudRoundBadgeEl.hidden = false;
 }
 
 function renderLeaderboard(msg) {
@@ -2066,20 +2082,6 @@ function renderLeaderboard(msg) {
     if (typeof r.score === "number") lastLbScoreByTeam.set(r.teamId | 0, r.score);
   }
 
-  if (hudMyScoreEl) {
-    if (myRow && typeof myRow.score === "number" && myTeamId != null && !spectatorMode && !gameFinishedMeta) {
-      const p = prevScores.get(myTeamId | 0);
-      if (p != null && myRow.score > p) {
-        hudMyScoreEl.classList.add("hud-my-score--pop");
-        setTimeout(() => hudMyScoreEl.classList.remove("hud-my-score--pop"), 500);
-      }
-      hudMyScoreEl.textContent = `Вы · ${formatHudScore(myRow.score)}`;
-      hudMyScoreEl.hidden = false;
-    } else {
-      hudMyScoreEl.hidden = true;
-    }
-  }
-
   if (myTeamId != null && !spectatorMode && !gameFinishedMeta) {
     const mine = rows.find((r) => (r.teamId | 0) === (myTeamId | 0));
     const share =
@@ -2094,7 +2096,6 @@ function renderLeaderboard(msg) {
     }
     lastMyTeamScoreShare = share;
   }
-  syncHudRoundBadge();
   syncEventBanner();
 }
 
@@ -3173,8 +3174,7 @@ function computeLeaderboardGapHint() {
   const scLead = typeof leader.score === "number" && Number.isFinite(leader.score) ? leader.score : 0;
   const gap = scLead - scMine;
   if (gap > 0) {
-    const rounded = gap >= 100 ? Math.round(gap) : Math.round(gap * 10) / 10;
-    return `До лидера по очкам +${rounded}`;
+    return `До лидера по очкам +${formatHudScore(gap)}`;
   }
   if (gap < 0) return "Вы впереди по очкам";
   return "";
@@ -3276,6 +3276,20 @@ function syncEventBanner() {
 
 function syncClientCooldownFromWalletFields() {
   if (!walletState) return;
+  const now = Date.now();
+  const ge = walletState.globalEvent;
+  const arUntil =
+    (typeof ge?.altSeasonRevengeUntilMs === "number" && ge.altSeasonRevengeUntilMs > now
+      ? ge.altSeasonRevengeUntilMs
+      : typeof lastStatsGlobalEvent?.altSeasonRevengeUntilMs === "number" &&
+          lastStatsGlobalEvent.altSeasonRevengeUntilMs > now
+        ? lastStatsGlobalEvent.altSeasonRevengeUntilMs
+        : 0) | 0;
+  if (arUntil > now) {
+    walletState.effectiveRecoverySec = 1;
+    walletState.cooldownMs = 1000;
+    return;
+  }
   const u = {
     personalRecoveryUntil: walletState.personalRecoveryUntil,
     personalRecoverySec: walletState.personalRecoverySec,
@@ -4019,6 +4033,22 @@ function renderQuickBuyRail() {
     host.appendChild(btn);
   }
   updateQuickBuyBuffRings();
+  syncQuickBuyRailMapPending();
+}
+
+/** Подсветка кнопок 4×4 / 6×6 / 12×12 в «Повторить», пока ждём тап по карте. */
+function syncQuickBuyRailMapPending() {
+  const host = document.getElementById("quick-buy-list");
+  if (!host) return;
+  const t = pendingMapAction?.type;
+  const mapKinds = new Set(["zoneCapture", "massCapture", "zone12Capture"]);
+  host.querySelectorAll(".quick-buy-rail__btn").forEach((btn) => {
+    const a = btn.dataset.action || "";
+    const armed = mapKinds.has(a) && t === a;
+    btn.classList.toggle("quick-buy-rail__btn--map-armed", armed);
+    if (armed) btn.setAttribute("aria-pressed", "true");
+    else btn.removeAttribute("aria-pressed");
+  });
 }
 
 /** Круговой «радар» оставшегося времени баффа на кнопке «Повторить» (личн. / команда). */
@@ -4477,6 +4507,7 @@ function setPendingHint() {
     cooldownLabel.hidden = true;
     cooldownLabel.title = "";
   }
+  syncQuickBuyRailMapPending();
 }
 
 function wsSendJson(obj) {
@@ -4613,7 +4644,7 @@ function connectWs() {
         const tg = window.Telegram?.WebApp;
         const ws =
           typeof msg.winnerScore === "number" && Number.isFinite(msg.winnerScore)
-            ? ` Счёт победителя: ${msg.winnerScore} оч.`
+            ? ` Счёт победителя: ${formatHudScore(msg.winnerScore)} оч.`
             : "";
         const text = `Турнир завершён. Победитель: «${msg.winnerName || "—"}».${ws} Приз $5000.`;
         showPlacementFeedback(text, "error", { telegramAlert: true });
@@ -4740,11 +4771,34 @@ function connectWs() {
       scheduleDraw({ full: true });
       return;
     }
+    if (msg.type === "serverAnnouncement") {
+      const dur =
+        typeof msg.durationMs === "number" && !Number.isNaN(msg.durationMs) && msg.durationMs > 0
+          ? msg.durationMs
+          : 5000;
+      showServerAnnouncementBanner(msg.text, dur);
+      return;
+    }
     if (msg.type === "globalEvent") {
       if (msg.globalEvent && typeof msg.globalEvent === "object") {
         if (walletState) walletState.globalEvent = msg.globalEvent;
         lastStatsGlobalEvent = msg.globalEvent;
       }
+      syncEventBanner();
+      syncTeamBuffBanner();
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "mstimAltSeasonSync") {
+      const u = Number(msg.untilMs) || 0;
+      const now = Date.now();
+      const until = u > now ? u : 0;
+      const patch = { altSeasonRevengeUntilMs: until };
+      if (walletState) {
+        walletState.globalEvent = { ...(walletState.globalEvent || {}), ...patch };
+      }
+      lastStatsGlobalEvent = { ...(lastStatsGlobalEvent || {}), ...patch };
+      syncClientCooldownFromWalletFields();
       syncEventBanner();
       syncTeamBuffBanner();
       scheduleDraw({ full: true });
@@ -6351,7 +6405,7 @@ function draw(time = performance.now(), drawOpts = {}) {
   }
 
   /* События боя: золото / сжатие / экономика / предпросмотр сейсмики (сервер задаёт зоны). */
-  if (!lite && online) {
+  if (online) {
     const ge = getClientGlobalEventSnapshot();
     const rawLayers = ge?.battleEvents?.layers;
     const nowEv = Date.now();
@@ -6387,7 +6441,7 @@ function draw(time = performance.now(), drawOpts = {}) {
             const L = layers[li];
             const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
             if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
-              ctx.fillStyle = `rgba(255, 210, 40, ${0.72 + pulseEv * 0.2})`;
+              ctx.fillStyle = `rgba(255, 230, 30, ${0.88 + pulseEv * 0.1})`;
               ctx.fillRect(px, py, cw, ch);
             }
             const econKinds = [
@@ -6430,7 +6484,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         "economic_rotation",
         "resource_surge",
       ];
-      const blackOutlinePulse = 0.42 + 0.58 * (0.5 + 0.5 * Math.sin(time * 0.0075));
+      const blackOutlinePulse = 0.5 + 0.5 * (0.5 + 0.5 * Math.sin(time * 0.0075));
       for (let oli = 0; oli < layers.length; oli++) {
         const L = layers[oli];
         if (goldKindsOutline.includes(L.kind) && L.rect) {
@@ -6439,18 +6493,18 @@ function draw(time = performance.now(), drawOpts = {}) {
           const sy0 = offsetY + r.y0 * cell;
           const sw = r.w * cell;
           const sh = r.h * cell;
-          const p = 0.78 + pulseEv * 0.2;
-          const padOut = Math.max(4, cell * 0.5);
+          const p = 0.92 + pulseEv * 0.08;
+          const padOut = Math.max(5, cell * 0.65);
           ctx.save();
-          ctx.strokeStyle = `rgba(0, 0, 0, ${0.55 * blackOutlinePulse + 0.2})`;
-          ctx.lineWidth = Math.max(5, cell * 0.55);
+          ctx.strokeStyle = `rgba(0, 0, 0, ${0.65 * blackOutlinePulse + 0.25})`;
+          ctx.lineWidth = Math.max(6, cell * 0.7);
           ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
-          ctx.strokeStyle = `rgba(255, 200, 30, ${0.95 * p})`;
-          ctx.lineWidth = Math.max(3.5, cell * 0.42);
+          ctx.strokeStyle = `rgba(255, 220, 40, ${0.98 * p})`;
+          ctx.lineWidth = Math.max(4.5, cell * 0.5);
           ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
-          ctx.strokeStyle = `rgba(255, 252, 220, ${0.72 * p})`;
-          ctx.lineWidth = Math.max(2, cell * 0.2);
-          ctx.strokeRect(sx0 + cell * 0.12, sy0 + cell * 0.12, sw - cell * 0.24, sh - cell * 0.24);
+          ctx.strokeStyle = `rgba(255, 255, 245, ${0.9 * p})`;
+          ctx.lineWidth = Math.max(2.5, cell * 0.24);
+          ctx.strokeRect(sx0 + cell * 0.1, sy0 + cell * 0.1, sw - cell * 0.2, sh - cell * 0.2);
           ctx.restore();
         }
         if (econKindsOutline.includes(L.kind)) {
@@ -6508,7 +6562,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.clip();
         const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
         grd.addColorStop(0, "rgba(255,255,255,0)");
-        grd.addColorStop(0.5, "rgba(255,230,120,0.72)");
+        grd.addColorStop(0.5, "rgba(255,248,80,0.92)");
         grd.addColorStop(1, "rgba(255,255,255,0)");
         ctx.fillStyle = grd;
         ctx.globalCompositeOperation = "lighter";

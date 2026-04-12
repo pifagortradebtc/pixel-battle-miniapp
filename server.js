@@ -30,11 +30,6 @@ import {
   API_BASE_SANDBOX,
 } from "./lib/nowpayments-api.js";
 import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
-import {
-  clampTournamentTimeScale,
-  reanchorRoundStartForScaleChange,
-  TOURNAMENT_TIME_SCALE_DEFAULT,
-} from "./lib/tournament-time.js";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
 import {
   ROUND_ZERO_POST_GO_WARMUP_MS,
@@ -122,6 +117,50 @@ function rememberTelegramSubscriberChat(chatId) {
 
 loadTelegramSubscribersSync();
 
+const SERVER_ANNOUNCEMENT_DURATION_MS = 5000;
+const SAY_PROMPT_TTL_MS = 3 * 60 * 1000;
+const SERVER_ANNOUNCEMENT_MAX_LEN = 240;
+/** @type {Map<number, number>} админский Telegram uid → срок ожидания второго сообщения для say */
+const telegramAdminSayPromptUntil = new Map();
+
+function sanitizeServerAnnouncementText(raw) {
+  let s = String(raw || "").replace(/\r\n/g, "\n");
+  s = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+  if (s.length > SERVER_ANNOUNCEMENT_MAX_LEN) s = s.slice(0, SERVER_ANNOUNCEMENT_MAX_LEN);
+  return s;
+}
+
+/** @returns {{ body: string } | null} */
+function parseSayTelegramCommand(raw) {
+  const s = String(raw || "").trim();
+  const m = s.match(/^\/say\b\s*([\s\S]*)$/i) || s.match(/^say\b\s*([\s\S]*)$/i);
+  if (!m) return null;
+  return { body: String(m[1] ?? "").trim() };
+}
+
+function shouldInterruptPendingSayPrompt(raw, restartNorm) {
+  const speedCmd = restartNorm.replace(/^\/speed\b/, "speed").trim();
+  if (speedCmd === "speed" || speedCmd.startsWith("speed ")) return true;
+  const rt = String(raw || "").trim();
+  const goish = rt
+    .replace(/^\/go\b/i, "go")
+    .replace(/^гол(\s+)/i, "go$1")
+    .replace(/^гол(\d)/i, "go $1")
+    .replace(/^го(\s+)/iu, "go$1")
+    .replace(/^го(\d)/iu, "go $1");
+  if (goish.trim().toLowerCase().startsWith("go")) return true;
+  const parts = restartNorm.split(/\s+/).filter(Boolean);
+  const fw = (parts[0] || "").replace(/@\w+$/i, "");
+  if (fw === "paint" && parts.length === 1) return true;
+  if (fw === "broadcast" || fw === "рассылка") return true;
+  if (fw === "restart" || fw === "рестарт") return true;
+  if (/^(evt|event|события|событие)\b/iu.test(restartNorm)) return true;
+  if (fw === "say") return true;
+  if (fw !== "off" && MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw)) return true;
+  return false;
+}
+
 /** Пакеты пополнения: бонус в квантах (1 USDT = 7 квантов). Кредит USDT += bonusQuant/7. */
 const DEPOSIT_PACK_BONUS_QUANT = new Map([
   [1, 0],
@@ -185,7 +224,6 @@ function isClusterLeader() {
   if (v === "false" || v === "0" || v === "no") return false;
   if (v === "true" || v === "1" || v === "yes") return true;
   // Redis задан, переменная не задана: один веб-инстанс + Redis (частый случай на Render) — лидер.
-  // При scale > 1 задайте CLUSTER_LEADER=false на всех кроме одного (там true).
   return true;
 }
 
@@ -414,6 +452,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
+  if (fw === "say") return true;
   return MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw);
 }
 
@@ -450,12 +489,12 @@ let roundStartMs = Date.now();
  * В старых сохранениях отсутствует: тогда = roundStartMs (без отдельной разминки).
  */
 let playStartMs = Date.now();
-/**
- * Только для сохранения в JSON (кэш); логика — {@link getPlayStartMs}.
- * Dev-only: сжимает на реальной оси разминку, длительность боя и конец раунда.
- * Не ускоряет кулдауны, реген HP базы, лимиты ударов по флагу и прочий combat-время.
- */
-let tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+/** «Мстим за Альт Сезон»: глобально пиксель раз в 1 с для всех (бот: speed). */
+const MSTIM_ALT_SEASON_DURATION_MS = 5 * 60 * 1000;
+const MSTIM_PIXEL_COOLDOWN_MS = 1000;
+/** До какого момента (epoch ms) действует режим; 0 — выкл. */
+let mstimAltSeasonBurstUntilMs = 0;
+
 /** Первый раунд: таймер не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO). До «go» — свободная игра на карте. */
 let roundTimerStarted = true;
 /** Длительность паузы до боя в раунде 0 (мс). До «go» на таймлайн не влияет; после «go» = {@link ROUND_ZERO_POST_GO_WARMUP_MS} (или сохранённое). */
@@ -851,15 +890,17 @@ function buildSynergyMultByTeamMap(snap) {
 }
 
 function getGlobalEventPayload(nowMs = Date.now()) {
+  const arUntil = mstimAltSeasonBurstUntilMs > nowMs ? mstimAltSeasonBurstUntilMs : 0;
   const ctx = getBattleEventsContext(nowMs);
   if (!ctx) {
     return {
-      active: false,
-      kind: null,
-      title: "",
-      subtitle: "",
-      until: 0,
+      active: arUntil > 0,
+      kind: arUntil > 0 ? "alt_season_revenge" : null,
+      title: arUntil > 0 ? "Мстим за Альт Сезон" : "",
+      subtitle: arUntil > 0 ? "Пиксель раз в 1 с для всех" : "",
+      until: arUntil,
       battleEvents: { serverNow: nowMs, active: false, layers: [], primary: null, battleEndsAt: 0 },
+      altSeasonRevengeUntilMs: arUntil,
       debugRoundEvents: DEBUG_ROUND_EVENTS ? { note: "warmup_or_idle" } : undefined,
     };
   }
@@ -882,12 +923,13 @@ function getGlobalEventPayload(nowMs = Date.now()) {
     };
   }
   return {
-    active: !!be.active,
-    kind: pr ? pr.kind : null,
-    title: pr && pr.title ? pr.title : "",
-    subtitle: pr && pr.subtitle ? pr.subtitle : "",
-    until: pr && typeof pr.untilMs === "number" ? pr.untilMs : 0,
+    active: !!be.active || arUntil > 0,
+    kind: arUntil > 0 ? "alt_season_revenge" : pr ? pr.kind : null,
+    title: arUntil > 0 ? "Мстим за Альт Сезон" : pr && pr.title ? pr.title : "",
+    subtitle: arUntil > 0 ? "Пиксель раз в 1 с для всех" : pr && pr.subtitle ? pr.subtitle : "",
+    until: arUntil > 0 ? arUntil : pr && typeof pr.untilMs === "number" ? pr.untilMs : 0,
     battleEvents: be,
+    altSeasonRevengeUntilMs: arUntil,
     debugRoundEvents,
   };
 }
@@ -1156,7 +1198,8 @@ function saveRoundState() {
         roundStartMs,
         playStartMs,
         roundDurationMs,
-        tournamentTimeScale: getTournamentTimeScale(),
+        tournamentTimeScale: 1,
+        mstimAltSeasonBurstUntilMs: Math.max(0, mstimAltSeasonBurstUntilMs | 0),
         round0WarmupMs,
         roundTimerStarted,
         eligibleTokens: [...eligibleTokenSet],
@@ -1193,10 +1236,11 @@ function loadRoundState() {
       } else {
         roundDurationMs = battleDurationForRound(roundIndex);
       }
-      if (typeof j.tournamentTimeScale === "number" && j.tournamentTimeScale >= 1) {
-        tournamentTimeScale = clampTournamentTimeScale(j.tournamentTimeScale);
+      if (typeof j.mstimAltSeasonBurstUntilMs === "number" && Number.isFinite(j.mstimAltSeasonBurstUntilMs)) {
+        const u = j.mstimAltSeasonBurstUntilMs | 0;
+        mstimAltSeasonBurstUntilMs = u > Date.now() ? u : 0;
       } else {
-        tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+        mstimAltSeasonBurstUntilMs = 0;
       }
       if (typeof j.round0WarmupMs === "number" && Number.isFinite(j.round0WarmupMs)) {
         const w = Math.round(j.round0WarmupMs);
@@ -1264,7 +1308,7 @@ function loadRoundState() {
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
-      tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+      mstimAltSeasonBurstUntilMs = 0;
       playStartMs = roundStartMs;
       roundDurationMs = battleDurationForRound(0);
       eligibleTokenSet = new Set();
@@ -1281,7 +1325,7 @@ function loadRoundState() {
     console.warn("round-state load:", e.message);
     roundIndex = 0;
     roundStartMs = Date.now();
-    tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+    mstimAltSeasonBurstUntilMs = 0;
     playStartMs = roundStartMs;
     roundDurationMs = battleDurationForRound(0);
     eligibleTokenSet = new Set();
@@ -1539,7 +1583,21 @@ function recalculateAllTeamScores(nowMs = Date.now()) {
 }
 
 function getTournamentTimeScale() {
-  return tournamentTimeScale >= 1 ? tournamentTimeScale : TOURNAMENT_TIME_SCALE_DEFAULT;
+  return 1;
+}
+
+function isMstimAltSeasonBurstActive(nowMs = Date.now()) {
+  return (mstimAltSeasonBurstUntilMs | 0) > nowMs;
+}
+
+function effectivePixelCooldownMs(u, teamFx, st, now) {
+  if (isMstimAltSeasonBurstActive(now)) return MSTIM_PIXEL_COOLDOWN_MS;
+  return getCurrentCooldownMs(u, teamFx, st, now);
+}
+
+function effectiveRecoverySecForWallet(u, teamFx, now) {
+  if (isMstimAltSeasonBurstActive(now)) return 1;
+  return getEffectiveRecoverySec(u, teamFx, now);
 }
 
 function getWarmupDurationMs() {
@@ -1548,29 +1606,14 @@ function getWarmupDurationMs() {
   return w >= 5000 && w <= 600000 ? w : WARMUP_MS;
 }
 
-/** Реальный timestamp начала боя (пиксели): roundStart + разминка в игровых мс, сжатых по scale. */
+/** Реальный timestamp начала боя (пиксели): roundStart + разминка. */
 function getPlayStartMs() {
-  return roundStartMs + Math.round(getWarmupDurationMs() / getTournamentTimeScale());
+  return roundStartMs + getWarmupDurationMs();
 }
 
 /** Реальный timestamp конца фазы боя текущего раунда. */
 function getRoundBattleEndRealMs() {
-  return getPlayStartMs() + Math.round(roundDurationMs / getTournamentTimeScale());
-}
-
-function applyTournamentTimeScale(newScaleRaw) {
-  const next = clampTournamentTimeScale(newScaleRaw);
-  const prev = getTournamentTimeScale();
-  const now = Date.now();
-  if (roundTimerStarted && !gameFinished && next !== prev) {
-    roundStartMs = reanchorRoundStartForScaleChange(now, roundStartMs, prev, next);
-  }
-  tournamentTimeScale = next;
-  playStartMs = getPlayStartMs();
-  saveRoundState();
-  schedulePlayStartBroadcast();
-  broadcastTournamentTimeScaleToClients();
-  return next;
+  return getPlayStartMs() + roundDurationMs;
 }
 
 function broadcastTournamentTimeScaleToClients() {
@@ -2055,6 +2098,18 @@ function fullPayload() {
   return JSON.stringify({ type: "full", pixels: list, pixelFormat: "v2" });
 }
 
+async function broadcastWalletPayloadToAllClients() {
+  if (!wss) return;
+  const clients = [...wss.clients].filter((c) => c.readyState === 1);
+  await Promise.all(
+    clients.map((c) =>
+      buildWalletPayload(c).then((pl) => {
+        safeSend(c, pl);
+      })
+    )
+  );
+}
+
 async function buildWalletPayload(ws) {
   const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
   const u = await walletStore.getOrCreateUser(pk);
@@ -2065,9 +2120,9 @@ async function buildWalletPayload(ws) {
   const devUnl = pk && isDevUnlimitedWallet(pk);
   const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
   /* Безлимит только баланс/списания — интервал пикселя и баффы как у всех */
-  const cd = pk ? getCurrentCooldownMs(u, teamFxPayload, st, now) : BASE_ACTION_COOLDOWN_SEC * 1000;
+  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, now) : BASE_ACTION_COOLDOWN_SEC * 1000;
   const ref = u.invitedByPlayerKey ? sanitizePlayerKey(u.invitedByPlayerKey) : "";
-  const effectiveRecoverySec = pk ? getEffectiveRecoverySec(u, teamFxPayload, now) : BASE_ACTION_COOLDOWN_SEC;
+  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, now) : BASE_ACTION_COOLDOWN_SEC;
   return {
     type: "wallet",
     balanceUSDT: devUnl ? 999999999 : u.balanceUSDT,
@@ -2197,6 +2252,8 @@ function applyClusterGameReplication(msg) {
       return;
     }
     case "globalEvent":
+      return;
+    case "serverAnnouncement":
       return;
     case "teamDisplay": {
       const tid = msg.teamId | 0;
@@ -2388,10 +2445,6 @@ function applyClusterGameReplication(msg) {
     case "roundPlayStarted":
       return;
     case "tournamentTimeScale": {
-      tournamentTimeScale =
-        typeof msg.tournamentTimeScale === "number"
-          ? clampTournamentTimeScale(msg.tournamentTimeScale)
-          : TOURNAMENT_TIME_SCALE_DEFAULT;
       if (typeof msg.roundStartMs === "number" && Number.isFinite(msg.roundStartMs)) {
         roundStartMs = msg.roundStartMs;
       }
@@ -2404,6 +2457,11 @@ function applyClusterGameReplication(msg) {
       }
       playStartMs = getPlayStartMs();
       schedulePlayStartBroadcast();
+      return;
+    }
+    case "mstimAltSeasonSync": {
+      const u = Number(msg.untilMs);
+      mstimAltSeasonBurstUntilMs = Number.isFinite(u) && u > 0 ? u | 0 : 0;
       return;
     }
     default:
@@ -3519,7 +3577,7 @@ async function finalizeGameEnd(winnerRow) {
     saveDynamicTeams();
 
     gameFinished = true;
-    tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+    mstimAltSeasonBurstUntilMs = 0;
     roundStartMs = Date.now();
     if (playStartBroadcastTimer) {
       clearTimeout(playStartBroadcastTimer);
@@ -4515,7 +4573,7 @@ wss.on("connection", (ws, req) => {
       const fx = getTeamFx(teamId);
       const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
       const now = Date.now();
-      const cd = getCurrentCooldownMs(u, teamFxPayload, st, now);
+      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
       if (now < u.lastActionAt + cd) {
         await walletStore.save();
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "cooldown not ready" });
@@ -4979,7 +5037,7 @@ async function telegramPollLoop() {
           if (telegramMessageLooksLikePrivilegedCommand(t)) {
             await telegramSendMessage(
               chatId,
-              "Сервер не считает вас администратором: в TELEGRAM_ADMIN_IDS на сервере должен быть ваш числовой user id (узнать: @userinfobot). Без этого go, speed, evt и др. игнорируются."
+              "Сервер не считает вас администратором: в TELEGRAM_ADMIN_IDS на сервере должен быть ваш числовой user id (узнать: @userinfobot). Без этого go, say, speed, evt и др. игнорируются."
             );
           }
           continue;
@@ -4988,35 +5046,100 @@ async function telegramPollLoop() {
           .toLowerCase()
           .replace(/^\/+/, "")
           .replace(/\s+/g, " ");
-        const speedCmd = restartNorm.replace(/^\/speed\b/, "speed").trim();
-        if (speedCmd === "speed" || speedCmd.startsWith("speed ")) {
-          const parts = speedCmd.split(/\s+/).filter(Boolean);
-          const sub = (parts[1] || "").toLowerCase();
-          let target = 60;
-          if (parts.length === 1) {
-            target = getTournamentTimeScale() > 1 ? TOURNAMENT_TIME_SCALE_DEFAULT : 60;
-          } else if (sub === "off" || sub === "0") {
-            target = TOURNAMENT_TIME_SCALE_DEFAULT;
+
+        const pendingSayUntil = telegramAdminSayPromptUntil.get(uid);
+        if (pendingSayUntil != null) {
+          if (pendingSayUntil <= Date.now()) {
+            telegramAdminSayPromptUntil.delete(uid);
           } else {
-            const n = parseFloat(parts[1].replace(",", "."));
-            if (!Number.isFinite(n) || n < 1) {
+            if (restartNorm === "cancel" || restartNorm === "отмена") {
+              telegramAdminSayPromptUntil.delete(uid);
+              await telegramSendMessage(chatId, "Режим say отменён.");
+              continue;
+            }
+            if (shouldInterruptPendingSayPrompt(t, restartNorm)) {
+              telegramAdminSayPromptUntil.delete(uid);
+              await telegramSendMessage(chatId, "Ожидание текста для say сброшено — выполняю как команду.");
+            } else {
+              const text = sanitizeServerAnnouncementText(t);
+              if (!text) {
+                await telegramSendMessage(chatId, "Пустой текст. Пришлите другой текст или cancel.");
+                continue;
+              }
+              broadcast({ type: "serverAnnouncement", text, durationMs: SERVER_ANNOUNCEMENT_DURATION_MS });
+              telegramAdminSayPromptUntil.delete(uid);
               await telegramSendMessage(
                 chatId,
-                "speed — ускорение турнира для теста. Примеры: speed (×60 или выкл), speed off, speed 1, speed 120."
+                `Плашка в игре для всех ~${SERVER_ANNOUNCEMENT_DURATION_MS / 1000} с (${text.length} симв.).`
               );
               continue;
             }
-            target = n;
           }
-          const applied = applyTournamentTimeScale(target);
-          if (applied <= 1) {
-            await telegramSendMessage(chatId, "Speed mode: OFF (таймеры раунда в реальном времени).");
-          } else {
+        }
+
+        const sayParsed = parseSayTelegramCommand(t);
+        if (sayParsed) {
+          if (sayParsed.body.length > 0) {
+            const text = sanitizeServerAnnouncementText(sayParsed.body);
+            if (!text) {
+              await telegramSendMessage(chatId, "Текст пустой после очистки.");
+              continue;
+            }
+            broadcast({ type: "serverAnnouncement", text, durationMs: SERVER_ANNOUNCEMENT_DURATION_MS });
+            telegramAdminSayPromptUntil.delete(uid);
             await telegramSendMessage(
               chatId,
-              `Speed mode: ×${applied} (1 реальная минута ≈ 1 игровой час). Сжаты только разминка/бой/конец раунда. Кулдауны, реген HP базы и темп ударов по флагу — как в обычном времени.`
+              `Плашка в игре для всех ~${SERVER_ANNOUNCEMENT_DURATION_MS / 1000} с (${text.length} симв.).`
             );
+            continue;
           }
+          telegramAdminSayPromptUntil.set(uid, Date.now() + SAY_PROMPT_TTL_MS);
+          await telegramSendMessage(
+            chatId,
+            "Следующим сообщением пришлите текст плашки для всех игроков (до 240 символов, ~5 с на экране). Отмена: cancel"
+          );
+          continue;
+        }
+
+        const speedCmd = restartNorm.replace(/^\/speed\b/, "speed").trim();
+        if (speedCmd === "speed" || speedCmd.startsWith("speed ")) {
+          if (!isClusterLeader()) {
+            await telegramSendMessage(
+              chatId,
+              "Команду speed выполняет только лидер кластера (CLUSTER_LEADER=true на одном инстансе)."
+            );
+            continue;
+          }
+          const parts = speedCmd.split(/\s+/).filter(Boolean);
+          const sub = (parts[1] || "").toLowerCase();
+          if (sub === "off" || sub === "0") {
+            mstimAltSeasonBurstUntilMs = 0;
+            saveRoundState();
+            broadcast({ type: "mstimAltSeasonSync", untilMs: 0 });
+            scheduleStatsBroadcast();
+            await broadcastWalletPayloadToAllClients();
+            await telegramSendMessage(chatId, "«Мстим за Альт Сезон» выключено (интервал пикселя — обычный).");
+            continue;
+          }
+          mstimAltSeasonBurstUntilMs = Date.now() + MSTIM_ALT_SEASON_DURATION_MS;
+          saveRoundState();
+          broadcast({ type: "mstimAltSeasonSync", untilMs: mstimAltSeasonBurstUntilMs });
+          broadcast({
+            type: "roundEvent",
+            phase: "start",
+            eventId: `alt_season_revenge_${mstimAltSeasonBurstUntilMs}`,
+            eventType: "alt_season_revenge",
+            title: "Мстим за Альт Сезон",
+            subtitle: "Пиксель раз в 1 с для всех игроков — 5 минут",
+            untilMs: mstimAltSeasonBurstUntilMs,
+            roundIndex,
+          });
+          scheduleStatsBroadcast();
+          await broadcastWalletPayloadToAllClients();
+          await telegramSendMessage(
+            chatId,
+            `«Мстим за Альт Сезон» на 5 мин: у всех игроков пиксель раз в 1 с. Конец: ${new Date(mstimAltSeasonBurstUntilMs).toISOString()}. Выключить: speed off`
+          );
           continue;
         }
 
@@ -5094,7 +5217,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start, go [часы], speed, paint, restart, evt help, gold, seismic…"
+              "Неизвестная команда. Админ: /start, go [часы], say, speed (Альт Сезон 5 мин), speed off, paint, restart, evt help, gold, seismic…"
             );
           }
           continue;
@@ -5116,14 +5239,9 @@ async function telegramPollLoop() {
         let reply;
         if (result.ok) {
           const h = (result.durationMs ?? roundDurationMs) / 3600000;
-          const sc = getTournamentTimeScale();
           const warmMs = result.warmupMs ?? ROUND_ZERO_POST_GO_WARMUP_MS;
-          const warmRealSec = Math.max(1, Math.round(warmMs / sc / 1000));
-          const battleRealMin = Math.round(result.durationMs / sc / 60000);
-          reply =
-            sc > 1
-              ? `Раунд 1 (TEST ×${sc}): карта очищена; до боя ~${warmRealSec} с реальных, затем бой ~${battleRealMin} мин (${h.toFixed(h < 1 ? 2 : 1)} игр. ч). Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`
-              : `Раунд 1: карта очищена, ${warmRealSec} с до старта боя, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
+          const warmRealSec = Math.max(1, Math.round(warmMs / 1000));
+          reply = `Раунд 1: карта очищена, ${warmRealSec} с до старта боя, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
         } else if (result.reason === "already_started") {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {
@@ -5210,7 +5328,7 @@ server.listen(PORT, () => {
     }
     if (WAIT_FOR_TELEGRAM_GO) {
       console.log(
-        'Первый раунд: «go» + часы; ускорение теста турнира: «speed» (×60 / выкл), speed off, speed 120. Рестарт процесса — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
+        'Первый раунд: «go» + часы; «speed» — событие «Мстим за Альт Сезон» (5 мин, пиксель раз в 1 с); выкл: speed off. Рестарт — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
       );
     } else if (TELEGRAM_ADMIN_IDS.size === 0) {
       console.warn(

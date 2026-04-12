@@ -105,6 +105,10 @@ function glyphForHudTheme(theme) {
       return "☆";
     case "seismic":
       return "⌁";
+    case "alt-revenge":
+      return "⚔";
+    case "round-countdown":
+      return "⏱";
     case "neutral":
       return "◆";
     default:
@@ -249,6 +253,7 @@ function kickerFromThemeAndTitle(theme, title) {
   if (theme === "dramatic") return "КУЛЬМИНАЦИЯ";
   if (theme === "economic" || theme === "boom" || theme === "recession") return "ЭКОНОМИКА";
   if (theme === "synergy") return "КОМАНДНЫЙ БАФФ";
+  if (theme === "alt-revenge") return "АЛЬТ СЕЗОН";
   return "СОБЫТИЕ";
 }
 
@@ -261,7 +266,8 @@ function triggerCinematicHaptic(theme) {
       theme === "seismic-incoming" ||
       theme === "dramatic" ||
       theme === "final-phase" ||
-      theme === "compression"
+      theme === "compression" ||
+      theme === "alt-revenge"
     )
       h.impactOccurred("medium");
     else h.impactOccurred("light");
@@ -300,7 +306,12 @@ function runCinematic(spec, done) {
   }
 
   if (theme === "base-captured" || theme === "final-ten") cinematicRoot.dataset.tier = "epic";
-  else if (theme === "seismic-incoming" || theme === "dramatic" || theme === "final-phase")
+  else if (
+    theme === "seismic-incoming" ||
+    theme === "dramatic" ||
+    theme === "final-phase" ||
+    theme === "alt-revenge"
+  )
     cinematicRoot.dataset.tier = "high";
   else cinematicRoot.dataset.tier = "standard";
 
@@ -438,6 +449,8 @@ function roundEventToCinematicSpec(eventType, title, subtitle) {
       }
       return { ...base, theme: "dramatic", sound: "dramatic", holdMs: 2800 };
     }
+    case "alt_season_revenge":
+      return { ...base, theme: "alt-revenge", sound: "gold", holdMs: 2600, kicker: "АЛЬТ СЕЗОН" };
     default:
       return base;
   }
@@ -617,6 +630,20 @@ export function syncPremiumBattlePresentation(opts) {
   /** @type {object[]} */
   const chips = [];
 
+  const arUntil =
+    ge && typeof ge.altSeasonRevengeUntilMs === "number" && ge.altSeasonRevengeUntilMs > Date.now()
+      ? ge.altSeasonRevengeUntilMs
+      : 0;
+  if (arUntil > 0) {
+    chips.push({
+      kind: "alt_season_revenge",
+      title: "МСТИМ ЗА АЛЬТ СЕЗОН",
+      status: "Пиксель раз в 1 с — все игроки",
+      untilMs: arUntil,
+      theme: "alt-revenge",
+    });
+  }
+
   if (seismicPreview && typeof seismicPreview.impactAtMs === "number" && seismicPreview.impactAtMs > Date.now()) {
     chips.push({
       kind: "seismic_preview",
@@ -629,7 +656,7 @@ export function syncPremiumBattlePresentation(opts) {
 
   const layers = ge?.battleEvents?.layers;
   const sorted = sortLayersForHud(Array.isArray(layers) ? layers : []);
-  for (let i = 0; i < sorted.length && chips.length < 4; i++) {
+  for (let i = 0; i < sorted.length && chips.length < 6; i++) {
     const L = sorted[i];
     const theme = hudThemeForLayerKind(L);
     chips.push({
@@ -639,6 +666,26 @@ export function syncPremiumBattlePresentation(opts) {
       untilMs: Number(L.untilMs),
       theme,
     });
+  }
+
+  const reMs =
+    typeof roundEndsAtMs === "number" && Number.isFinite(roundEndsAtMs) && roundEndsAtMs > Date.now()
+      ? roundEndsAtMs
+      : 0;
+  if (reMs > 0) {
+    const hasRoundEndChip = chips.some((c) => {
+      const u = Number(c.untilMs);
+      return Number.isFinite(u) && Math.abs(u - reMs) < 25000;
+    });
+    if (!hasRoundEndChip) {
+      chips.push({
+        kind: "battle_countdown",
+        title: "КОНЕЦ РАУНДА",
+        status: "До окончания боя",
+        untilMs: reMs,
+        theme: "round-countdown",
+      });
+    }
   }
 
   const sig = JSON.stringify(
