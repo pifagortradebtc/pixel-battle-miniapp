@@ -53,6 +53,9 @@ import {
   getNextTimelineEvent,
   getRoundTimeline,
   isEventActiveAt,
+  MANUAL_BATTLE_EVENT_HELP_RU,
+  mergeManualBattleSlotsIntoSnapshot,
+  resolveManualBattleCommandToTimelineDef,
 } from "./lib/battle-events.js";
 import {
   FLAG_BASE_MAX_HP,
@@ -62,6 +65,10 @@ import {
   computeEffectiveBaseHp,
   flagCellFromSpawn,
 } from "./lib/flag-capture.js";
+import {
+  TERRITORY_ISOLATION_GRACE_MS,
+  computeIsolatedTerritoryGroups,
+} from "./lib/territory-isolation.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -611,6 +618,50 @@ const TEAM_SPAWN_GAP = 1;
 /** Сохранённые одноразовые шаги событий (сейсмика / предупреждение). */
 let battleEventsApplied = {};
 
+/** Ручные события карты (Telegram evt …): ключ команды → untilMs (конец действия). Только лидер кластера меняет. */
+const manualBattleSlotsByCmd = new Map();
+
+function normalizeManualBattleCmdKey(raw) {
+  const s = String(raw || "")
+    .toLowerCase()
+    .trim()
+    .replace(/^\/+/, "");
+  if (s === "золото") return "gold";
+  return s;
+}
+
+function pruneExpiredManualBattleSlots(nowMs = Date.now()) {
+  for (const [k, u] of [...manualBattleSlotsByCmd]) {
+    if (typeof u === "number" && u <= nowMs) manualBattleSlotsByCmd.delete(k);
+  }
+}
+
+function getActiveManualBattleSlots(nowMs = Date.now()) {
+  pruneExpiredManualBattleSlots(nowMs);
+  /** @type {{ cmd: string, untilMs: number }[]} */
+  const out = [];
+  for (const [cmd, untilMs] of manualBattleSlotsByCmd) {
+    if (typeof untilMs === "number" && untilMs > nowMs) {
+      out.push({ cmd: normalizeManualBattleCmdKey(cmd), untilMs });
+    }
+  }
+  return out;
+}
+
+function computeBattleScoringSnapshotWithManualBattle(nowMs, ctx) {
+  const snap = computeBattleScoringSnapshot(nowMs, ctx);
+  mergeManualBattleSlotsIntoSnapshot(snap, getActiveManualBattleSlots(nowMs), nowMs, ctx);
+  return snap;
+}
+
+function broadcastManualBattleSyncAndStats() {
+  broadcast({
+    type: "manualBattleSync",
+    slots: Object.fromEntries(manualBattleSlotsByCmd),
+  });
+  scheduleStatsBroadcast();
+}
+
 /** Чтобы не слать повторно roundEvent start/end при каждом тике. */
 let lastAnnouncedActiveEventIds = new Set();
 
@@ -674,7 +725,7 @@ function getGlobalEventPayload(nowMs = Date.now()) {
       debugRoundEvents: DEBUG_ROUND_EVENTS ? { note: "warmup_or_idle" } : undefined,
     };
   }
-  const snap = computeBattleScoringSnapshot(nowMs, ctx);
+  const snap = computeBattleScoringSnapshotWithManualBattle(nowMs, ctx);
   const be = buildBattleEventsClientPayload(snap, nowMs, ctx.battleEndMs);
   const pr = be.primary;
   /** @type {Record<string, unknown> | undefined} */
@@ -853,6 +904,7 @@ function tickBattleEvents(nowMs) {
 function resetBattleEventsStateForNewBattleRound() {
   battleEventsApplied = {};
   lastAnnouncedActiveEventIds = new Set();
+  manualBattleSlotsByCmd.clear();
 }
 
 function teamsForMeta() {
@@ -960,6 +1012,7 @@ function saveRoundState() {
         gameFinished,
         winnerTokensByPlayerKey,
         battleEventsApplied,
+        manualBattleSlots: Object.fromEntries(manualBattleSlotsByCmd),
       }),
       "utf8"
     );
@@ -1022,6 +1075,13 @@ function loadRoundState() {
       } else {
         battleEventsApplied = {};
       }
+      manualBattleSlotsByCmd.clear();
+      if (j.manualBattleSlots && typeof j.manualBattleSlots === "object" && !Array.isArray(j.manualBattleSlots)) {
+        for (const [k, v] of Object.entries(j.manualBattleSlots)) {
+          const u = Number(v);
+          if (Number.isFinite(u) && u > 0) manualBattleSlotsByCmd.set(normalizeManualBattleCmdKey(k), u);
+        }
+      }
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
@@ -1032,6 +1092,7 @@ function loadRoundState() {
       gameFinished = false;
       winnerTokensByPlayerKey = {};
       battleEventsApplied = {};
+      manualBattleSlotsByCmd.clear();
       roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
       saveRoundState();
     }
@@ -1046,6 +1107,7 @@ function loadRoundState() {
     gameFinished = false;
     winnerTokensByPlayerKey = {};
     battleEventsApplied = {};
+    manualBattleSlotsByCmd.clear();
     roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
   }
 }
@@ -1181,7 +1243,7 @@ function cellIsLand(x, y) {
 function buildScoringContext(nowMs = Date.now()) {
   if (!landGrid) return null;
   const ctxEv = getBattleEventsContext(nowMs);
-  const battle = ctxEv ? computeBattleScoringSnapshot(nowMs, ctxEv) : null;
+  const battle = ctxEv ? computeBattleScoringSnapshotWithManualBattle(nowMs, ctxEv) : null;
   const synergyMultByTeamId = battle ? buildSynergyMultByTeamMap(battle) : null;
   return {
     roundIndex,
@@ -1260,7 +1322,64 @@ function clearTiebreakSnapshots() {
 /** @type {ReturnType<typeof setTimeout> | null} */
 let playStartBroadcastTimer = null;
 
+/**
+ * После разминки 1-го раунда: чистая карта, только 6×6 базы команд (как «старт с нуля»).
+ * Всё, что успели нарисовать до боя (в т.ч. в разминке), сбрасывается.
+ */
+function resetMassRoundBattlefieldAfterWarmup() {
+  if (!isClusterLeader()) return;
+
+  clearAllFlagCaptureState();
+  clearTiebreakSnapshots();
+  resetBattleEventsStateForNewBattleRound();
+  clearTeamEffectsMap();
+
+  let teamsChanged = false;
+  for (const t of dynamicTeams) {
+    if (t.solo) continue;
+    if (t.eliminated) teamsChanged = true;
+    t.eliminated = false;
+  }
+
+  pixels.clear();
+
+  if (!landGrid) {
+    if (teamsChanged) saveDynamicTeams();
+    afterTerritoryMutation();
+    saveRoundState();
+    broadcast(JSON.parse(fullPayload()));
+    broadcast({ type: "teamsFull", teams: teamsForMeta() });
+    broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+    broadcastStatsImmediate();
+    return;
+  }
+
+  for (const t of dynamicTeams) {
+    if (t.solo) continue;
+    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") {
+      const sp = findValidSpawnRect6();
+      if (!sp) {
+        console.warn("[reset-after-warmup] нет места 6×6 для команды", t.id, t.name);
+        continue;
+      }
+      t.spawnX0 = sp.x0;
+      t.spawnY0 = sp.y0;
+      teamsChanged = true;
+    }
+    fillTeamSpawnAreaSilent(t.id, t.spawnX0, t.spawnY0, "");
+  }
+  if (teamsChanged) saveDynamicTeams();
+
+  afterTerritoryMutation();
+  saveRoundState();
+  broadcast(JSON.parse(fullPayload()));
+  broadcast({ type: "teamsFull", teams: teamsForMeta() });
+  broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+  broadcastStatsImmediate();
+}
+
 function schedulePlayStartBroadcast() {
+  if (REDIS_URL && !isClusterLeader()) return;
   if (playStartBroadcastTimer) {
     clearTimeout(playStartBroadcastTimer);
     playStartBroadcastTimer = null;
@@ -1273,6 +1392,9 @@ function schedulePlayStartBroadcast() {
   playStartBroadcastTimer = setTimeout(() => {
     playStartBroadcastTimer = null;
     if (gameFinished) return;
+    if (roundIndex === 0) {
+      resetMassRoundBattlefieldAfterWarmup();
+    }
     broadcast({
       type: "roundPlayStarted",
       roundIndex,
@@ -1351,12 +1473,168 @@ function applyRoundShapeMask(ri, buf, w, h) {
 /** @type {Map<string, { teamId: number, ownerPlayerKey: string, shieldedUntil: number } | number>} */
 const pixels = new Map();
 
+/**
+ * Изолированные карманы: ключ = groupId (каноническое множество клеток кармана).
+ * Каждая связная компонента отрезанной территории — отдельная запись и свой дедлайн.
+ * @type {Map<string, { teamId: number, cells: Set<string>, deadlineMs: number, groupId: string }>}
+ */
+let territoryIsolationByGroupId = new Map();
+
+/** Дедуп WS/Redis: не слать territoryIsolationSync без изменений. */
+let lastTerritoryIsolationSyncJson = "[]";
+
 /** @type {Map<number, { teamRecoveryUntil: number, teamRecoverySec: number }>} */
 const teamEffects = new Map();
 
 function pixelTeam(val) {
   if (val && typeof val === "object") return val.teamId;
   return val;
+}
+
+function cellSetsEqual(a, b) {
+  if (!(a instanceof Set) || !(b instanceof Set)) return false;
+  if (a.size !== b.size) return false;
+  for (const x of a) {
+    if (!b.has(x)) return false;
+  }
+  return true;
+}
+
+function clearTerritoryIsolationState() {
+  territoryIsolationByGroupId = new Map();
+  lastTerritoryIsolationSyncJson = "[]";
+}
+
+/** Удалить группы команд, которых уже нет или они выбыли — без таймеров «в вакууме». */
+function pruneTerritoryIsolationEliminatedTeams() {
+  const alive = new Set();
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    alive.add(t.id | 0);
+  }
+  for (const [gid, g] of [...territoryIsolationByGroupId]) {
+    if (!alive.has(g.teamId | 0)) territoryIsolationByGroupId.delete(gid);
+  }
+}
+
+function removeTerritoryIsolationGroupsForTeam(teamId) {
+  const tid = teamId | 0;
+  for (const [gid, g] of [...territoryIsolationByGroupId]) {
+    if ((g.teamId | 0) === tid) territoryIsolationByGroupId.delete(gid);
+  }
+}
+
+function buildTerritoryIsolationGroupsPayload(serverNow) {
+  /** @type {object[]} */
+  const groups = [];
+  for (const [, g] of territoryIsolationByGroupId) {
+    const gid = g.groupId;
+    const cells = [...g.cells]
+      .sort()
+      .map((k) => {
+        const parts = k.split(",");
+        const x = Number(parts[0]);
+        const y = Number(parts[1]);
+        return [x | 0, y | 0];
+      });
+    groups.push({
+      groupId: gid,
+      sig: gid,
+      teamId: g.teamId | 0,
+      expiresAtMs: g.deadlineMs | 0,
+      cells,
+    });
+  }
+  groups.sort((a, b) => String(a.groupId).localeCompare(String(b.groupId)));
+  return { serverNow, groups };
+}
+
+function broadcastTerritoryIsolationSyncIfChanged(serverNow) {
+  const body = buildTerritoryIsolationGroupsPayload(serverNow);
+  const j = JSON.stringify(body.groups);
+  if (j === lastTerritoryIsolationSyncJson) return;
+  lastTerritoryIsolationSyncJson = j;
+  broadcast({
+    type: "territoryIsolationSync",
+    serverNow: body.serverNow,
+    groups: body.groups,
+  });
+}
+
+/**
+ * Таймеры изоляции + нейтрализация просроченных карманов. Только лидер кластера.
+ * @returns {boolean} были ли удалены клетки из pixels
+ */
+function advanceTerritoryIsolationState() {
+  if (!isClusterLeader() || gameFinished) return false;
+  pruneTerritoryIsolationEliminatedTeams();
+  let pixelsMutated = false;
+  /** @type {Map<string, { teamId: number, cells: Set<string>, deadlineMs: number, groupId: string }>} */
+  let carry = territoryIsolationByGroupId;
+  for (let iter = 0; iter < 96; iter++) {
+    const now = Date.now();
+    const isolatedGroups = computeIsolatedTerritoryGroups(pixels, dynamicTeams, pixelTeam, flagCellFromSpawn);
+    /** @type {{ groupId: string, teamId: number, cells: Set<string>, deadlineMs: number }[]} */
+    const meta = [];
+    for (let i = 0; i < isolatedGroups.length; i++) {
+      const p = isolatedGroups[i];
+      const groupId = p.groupId;
+      const old = carry.get(groupId);
+      const cellSet = new Set(p.cells);
+      const deadlineMs =
+        old && cellSetsEqual(old.cells, cellSet) ? old.deadlineMs : now + TERRITORY_ISOLATION_GRACE_MS;
+      meta.push({ groupId, teamId: p.teamId | 0, cells: cellSet, deadlineMs });
+    }
+    const expired = meta.filter((m) => m.deadlineMs <= now);
+    if (!expired.length) {
+      const nextMap = new Map();
+      for (let j = 0; j < meta.length; j++) {
+        const m = meta[j];
+        nextMap.set(m.groupId, {
+          teamId: m.teamId,
+          cells: m.cells,
+          deadlineMs: m.deadlineMs,
+          groupId: m.groupId,
+        });
+      }
+      territoryIsolationByGroupId = nextMap;
+      broadcastTerritoryIsolationSyncIfChanged(now);
+      return pixelsMutated;
+    }
+    /** @type {Map<string, { teamId: number, cells: Set<string>, deadlineMs: number, groupId: string }>} */
+    const nextCarry = new Map();
+    for (let e = 0; e < meta.length; e++) {
+      const m = meta[e];
+      if (m.deadlineMs <= now) {
+        /** @type [number, number][] */
+        const xyList = [];
+        for (const k of m.cells) {
+          pixels.delete(k);
+          const parts = k.split(",");
+          const sx = Number(parts[0]);
+          const sy = Number(parts[1]);
+          if (Number.isFinite(sx) && Number.isFinite(sy)) xyList.push([sx | 0, sy | 0]);
+        }
+        broadcast({
+          type: "territoryIsolationCollapse",
+          teamId: m.teamId,
+          groupId: m.groupId,
+          sig: m.groupId,
+          cells: xyList,
+        });
+        pixelsMutated = true;
+      } else {
+        nextCarry.set(m.groupId, {
+          teamId: m.teamId,
+          cells: m.cells,
+          deadlineMs: m.deadlineMs,
+          groupId: m.groupId,
+        });
+      }
+    }
+    carry = nextCarry;
+  }
+  return pixelsMutated;
 }
 
 function normalizePixel(val) {
@@ -1643,12 +1921,22 @@ function applyClusterGameReplication(msg) {
         fx.teamRecoverySec = Number(msg.teamRecoverySec) || BASE_ACTION_COOLDOWN_SEC;
       }
       return;
+    case "manualBattleSync": {
+      manualBattleSlotsByCmd.clear();
+      const sl = msg.slots && typeof msg.slots === "object" && !Array.isArray(msg.slots) ? msg.slots : {};
+      for (const [k, v] of Object.entries(sl)) {
+        const u = Number(v);
+        if (Number.isFinite(u)) manualBattleSlotsByCmd.set(normalizeManualBattleCmdKey(k), u);
+      }
+      return;
+    }
     case "teamEliminated": {
       const tid = msg.teamId | 0;
       const ri = typeof msg.roundIndex === "number" ? msg.roundIndex : roundIndex;
       const dt = dynamicTeams.find((x) => x.id === tid);
       if (dt) dt.eliminated = true;
       clearFlagCaptureStateForDefender(tid);
+      removeTerritoryIsolationGroupsForTeam(tid);
       teamEffects.delete(tid);
       teamMemberKeys.delete(tid);
       teamPlayerCounts.delete(tid);
@@ -1670,6 +1958,7 @@ function applyClusterGameReplication(msg) {
     case "gameEnded":
       try {
         clearAllFlagCaptureState();
+        clearTerritoryIsolationState();
         loadRoundState();
         loadDynamicTeams();
         clearTeamEffectsMap();
@@ -1717,6 +2006,52 @@ function applyClusterGameReplication(msg) {
         }
       }
       clearFlagCaptureStateForDefender(did);
+      return;
+    }
+    case "territoryIsolationSync": {
+      territoryIsolationByGroupId = new Map();
+      const groups = Array.isArray(msg.groups) ? msg.groups : [];
+      for (let gi = 0; gi < groups.length; gi++) {
+        const g = groups[gi];
+        const groupId =
+          typeof g.groupId === "string" && g.groupId
+            ? g.groupId
+            : typeof g.sig === "string"
+              ? g.sig
+              : "";
+        if (!groupId) continue;
+        const cells = new Set();
+        const rawCells = Array.isArray(g.cells) ? g.cells : [];
+        for (let ci = 0; ci < rawCells.length; ci++) {
+          const c = rawCells[ci];
+          if (!Array.isArray(c) || c.length < 2) continue;
+          cells.add(`${c[0] | 0},${c[1] | 0}`);
+        }
+        territoryIsolationByGroupId.set(groupId, {
+          teamId: g.teamId | 0,
+          cells,
+          deadlineMs: Number(g.expiresAtMs) || 0,
+          groupId,
+        });
+      }
+      const sn = typeof msg.serverNow === "number" ? msg.serverNow : Date.now();
+      lastTerritoryIsolationSyncJson = JSON.stringify(buildTerritoryIsolationGroupsPayload(sn).groups);
+      return;
+    }
+    case "territoryIsolationCollapse": {
+      const raw = Array.isArray(msg.cells) ? msg.cells : [];
+      for (let i = 0; i < raw.length; i++) {
+        const p = raw[i];
+        if (!Array.isArray(p) || p.length < 2) continue;
+        pixels.delete(`${p[0] | 0},${p[1] | 0}`);
+      }
+      const collapseGid =
+        typeof msg.groupId === "string" && msg.groupId
+          ? msg.groupId
+          : typeof msg.sig === "string"
+            ? msg.sig
+            : "";
+      if (collapseGid) territoryIsolationByGroupId.delete(collapseGid);
       return;
     }
     case "flagUnderAttack":
@@ -1879,7 +2214,8 @@ function tickFlagBaseRegen(now) {
 }
 
 /**
- * Удар по базе: HP −1; при HP уже 0 — захват. Клетка не перекрашивается до захвата.
+ * Удар по базе: HP −1; при HP уже 0 — захват.
+ * Не вызывает обычную покраску: `pixels` на клетке флага не трогаем до {@link executeFlagCaptureSuccess}.
  * @returns {null | { rateLimited?: true } | { hit: true, defenderTeamId: number, hp: number, maxHp: number } | { captured: true, defenderTeamId: number }}
  */
 function tryFlagCaptureHit(attackerTeamId, x, y, now) {
@@ -1954,6 +2290,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   return { hit: true, defenderTeamId: defTeam.id, hp: newHp, maxHp: FLAG_BASE_MAX_HP };
 }
 
+/** Единственная точка смены владельца клетки флага и всей территории защитника (после добивающего удара). */
 function executeFlagCaptureSuccess(attackerId, defenderId) {
   const dtDef = dynamicTeams.find((t) => t.id === defenderId);
   const dtAtk = dynamicTeams.find((t) => t.id === attackerId);
@@ -1985,6 +2322,7 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
   });
 
   eliminateTeamByTerritoryLoss(defenderId);
+  afterTerritoryMutation();
 }
 
 /** Клетки из planned, достижимые от уже существующей территории команды через 8-соседство, оставаясь внутри planned. */
@@ -2104,6 +2442,17 @@ function findValidSpawnRect6() {
   return null;
 }
 
+/** Залить 6×6 базу без WS-сообщений (для массового сброса карты). */
+function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
+  const opk = String(ownerPk || "").slice(0, 128);
+  for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
+    for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
+      if (!cellIsLand(x, y)) continue;
+      pixels.set(`${x},${y}`, { teamId, ownerPlayerKey: opk, shieldedUntil: 0 });
+    }
+  }
+}
+
 function paintTeamSpawnArea(teamId, x0, y0, ownerPk) {
   const opk = String(ownerPk || "").slice(0, 128);
   for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
@@ -2210,6 +2559,7 @@ function notifyTerritoryDramaEvents(prev, next) {
 function afterTerritoryMutation() {
   if (gameFinished) return;
   if (REDIS_URL && !isClusterLeader()) return;
+  advanceTerritoryIsolationState();
   const next = computeTeamTerritoryCounts();
   notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
   lastTerritoryCountSnapshot = new Map(next);
@@ -2236,6 +2586,10 @@ function eliminateTeamByTerritoryLoss(teamId) {
   const dt = dynamicTeams.find((t) => t.id === teamId);
   if (!dt || dt.solo || dt.eliminated) return;
   clearFlagCaptureStateForDefender(teamId);
+  removeTerritoryIsolationGroupsForTeam(teamId);
+  if (isClusterLeader() && !gameFinished) {
+    broadcastTerritoryIsolationSyncIfChanged(Date.now());
+  }
   dt.eliminated = true;
   saveDynamicTeams();
   teamEffects.delete(teamId);
@@ -2627,6 +2981,15 @@ function blockWarmupPurchase(ws) {
   return true;
 }
 
+/** До команды «go» в боте (раунд 0) покупки недоступны; затем — обычная разминка. */
+function blockPrePlayPurchases(ws) {
+  if (roundIndex === 0 && !roundTimerStarted) {
+    safeSend(ws, { type: "purchaseError", reason: "waiting_go" });
+    return true;
+  }
+  return blockWarmupPurchase(ws);
+}
+
 function assertCanPlay(ws) {
   if (gameFinished) {
     safeSend(ws, { type: "playRejected", reason: "spectator" });
@@ -2661,6 +3024,7 @@ async function sendConnectionMeta(ws) {
   }
   const warmupEndsAt =
     gameFinished || (roundIndex === 0 && !roundTimerStarted) ? null : getPlayStartMs();
+  const isoNow = Date.now();
   safeSend(ws, {
     type: "meta",
     teams: teamsForMeta(),
@@ -2678,6 +3042,7 @@ async function sendConnectionMeta(ws) {
     discussionChatUrl: getDiscussionChatUrlForClient(),
     flags: buildFlagsSnapshot(),
     tournamentTimeScale: getTournamentTimeScale(),
+    territoryIsolation: buildTerritoryIsolationGroupsPayload(isoNow),
   });
   safeSend(ws, await buildWalletPayload(ws));
 }
@@ -2710,6 +3075,7 @@ async function finalizeGameEnd(winnerRow) {
     teamMemberKeys.clear();
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
+    clearTerritoryIsolationState();
     pixels.clear();
     clearTeamEffectsMap();
     dynamicTeams = [];
@@ -2810,6 +3176,7 @@ async function advanceToDuelRound(winnerRow) {
     teamMemberKeys.clear();
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
+    clearTerritoryIsolationState();
     pixels.clear();
     clearTeamEffectsMap();
     dynamicTeams = [];
@@ -2952,6 +3319,7 @@ async function runMaybeEndRound() {
     teamMemberKeys.clear();
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
+    clearTerritoryIsolationState();
     pixels.clear();
     clearTeamEffectsMap();
     dynamicTeams = [];
@@ -3028,6 +3396,20 @@ function maybeEndRound() {
 setInterval(() => maybeEndRound(), 30000);
 setInterval(() => tickFlagBaseRegen(Date.now()), 500);
 setInterval(() => tickBattleEvents(Date.now()), 1000);
+setInterval(() => {
+  if (gameFinished) return;
+  if (REDIS_URL && !isClusterLeader()) return;
+  const removed = advanceTerritoryIsolationState();
+  if (!removed) return;
+  const next = computeTeamTerritoryCounts();
+  notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
+  lastTerritoryCountSnapshot = new Map(next);
+  scanAndEliminateTeamsWithNoTerritory();
+  const st = buildStatsPayload();
+  updateTiebreakFromStatsPayload(st);
+  checkDuelInstantWin(st);
+  scheduleStatsBroadcast();
+}, 250);
 
 wss.on("connection", (ws, req) => {
   const ip = getClientIpFromReq(req);
@@ -3330,7 +3712,7 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "purchasePersonalRecovery") {
       if (!assertCanPlay(ws)) return;
-      if (blockWarmupPurchase(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
       attachPlayerKey(ws, msg);
       const pk = sanitizePlayerKey(ws.playerKey);
       if (!pk) return;
@@ -3377,7 +3759,7 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "purchaseZoneCapture") {
       if (!assertCanPlay(ws)) return;
-      if (blockWarmupPurchase(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
       attachPlayerKey(ws, msg);
       ensureWsOnlineTracked(ws);
       if (ws.teamId == null) {
@@ -3443,7 +3825,7 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "purchaseMassCapture") {
       if (!assertCanPlay(ws)) return;
-      if (blockWarmupPurchase(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
       attachPlayerKey(ws, msg);
       ensureWsOnlineTracked(ws);
       if (ws.teamId == null) {
@@ -3508,7 +3890,7 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "purchaseZone12Capture") {
       if (!assertCanPlay(ws)) return;
-      if (blockWarmupPurchase(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
       attachPlayerKey(ws, msg);
       ensureWsOnlineTracked(ws);
       if (ws.teamId == null) {
@@ -3572,7 +3954,7 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "purchaseTeamRecovery") {
       if (!assertCanPlay(ws)) return;
-      if (blockWarmupPurchase(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
       attachPlayerKey(ws, msg);
       if (ws.teamId == null) {
         safeSend(ws, { type: "purchaseError", reason: "no_team" });
@@ -3634,6 +4016,11 @@ wss.on("connection", (ws, req) => {
       const x = msg.x | 0;
       const y = msg.y | 0;
       const teamId = ws.teamId;
+      if (roundIndex === 0 && !roundTimerStarted) {
+        safeSend(ws, { type: "invalidPlacement", teamId, reason: "waiting_go" });
+        safeSend(ws, { type: "pixelReject", reason: "waiting_go" });
+        return;
+      }
       if (isTeamEliminated(teamId)) {
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "team_eliminated" });
         safeSend(ws, { type: "pixelReject", reason: "team_eliminated" });
@@ -3734,6 +4121,7 @@ wss.on("connection", (ws, req) => {
       u.lastActionAt = now;
       await walletStore.save();
 
+      /* Обычная покраска: не якорь чужой базы (это только tryFlagCaptureHit / executeFlagCaptureSuccess). */
       const rec = { teamId, ownerPlayerKey: pk, shieldedUntil: 0 };
       pixels.set(key, rec);
       broadcast({ type: "pixel", x, y, t: teamId, ownerPlayerKey: pk, shieldedUntil: 0 });
@@ -3870,6 +4258,92 @@ async function telegramSendMessage(chatId, text, extra = {}) {
   });
 }
 
+/**
+ * Ручное включение событий карты (только TELEGRAM_ADMIN_IDS, только лидер кластера).
+ * Сообщения: evt gold, gold, evt mapcomp 45 (минут), gold off, evt off, seismic, evt help.
+ */
+async function handleTelegramManualBattleCommand(chatId, lineRaw) {
+  if (!isClusterLeader()) {
+    await telegramSendMessage(
+      chatId,
+      "Ручные события задаёт только лидер кластера (CLUSTER_LEADER=true на одном инстансе)."
+    );
+    return;
+  }
+  const parts = String(lineRaw || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0) {
+    await telegramSendMessage(chatId, MANUAL_BATTLE_EVENT_HELP_RU);
+    return;
+  }
+  if (parts[0] === "help" || parts[0] === "list") {
+    await telegramSendMessage(chatId, MANUAL_BATTLE_EVENT_HELP_RU);
+    return;
+  }
+  if (parts[0] === "off" && parts.length === 1) {
+    manualBattleSlotsByCmd.clear();
+    saveRoundState();
+    broadcastManualBattleSyncAndStats();
+    await telegramSendMessage(chatId, "Все ручные события сняты.");
+    return;
+  }
+  const cmd0 = normalizeManualBattleCmdKey(parts[0]);
+  if (parts[1] === "off") {
+    manualBattleSlotsByCmd.delete(cmd0);
+    saveRoundState();
+    broadcastManualBattleSyncAndStats();
+    await telegramSendMessage(chatId, `Событие «${cmd0}» выключено.`);
+    return;
+  }
+  if (cmd0 === "seismic") {
+    const now = Date.now();
+    const ctx = getBattleEventsContext(now);
+    if (!ctx) {
+      await telegramSendMessage(
+        chatId,
+        "Сейсмика: доступна только во время боя (после разминки, до конца раунда)."
+      );
+      return;
+    }
+    const seed = `manual_seismic_${now}`;
+    applySeismicForLeader(seed, seed);
+    await telegramSendMessage(chatId, "Сейсмика выполнена (очистка клеток по шарам Манхэттена).");
+    return;
+  }
+  const def = resolveManualBattleCommandToTimelineDef(cmd0, roundIndex);
+  if (!def) {
+    await telegramSendMessage(
+      chatId,
+      `Неизвестная команда «${cmd0}». Отправьте: evt help`
+    );
+    return;
+  }
+  const battleEnd = getRoundBattleEndRealMs();
+  const now = Date.now();
+  let until = battleEnd;
+  if (parts[1] && /^\d/.test(parts[1])) {
+    const mins = parseFloat(parts[1].replace(",", "."));
+    if (Number.isFinite(mins) && mins > 0) {
+      until = Math.min(now + Math.round(mins * 60000), battleEnd);
+    }
+  }
+  if (until <= now) {
+    await telegramSendMessage(chatId, "Окно боя уже закрыто или время until в прошлом.");
+    return;
+  }
+  manualBattleSlotsByCmd.set(cmd0, until);
+  pruneExpiredManualBattleSlots(now);
+  saveRoundState();
+  broadcastManualBattleSyncAndStats();
+  const leftMin = Math.max(1, Math.round((until - now) / 60000));
+  await telegramSendMessage(
+    chatId,
+    `OK: «${cmd0}» активно ~${leftMin} мин (до ${new Date(until).toLocaleString("ru-RU")} или конца боя).`
+  );
+}
+
 async function telegramPollLoop() {
   if (!TELEGRAM_BOT_TOKEN) return;
   let offset = 0;
@@ -3947,6 +4421,47 @@ async function telegramPollLoop() {
           }
           continue;
         }
+
+        const manualBattleKnownFirst = new Set([
+          "gold",
+          "target",
+          "duelzone",
+          "duel",
+          "economic",
+          "shift",
+          "rotation",
+          "boom",
+          "surge",
+          "mapcomp",
+          "compression",
+          "center",
+          "centerbonus",
+          "finaledge",
+          "edge",
+          "synergy",
+          "dramatic",
+          "pressure",
+          "finalhour",
+          "finalten",
+          "seismic",
+          "help",
+          "list",
+          "золото",
+          "evt",
+          "event",
+        ]);
+        let manualBattleLine = null;
+        if (restartNorm.startsWith("evt ") || restartNorm.startsWith("event ")) {
+          manualBattleLine = restartNorm.replace(/^(evt|event)\s+/i, "").trim();
+        } else {
+          const fw = restartNorm.split(/\s+/)[0] || "";
+          if (fw !== "off" && manualBattleKnownFirst.has(fw)) manualBattleLine = restartNorm;
+        }
+        if (manualBattleLine != null) {
+          await handleTelegramManualBattleCommand(chatId, manualBattleLine);
+          continue;
+        }
+
         if (restartNorm === "рестарт" || restartNorm === "restart") {
           if (TELEGRAM_ENABLE_PROCESS_RESTART) {
             await telegramSendMessage(chatId, "Перезапуск приложения…");
@@ -3986,8 +4501,8 @@ async function telegramPollLoop() {
           const battleRealMin = Math.round(result.durationMs / sc / 60000);
           reply =
             sc > 1
-              ? `Раунд 1 (TEST ×${sc}): разминка ~${warmRealSec} с реальных, затем бой ~${battleRealMin} мин реальных (${h.toFixed(h < 1 ? 2 : 1)} игр. ч). Пиксели с ${new Date(getPlayStartMs()).toISOString()}`
-              : `Раунд 1: сначала разминка 2 мин (без пикселей), затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
+              ? `Раунд 1 (TEST ×${sc}): разминка ~${warmRealSec} с реальных, затем бой ~${battleRealMin} мин реальных (${h.toFixed(h < 1 ? 2 : 1)} игр. ч). По окончании разминки карта сбросится — только базы 6×6, без чужих захватов. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`
+              : `Раунд 1: разминка 2 мин, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. После разминки поле обнуляется (только базы команд). Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
         } else if (result.reason === "already_started") {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {

@@ -296,6 +296,24 @@ export function createBoardVfx(canvas) {
     if (segs.length) crackBursts.push({ t0: now, segments: segs });
   }
 
+  /**
+   * Обвал отрезанной территории: короткие всплески по случайным клеткам + трещины.
+   * @param {[number, number][]} cells
+   * @param {*} transform
+   */
+  function territoryIsolationCollapseBurst(cells, transform) {
+    if (!cells || cells.length === 0) return;
+    const col = "#ff5522";
+    const nCells = cells.length;
+    const nBurst = Math.min(52, Math.max(10, (nCells >> 2) + 6));
+    for (let i = 0; i < nBurst; i++) {
+      const c = cells[(Math.random() * nCells) | 0];
+      if (!Array.isArray(c) || c.length < 2) continue;
+      burst(c[0] | 0, c[1] | 0, col, transform, 9);
+    }
+    seismicCrackBurst(cells);
+  }
+
   function countActiveVfx() {
     return (
       ripples.length +
@@ -582,6 +600,7 @@ export function createBoardVfx(canvas) {
     flagBaseHitImpact,
     flagCaptureExplosion,
     seismicCrackBurst,
+    territoryIsolationCollapseBurst,
     render,
     hasWork,
   };
