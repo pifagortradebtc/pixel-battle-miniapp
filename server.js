@@ -142,7 +142,12 @@ const REDIS_GAME_CHANNEL = (process.env.REDIS_GAME_CHANNEL || "pixel-battle:game
 
 function isClusterLeader() {
   if (!REDIS_URL) return true;
-  return /^true$/i.test(String(process.env.CLUSTER_LEADER || "").trim());
+  const v = String(process.env.CLUSTER_LEADER || "").trim().toLowerCase();
+  if (v === "false" || v === "0" || v === "no") return false;
+  if (v === "true" || v === "1" || v === "yes") return true;
+  // Redis задан, переменная не задана: один веб-инстанс + Redis (частый случай на Render) — лидер.
+  // При scale > 1 задайте CLUSTER_LEADER=false на всех кроме одного (там true).
+  return true;
 }
 
 /** @type {((raw: string) => void | Promise<void>) | null} */
@@ -4251,11 +4256,18 @@ async function startRoundOneTimer(durationHours) {
 
 async function telegramSendMessage(chatId, text, extra = {}) {
   const payload = { chat_id: chatId, text, ...extra };
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    return;
+  }
+  if (!data.ok) console.warn("Telegram sendMessage:", data.description || res.status);
 }
 
 /**
@@ -4507,6 +4519,9 @@ async function telegramPollLoop() {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {
           reply = "Игра уже завершена.";
+        } else if (result.reason === "not_leader") {
+          reply =
+            "Этот процесс не лидер кластера (CLUSTER_LEADER=false). Команды «go» и таймеры выполняет только лидер.";
         } else {
           reply = "Команда «go» действует только до перехода ко 2-му раунду (сейчас не раунд 1).";
         }
@@ -4542,9 +4557,15 @@ server.listen(PORT, () => {
       )
       .then((bus) => {
         redisGamePublish = bus.publish;
+        const leader = isClusterLeader();
         console.log(
-          `[cluster] Redis Pub/Sub «${ch}» (CLUSTER_LEADER=${isClusterLeader() ? "true" : "false"} — таймеры раунда и Telegram только на лидере)`
+          `[cluster] Redis Pub/Sub «${ch}» (CLUSTER_LEADER=${leader ? "true" : "false"} — таймеры раунда и Telegram long poll только на лидере; явно false — вторичный инстанс)`
         );
+        if (REDIS_URL && !String(process.env.CLUSTER_LEADER || "").trim()) {
+          console.log(
+            "[cluster] CLUSTER_LEADER не задан — процесс считается лидером. При нескольких веб-инстансах: true на одном, false на остальных."
+          );
+        }
       })
       .catch((e) => console.warn("[cluster] Redis:", e.message || e));
   }
