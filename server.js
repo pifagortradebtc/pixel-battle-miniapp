@@ -67,6 +67,7 @@ import {
   FLAG_WARN_THRESHOLDS,
   computeEffectiveBaseHp,
   flagCellFromSpawn,
+  toEpochMsSafe,
 } from "./lib/flag-capture.js";
 import {
   TERRITORY_ISOLATION_GRACE_MS,
@@ -2081,10 +2082,10 @@ function applyClusterGameReplication(msg) {
       }
       let lastHitAt = 0;
       const rawLh = msg.lastHitAt;
-      if (typeof rawLh === "number" && Number.isFinite(rawLh)) lastHitAt = rawLh | 0;
+      if (typeof rawLh === "number" && Number.isFinite(rawLh)) lastHitAt = toEpochMsSafe(rawLh);
       else if (typeof rawLh === "string" && String(rawLh).trim() !== "") {
         const n = Number(rawLh);
-        if (Number.isFinite(n)) lastHitAt = n | 0;
+        if (Number.isFinite(n)) lastHitAt = toEpochMsSafe(n);
       }
       const nowRepl = Date.now();
       if (!Number.isFinite(lastHitAt) || lastHitAt < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
@@ -2288,7 +2289,7 @@ function buildFlagsSnapshot() {
     const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
     const st = flagCaptureByDefender.get(Number(t.id) | 0);
     if (st) {
-      const lh = Number(st.lastHitAt) | 0;
+      const lh = toEpochMsSafe(st.lastHitAt);
       if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
         st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
       }
@@ -2302,7 +2303,7 @@ function buildFlagsSnapshot() {
     const attackerTeamId = (st?.attackerTeamId | 0) || 0;
     let lhMeta = now;
     if (st) {
-      const lh = Number(st.lastHitAt) | 0;
+      const lh = toEpochMsSafe(st.lastHitAt);
       lhMeta =
         Number.isFinite(lh) && lh >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
           ? lh
@@ -2332,7 +2333,7 @@ function tickFlagBaseRegen(now) {
     const d = did | 0;
     if (!st) continue;
     /* Без валидного lastHitAt computeEffectiveBaseHp не даёт рост eff — регена нет (см. FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS). */
-    const lh0 = Number(st.lastHitAt) | 0;
+    const lh0 = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh0) || lh0 < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
       st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
     }
@@ -2405,7 +2406,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
 
   let st = flagCaptureByDefender.get(did);
   if (st) {
-    const lh = Number(st.lastHitAt) | 0;
+    const lh = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) st.lastHitAt = now;
   }
   const curHpFloat = computeEffectiveBaseHp(st, now);

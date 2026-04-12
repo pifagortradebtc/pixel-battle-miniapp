@@ -28,6 +28,7 @@ import {
   FLAG_REGEN_IDLE_MS,
   FLAG_VISUAL_CELLS_ABOVE,
   computeEffectiveBaseHp,
+  toEpochMsSafe,
 } from "../lib/flag-capture.js";
 import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
@@ -2613,7 +2614,7 @@ function computeClientFlagDisplayEffHp(raw, nowMs) {
   if (!raw || typeof raw.hp !== "number") return maxH;
   const h0 = Math.min(maxH, Math.max(0, raw.hp | 0));
   if (h0 >= maxH) return maxH;
-  const tHit = Number(raw.lastHitAt) | 0;
+  const tHit = toEpochMsSafe(raw.lastHitAt);
   let eff = computeEffectiveBaseHp({ hp: h0, lastHitAt: tHit }, nowMs);
   const srv = raw.effectiveHp;
   const t0 = raw.flagStateServerNow;
@@ -2660,10 +2661,10 @@ function syncFlagCaptureStateFromMeta(flags) {
     if (hp >= maxHp) continue;
     const prev = flagCaptureClientState.get(tid);
     let lh = 0;
-    if (typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt)) lh = f.lastHitAt | 0;
+    if (typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt)) lh = toEpochMsSafe(f.lastHitAt);
     else if (f.lastHitAt != null && String(f.lastHitAt).trim() !== "") {
       const n = Number(f.lastHitAt);
-      if (Number.isFinite(n)) lh = n | 0;
+      if (Number.isFinite(n)) lh = toEpochMsSafe(n);
     }
     if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
       if (
@@ -2672,7 +2673,7 @@ function syncFlagCaptureStateFromMeta(flags) {
         prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS &&
         prev.hp === hp
       ) {
-        lh = prev.lastHitAt | 0;
+        lh = toEpochMsSafe(prev.lastHitAt);
       } else {
         lh = Date.now() - FLAG_REGEN_IDLE_MS;
       }
@@ -4414,10 +4415,10 @@ function connectWs() {
         else {
           const prev = flagCaptureClientState.get(did);
           let lh = NaN;
-          if (typeof msg.lastHitAt === "number" && Number.isFinite(msg.lastHitAt)) lh = msg.lastHitAt | 0;
+          if (typeof msg.lastHitAt === "number" && Number.isFinite(msg.lastHitAt)) lh = toEpochMsSafe(msg.lastHitAt);
           else if (msg.lastHitAt != null && String(msg.lastHitAt).trim() !== "") {
             const n = Number(msg.lastHitAt);
-            if (Number.isFinite(n)) lh = n | 0;
+            if (Number.isFinite(n)) lh = toEpochMsSafe(n);
           }
           if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
             if (
@@ -4426,7 +4427,7 @@ function connectWs() {
               Number.isFinite(prev.lastHitAt) &&
               prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
             ) {
-              lh = prev.lastHitAt | 0;
+              lh = toEpochMsSafe(prev.lastHitAt);
             } else if (
               msg.regen &&
               typeof msg.effectiveHp === "number" &&
