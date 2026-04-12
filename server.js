@@ -54,6 +54,7 @@ import {
   getRoundTimeline,
   isEventActiveAt,
   MANUAL_BATTLE_EVENT_HELP_RU,
+  MANUAL_TELEGRAM_CMD_FIRST_WORDS,
   mergeManualBattleSlotsIntoSnapshot,
   resolveManualBattleCommandToTimelineDef,
 } from "./lib/battle-events.js";
@@ -303,6 +304,25 @@ function buildTelegramStartInlineButton(launchUrl) {
 
 function isStartCommand(text) {
   return /^\/start(?:@[\w]+)?(?:\s|$)/i.test(String(text || "").trim());
+}
+
+/** Текст похож на админ-команду (для ответа не-админам вместо полного молчания). */
+function telegramMessageLooksLikePrivilegedCommand(text) {
+  let norm = String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\/+/, "")
+    .replace(/\s+/g, " ");
+  norm = norm.replace(/^\/speed\b/, "speed");
+  norm = norm.replace(/^\/go\b/, "go");
+  norm = norm.replace(/^гол(\s+)/, "go$1").replace(/^гол(\d)/, "go $1");
+  norm = norm.replace(/^го(\s+)/u, "go$1").replace(/^го(\d)/u, "go $1");
+  const fw = norm.split(/\s+/)[0] || "";
+  if (fw === "go" || norm === "go" || norm.startsWith("go ")) return true;
+  if (fw === "speed") return true;
+  if (fw === "restart" || fw === "рестарт") return true;
+  if (fw === "evt" || fw === "event") return true;
+  return MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw);
 }
 
 /**
@@ -4278,7 +4298,7 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
   if (!isClusterLeader()) {
     await telegramSendMessage(
       chatId,
-      "Ручные события задаёт только лидер кластера (CLUSTER_LEADER=true на одном инстансе)."
+      "Ручные события выполняет только лидер кластера (на вторичных инстансах задано CLUSTER_LEADER=false)."
     );
     return;
   }
@@ -4364,7 +4384,19 @@ async function telegramPollLoop() {
       const res = await fetch(
         `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}`
       );
-      const data = await res.json();
+      if (!res.ok) {
+        console.warn("Telegram getUpdates HTTP:", res.status);
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+      let data;
+      try {
+        data = await res.json();
+      } catch (e) {
+        console.warn("Telegram getUpdates JSON:", e?.message || e);
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
       if (!data.ok) {
         console.warn("Telegram getUpdates:", data.description || JSON.stringify(data));
         await new Promise((r) => setTimeout(r, 5000));
@@ -4397,7 +4429,15 @@ async function telegramPollLoop() {
           continue;
         }
 
-        if (!TELEGRAM_ADMIN_IDS.has(uid)) continue;
+        if (!TELEGRAM_ADMIN_IDS.has(uid)) {
+          if (telegramMessageLooksLikePrivilegedCommand(t)) {
+            await telegramSendMessage(
+              chatId,
+              "Сервер не считает вас администратором: в TELEGRAM_ADMIN_IDS на сервере должен быть ваш числовой user id (узнать: @userinfobot). Без этого go, speed, evt и др. игнорируются."
+            );
+          }
+          continue;
+        }
         const restartNorm = t
           .toLowerCase()
           .replace(/^\/+/, "")
@@ -4434,40 +4474,12 @@ async function telegramPollLoop() {
           continue;
         }
 
-        const manualBattleKnownFirst = new Set([
-          "gold",
-          "target",
-          "duelzone",
-          "duel",
-          "economic",
-          "shift",
-          "rotation",
-          "boom",
-          "surge",
-          "mapcomp",
-          "compression",
-          "center",
-          "centerbonus",
-          "finaledge",
-          "edge",
-          "synergy",
-          "dramatic",
-          "pressure",
-          "finalhour",
-          "finalten",
-          "seismic",
-          "help",
-          "list",
-          "золото",
-          "evt",
-          "event",
-        ]);
         let manualBattleLine = null;
         if (restartNorm.startsWith("evt ") || restartNorm.startsWith("event ")) {
           manualBattleLine = restartNorm.replace(/^(evt|event)\s+/i, "").trim();
         } else {
           const fw = restartNorm.split(/\s+/)[0] || "";
-          if (fw !== "off" && manualBattleKnownFirst.has(fw)) manualBattleLine = restartNorm;
+          if (fw !== "off" && MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw)) manualBattleLine = restartNorm;
         }
         if (manualBattleLine != null) {
           await handleTelegramManualBattleCommand(chatId, manualBattleLine);
@@ -4490,7 +4502,15 @@ async function telegramPollLoop() {
         t = t.replace(/^гол(\s+)/i, "go$1").replace(/^гол(\d)/i, "go $1");
         t = t.replace(/^го(\s+)/iu, "go$1").replace(/^го(\d)/iu, "go $1");
         const tl = t.toLowerCase();
-        if (!tl.startsWith("go")) continue;
+        if (!tl.startsWith("go")) {
+          if (t.trim().startsWith("/")) {
+            await telegramSendMessage(
+              chatId,
+              "Неизвестная команда. Админ: /start, go [часы], speed, restart, evt help, gold, seismic…"
+            );
+          }
+          continue;
+        }
         const rest = t.slice(2).trim();
         let hours = 8;
         if (rest.length) {
@@ -4570,14 +4590,23 @@ server.listen(PORT, () => {
       .catch((e) => console.warn("[cluster] Redis:", e.message || e));
   }
   if (TELEGRAM_BOT_TOKEN) {
-    fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`).catch(
-      () => {}
-    );
-    if (isClusterLeader()) {
-      telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
-    } else {
-      console.log("[cluster] Telegram long poll отключён (не CLUSTER_LEADER).");
-    }
+    void (async () => {
+      try {
+        const wh = await fetch(
+          `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=true`
+        );
+        const j = await wh.json().catch(() => ({}));
+        if (!j.ok) console.warn("[Telegram] deleteWebhook:", j.description || wh.status);
+      } catch (e) {
+        console.warn("[Telegram] deleteWebhook:", e?.message || e);
+      }
+      if (isClusterLeader()) {
+        console.log("[Telegram] long poll запущен (getUpdates).");
+        telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
+      } else {
+        console.log("[cluster] Telegram long poll отключён (CLUSTER_LEADER=false на этом инстансе).");
+      }
+    })();
     if (getTelegramMiniAppLaunchUrl()) {
       console.log(
         "Telegram: команда /start — сообщение с кнопкой «Запустить игру» (TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME)."
