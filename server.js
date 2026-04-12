@@ -1629,7 +1629,8 @@ function buildTerritoryIsolationGroupsPayload(serverNow) {
       groupId: gid,
       sig: gid,
       teamId: g.teamId | 0,
-      expiresAtMs: g.deadlineMs | 0,
+      /* Не использовать | 0 — обрезает до int32 и ломает epoch-ms (таймер изоляции → «0 с»). */
+      expiresAtMs: Number.isFinite(g.deadlineMs) ? Math.trunc(g.deadlineMs) : 0,
       cells,
     });
   }
