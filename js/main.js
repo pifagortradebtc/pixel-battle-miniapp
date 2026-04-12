@@ -28,6 +28,7 @@ import {
   FLAG_VISUAL_CELLS_ABOVE,
   computeEffectiveBaseHp,
 } from "../lib/flag-capture.js";
+import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
 import { TERRITORY_ISOLATION_GRACE_MS } from "../lib/territory-isolation.js";
 
@@ -766,8 +767,19 @@ function b64ToUint8(b64) {
 
 function isClientLandCell(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
-  if (!regionCells || regionCells.length !== gridW * gridH) return true;
+  if (!regionCells || regionCells.length !== gridW * gridH) {
+    /* Онлайн без маски региона не считаем клетку игровой — иначе можно «закрасить всё подряд». */
+    return !(wantOnline && getWsUrl());
+  }
   return regionCells[y * gridW + x] !== 0;
+}
+
+/** Куда можно ставить пиксель: суша по cells и не океан по RGB плаката (как на сервере). */
+function isClientPlayableCell(x, y) {
+  if (!isClientLandCell(x, y)) return false;
+  if (!regionRgb || regionRgb.length !== gridW * gridH * 3) return true;
+  const i = (y * gridW + x) * 3;
+  return !isWorldMapWaterPixel(regionRgb[i], regionRgb[i + 1], regionRgb[i + 2], 255);
 }
 
 function clientPixelTeamIdAt(x, y) {
@@ -1179,11 +1191,9 @@ function maybeOnboardSpawnAfterFull() {
   startTeamSpawnOnboarding(sp);
 }
 
-/** Вода по маске карты (только если regions загружены). */
+/** Нельзя держать/рисовать пиксель (вода по маске или по цвету плаката). */
 function isClientWaterCell(x, y) {
-  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
-  if (!regionCells || regionCells.length !== gridW * gridH) return false;
-  return regionCells[y * gridW + x] === 0;
+  return !isClientPlayableCell(x, y);
 }
 
 async function loadRegions() {
@@ -5407,7 +5417,7 @@ function planClientCaptureCells(kind, cx, cy) {
   const keys = [];
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      if (!isClientLandCell(x, y)) continue;
+      if (!isClientPlayableCell(x, y)) continue;
       keys.push(`${x},${y}`);
     }
   }
@@ -5816,7 +5826,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       for (let gx = x0; gx <= x1; gx++) {
         const pk = `${gx},${gy}`;
         if (pixels.has(pk)) continue;
-        if (!isClientLandCell(gx, gy)) continue;
+        if (!isClientPlayableCell(gx, gy)) continue;
         if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId)) continue;
         const px = offsetX + gx * cell;
         const py = offsetY + gy * cell;
@@ -6094,7 +6104,7 @@ function placePixel(gx, gy) {
     notifyReject("out_of_bounds");
     return;
   }
-  if (!isClientLandCell(gx, gy)) {
+  if (!isClientPlayableCell(gx, gy)) {
     notifyReject("water");
     return;
   }

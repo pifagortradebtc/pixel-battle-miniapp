@@ -72,6 +72,7 @@ import {
   TERRITORY_ISOLATION_GRACE_MS,
   computeIsolatedTerritoryGroups,
 } from "./lib/territory-isolation.js";
+import { isWorldMapWaterPixel } from "./lib/world-map-water.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -1168,6 +1169,8 @@ const MIME = {
 
 /** @type {Uint8Array | null} исходный регион 360×360 (даунсэмпл под раунд; 0 вода, ≥2 суша). */
 let baseRegion360 = null;
+/** @type {Uint8Array | null} RGB плаката 360×360 для запрета ставки на «визуальную воду» при cells=суша. */
+let baseRgb360 = null;
 try {
   const raw = fs.readFileSync(path.join(ROOT, "data", "regions-360.json"), "utf8");
   const j = JSON.parse(raw);
@@ -1176,12 +1179,20 @@ try {
     console.warn("regions-360.json: неверный размер сетки");
     baseRegion360 = null;
   }
+  if (j.rgbBase64 && typeof j.rgbBase64 === "string") {
+    baseRgb360 = Uint8Array.from(Buffer.from(j.rgbBase64, "base64"));
+    if (baseRgb360.length !== BASE_GRID * BASE_GRID * 3) {
+      baseRgb360 = null;
+    }
+  }
 } catch (e) {
   console.warn("Нет data/regions-360.json — npm run rasterize-world-map", e.message);
 }
 
 /** @type {Uint8Array | null} маска: 0 вода (нельзя ставить пиксель), ≠0 — суша. */
 let landGrid = null;
+/** @type {Uint8Array | null} 1 = можно ставить пиксель (суша по cells и не «вода» по RGB плаката). */
+let playableGrid = null;
 /** Веса клеток для очков (суша; по умолчанию 1; вода 0). */
 let scoreWeightGrid = null;
 /** Число игровых клеток суши на текущей сетке (для справки / UI). */
@@ -1226,6 +1237,7 @@ function rebuildLandFromRound(ri) {
 
   if (!baseRegion360 || baseRegion360.length !== BASE_GRID * BASE_GRID) {
     landGrid = null;
+    playableGrid = null;
     scoreWeightGrid = null;
     landPixelsTotal = gridW * gridH;
     landWeightTotal = gridW * gridH;
@@ -1233,14 +1245,26 @@ function rebuildLandFromRound(ri) {
   }
 
   landGrid = new Uint8Array(gridW * gridH);
+  playableGrid = new Uint8Array(gridW * gridH);
   for (let y = 0; y < gridH; y++) {
     for (let x = 0; x < gridW; x++) {
       const bx = Math.min(BASE_GRID - 1, Math.floor(((x + 0.5) / gridW) * BASE_GRID));
       const by = Math.min(BASE_GRID - 1, Math.floor(((y + 0.5) / gridH) * BASE_GRID));
-      landGrid[y * gridW + x] = baseRegion360[by * BASE_GRID + bx];
+      const idx = y * gridW + x;
+      landGrid[idx] = baseRegion360[by * BASE_GRID + bx];
+      let play = landGrid[idx] !== 0 ? 1 : 0;
+      if (play && baseRgb360 && baseRgb360.length === BASE_GRID * BASE_GRID * 3) {
+        const bi = (by * BASE_GRID + bx) * 3;
+        const r = baseRgb360[bi];
+        const g = baseRgb360[bi + 1];
+        const b = baseRgb360[bi + 2];
+        if (isWorldMapWaterPixel(r, g, b, 255)) play = 0;
+      }
+      playableGrid[idx] = play;
     }
   }
   applyRoundShapeMask(ri, landGrid, gridW, gridH);
+  applyRoundShapeMask(ri, playableGrid, gridW, gridH);
   let landN = 0;
   for (let i = 0; i < landGrid.length; i++) {
     if (landGrid[i] !== 0) landN++;
@@ -1265,7 +1289,15 @@ function rebuildLandFromRound(ri) {
       pixels.delete(key);
       continue;
     }
-    if (px < 0 || px >= gridW || py < 0 || py >= gridH || landGrid[py * gridW + px] === 0) {
+    const pidx = py * gridW + px;
+    if (
+      px < 0 ||
+      px >= gridW ||
+      py < 0 ||
+      py >= gridH ||
+      !playableGrid ||
+      playableGrid[pidx] === 0
+    ) {
       pixels.delete(key);
     }
   }
@@ -1275,8 +1307,15 @@ function rebuildLandFromRound(ri) {
 
 function cellIsLand(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
-  if (!landGrid) return true;
+  if (!landGrid) return false;
   return landGrid[y * gridW + x] !== 0;
+}
+
+/** Размещение пикселей и баз: суша по маске и не океан по цвету плаката. */
+function cellAllowsPixelPlacement(x, y) {
+  if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
+  if (!playableGrid || playableGrid.length !== gridW * gridH) return cellIsLand(x, y);
+  return playableGrid[y * gridW + x] !== 0;
 }
 
 /** Контекст для lib/scoring.js: roundIndex, сетка, суша, снимок событий боя. */
@@ -1731,7 +1770,7 @@ function planCaptureRect(x0, y0, x1, y1) {
   const planned = [];
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      if (!cellIsLand(x, y)) continue;
+      if (!cellAllowsPixelPlacement(x, y)) continue;
       planned.push([x, y]);
     }
   }
@@ -1740,7 +1779,7 @@ function planCaptureRect(x0, y0, x1, y1) {
 
 function applyPlannedCapture(pk, tid, planned) {
   for (const [x, y] of planned) {
-    if (!cellIsLand(x, y)) continue;
+    if (!cellAllowsPixelPlacement(x, y)) continue;
     if (isEnemyOwnedFlagBaseCell(tid, x, y)) continue;
     const k = `${x},${y}`;
     pixels.set(k, {
@@ -1868,7 +1907,7 @@ function applyFullMessageToPixelsCluster(msg) {
     if (!Array.isArray(p) || p.length < 3) continue;
     const x = p[0] | 0;
     const y = p[1] | 0;
-    if (landGrid && (x < 0 || x >= gridW || y < 0 || y >= gridH || landGrid[y * gridW + x] === 0)) continue;
+    if (!cellAllowsPixelPlacement(x, y)) continue;
     if (fmt === "v2" && p.length >= 5) {
       const t = p[2] | 0;
       const opk = String(p[3] || "").slice(0, 128);
@@ -1891,7 +1930,7 @@ function applyClusterGameReplication(msg) {
       const x = msg.x | 0;
       const y = msg.y | 0;
       if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
-      if (landGrid && landGrid[y * gridW + x] === 0) return;
+      if (!cellAllowsPixelPlacement(x, y)) return;
       pixels.set(`${x},${y}`, {
         teamId: msg.t | 0,
         ownerPlayerKey: String(msg.ownerPlayerKey || "").slice(0, 128),
@@ -2243,17 +2282,21 @@ function buildFlagsSnapshot() {
       }
     }
     const eff = computeEffectiveBaseHp(st, now);
-    const hp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
+    const displayFloor = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
+    /* В meta/клиент: hp = якорь после дискретных ударов (st.hp), не floor(eff) — иначе реген ломает computeEffectiveBaseHp. */
+    const metaHp = st
+      ? Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0))
+      : displayFloor;
     const attackerTeamId = (st?.attackerTeamId | 0) || 0;
     out.push({
       teamId: t.id,
       fx: x,
       fy: y,
-      hp,
+      hp: metaHp,
       maxHp: FLAG_BASE_MAX_HP,
       lastHitAt: st?.lastHitAt | 0,
       attackerTeamId,
-      underAttack: hp < FLAG_BASE_MAX_HP,
+      underAttack: displayFloor < FLAG_BASE_MAX_HP,
     });
   }
   return out;
@@ -2285,7 +2328,7 @@ function tickFlagBaseRegen(now) {
       type: "flagCaptureProgress",
       defenderTeamId: d,
       attackerTeamId: st.attackerTeamId | 0,
-      hp: curInt,
+      hp: Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0)),
       maxHp: FLAG_BASE_MAX_HP,
       lastHitAt: st.lastHitAt,
       regen: true,
@@ -2467,7 +2510,7 @@ function spawnRectsConflict(x0, y0, ox0, oy0) {
 function rectAllLandSpan(x0, y0, w, h) {
   for (let y = y0; y < y0 + h; y++) {
     for (let x = x0; x < x0 + w; x++) {
-      if (!cellIsLand(x, y)) return false;
+      if (!cellAllowsPixelPlacement(x, y)) return false;
     }
   }
   return true;
@@ -2540,7 +2583,7 @@ function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
   const opk = String(ownerPk || "").slice(0, 128);
   for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
     for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
-      if (!cellIsLand(x, y)) continue;
+      if (!cellAllowsPixelPlacement(x, y)) continue;
       pixels.set(`${x},${y}`, { teamId, ownerPlayerKey: opk, shieldedUntil: 0 });
     }
   }
@@ -2550,7 +2593,7 @@ function paintTeamSpawnArea(teamId, x0, y0, ownerPk) {
   const opk = String(ownerPk || "").slice(0, 128);
   for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
     for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
-      if (!cellIsLand(x, y)) continue;
+      if (!cellAllowsPixelPlacement(x, y)) continue;
       const k = `${x},${y}`;
       pixels.set(k, { teamId, ownerPlayerKey: opk, shieldedUntil: 0 });
       broadcast({
@@ -4120,7 +4163,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "pixelReject", reason: "out_of_bounds" });
         return;
       }
-      if (!cellIsLand(x, y)) {
+      if (!cellAllowsPixelPlacement(x, y)) {
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "water" });
         safeSend(ws, { type: "pixelReject", reason: "water" });
         return;
@@ -4382,7 +4425,7 @@ function findTeamIdForTelegramUid(uid) {
 
 /** Свободная суша: нет записи в pixels или teamId 0. Не перекрашивает чужие/свои клетки. */
 function isLandCellUnclaimedPixel(x, y) {
-  if (!cellIsLand(x, y)) return false;
+  if (!cellAllowsPixelPlacement(x, y)) return false;
   const k = `${x},${y}`;
   if (!pixels.has(k)) return true;
   return pixelTeam(pixels.get(k)) === 0;
