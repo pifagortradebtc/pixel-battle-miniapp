@@ -2209,9 +2209,9 @@ function notifyReject(reason) {
     warmup: "Разминка: пиксели включатся, когда закончится отсчёт 2 минут.",
     flag_rate: "Захват флага: слишком часто для вашей команды. Подождите мгновение.",
     enemy_base_not_adjacent:
-      "Сначала расширьтесь к базе врага: ваши клетки должны быть рядом с клеткой флага (8 направлений). Обычным пикселем базу не перекрасить.",
+      "Сначала расширьтесь к базе врага: ваши клетки должны быть рядом с клеткой флага (8 направлений).",
     enemy_base:
-      "Чужая база доступна с начала раунда: бейте по клетке флага, чтобы снимать HP. Обычным пикселем базу не перекрасить. Доведите HP до 0, затем финальный удар захватывает всю команду.",
+      "Чужая база: бейте по клетке флага, чтобы снимать HP. Обычным пикселем базу не перекрасить.",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -2222,7 +2222,9 @@ function notifyReject(reason) {
     reason === "team_eliminated";
   const telegramAlert = hard && reason !== "team_eliminated";
   showPlacementFeedback(text, hard ? "error" : "warn", { telegramAlert });
-  if (reason === "not_adjacent") remindInvalidPlacementBase(false);
+  if (reason === "not_adjacent" || reason === "enemy_base_not_adjacent") {
+    remindInvalidPlacementBase(false);
+  }
 }
 
 function syncFlagCaptureStateFromMeta(flags) {
@@ -4560,7 +4562,7 @@ function connectWs() {
     }
     if (msg.type === "invalidPlacement") {
       if ((msg.teamId | 0) !== (myTeamId | 0)) return;
-      if (msg.reason === "not_adjacent") {
+      if (msg.reason === "not_adjacent" || msg.reason === "enemy_base_not_adjacent") {
         remindInvalidPlacementBase(true);
       }
       return;
@@ -4926,6 +4928,19 @@ function isClientEnemyOwnedFlagAnchor(attackerTeamId, gx, gy) {
     if (fx !== gx || fy !== gy) continue;
     const owner = clientPixelOwnerTeamAt(gx, gy);
     return owner === (t.id | 0);
+  }
+  return false;
+}
+
+/** Координаты якоря флага любой чужой (не своя команда) базы — для отдельной ветки атаки, без оптимистичной покраски. */
+function clientIsEnemyBaseFlagCellCoords(gx, gy) {
+  if (myTeamId == null || teamsMeta == null) return false;
+  const mid = myTeamId | 0;
+  for (const t of teamsMeta) {
+    if (t.solo || t.eliminated || !t.spawn) continue;
+    if ((t.id | 0) === mid) continue;
+    const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+    if (fx === gx && fy === gy) return true;
   }
   return false;
 }
@@ -5654,12 +5669,15 @@ function placePixel(gx, gy) {
     }
   }
 
-  if (online && isClientWarmupPhase()) {
+  const onEnemyFlag =
+    Boolean(online && myTeamId != null && clientIsEnemyBaseFlagCellCoords(gx, gy));
+
+  if (online && isClientWarmupPhase() && !onEnemyFlag) {
     notifyReject("warmup");
     return;
   }
 
-  if (online && pendingMapAction) {
+  if (online && pendingMapAction && !onEnemyFlag) {
     if (pendingMapAction.type === "zoneCapture") {
       lastZoneGx = gx - 1;
       lastZoneGy = gy - 1;
@@ -5717,16 +5735,25 @@ function placePixel(gx, gy) {
 
   if (online) {
     const pk = `${gx},${gy}`;
-    if (clientPixelTeamIdAt(gx, gy) === myTeamId) {
+    const onEnemyFlag = clientIsEnemyBaseFlagCellCoords(gx, gy);
+
+    if (!onEnemyFlag && clientPixelTeamIdAt(gx, gy) === myTeamId) {
       notifyReject("already_yours");
       lastPlaceAt = 0;
       return;
     }
     if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId)) {
-      notifyReject("not_adjacent");
+      notifyReject(onEnemyFlag ? "enemy_base_not_adjacent" : "not_adjacent");
       lastPlaceAt = 0;
       return;
     }
+
+    if (onEnemyFlag) {
+      sendPixelOnline(gx, gy);
+      updateToolbarHud();
+      return;
+    }
+
     optimisticPixelPending = { key: pk, prev: snapshotPixelCell(pk) };
     pixels.set(pk, { teamId: myTeamId, shieldedUntil: 0 });
     if (boardVfx) {

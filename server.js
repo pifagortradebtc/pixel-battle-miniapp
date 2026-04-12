@@ -1805,6 +1805,14 @@ function findDefenderTeamAtFlagCell(x, y) {
   return null;
 }
 
+/** Клетка — якорь флага чужой (не атакующей) команды: отдельная ветка атаки базы, не обычная покраска. */
+function findEnemyFlagDefenderAtCell(attackerTeamId, x, y) {
+  const def = findDefenderTeamAtFlagCell(x, y);
+  if (!def) return null;
+  if ((def.id | 0) === (attackerTeamId | 0)) return null;
+  return def;
+}
+
 /**
  * Клетка флага (центр стартового квадрата) чужой команды, всё ещё окрашенная ею.
  * Такую клетку нельзя перекрасить обычным пикселем / зоной — только 20 «ударов» по флагу.
@@ -3619,12 +3627,6 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "pixel") {
       if (!assertCanPlay(ws)) return;
-      if (isWarmupPhaseNow()) {
-        const tid = ws.teamId | 0;
-        safeSend(ws, { type: "invalidPlacement", teamId: tid, reason: "warmup" });
-        safeSend(ws, { type: "pixelReject", reason: "warmup" });
-        return;
-      }
       if (ws.teamId == null) {
         safeSend(ws,{ type: "pixelReject", reason: "no_team" });
         return;
@@ -3649,15 +3651,27 @@ wss.on("connection", (ws, req) => {
       }
 
       const key = `${x},${y}`;
-      const existingPx = pixels.get(key);
-      if (existingPx != null && pixelTeam(existingPx) === teamId) {
-        safeSend(ws, { type: "invalidPlacement", teamId, reason: "already_yours" });
-        safeSend(ws, { type: "pixelReject", reason: "already_yours" });
+      const enemyFlagDef = findEnemyFlagDefenderAtCell(teamId, x, y);
+
+      if (isWarmupPhaseNow() && !enemyFlagDef) {
+        const tid = ws.teamId | 0;
+        safeSend(ws, { type: "invalidPlacement", teamId: tid, reason: "warmup" });
+        safeSend(ws, { type: "pixelReject", reason: "warmup" });
         return;
       }
+
+      if (!enemyFlagDef) {
+        const existingPx = pixels.get(key);
+        if (existingPx != null && pixelTeam(existingPx) === teamId) {
+          safeSend(ws, { type: "invalidPlacement", teamId, reason: "already_yours" });
+          safeSend(ws, { type: "pixelReject", reason: "already_yours" });
+          return;
+        }
+      }
       if (!canPlaceForTeam(x, y, teamId)) {
-        safeSend(ws, { type: "invalidPlacement", teamId, reason: "not_adjacent" });
-        safeSend(ws, { type: "pixelReject", reason: "not_adjacent" });
+        const adjReason = enemyFlagDef ? "enemy_base_not_adjacent" : "not_adjacent";
+        safeSend(ws, { type: "invalidPlacement", teamId, reason: adjReason });
+        safeSend(ws, { type: "pixelReject", reason: adjReason });
         return;
       }
 
@@ -3710,12 +3724,10 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      if (isEnemyOwnedFlagBaseCell(teamId, x, y)) {
+      if (enemyFlagDef) {
         await walletStore.save();
-        const adjacent = canPlaceForTeam(x, y, teamId);
-        const r = adjacent ? "enemy_base" : "enemy_base_not_adjacent";
-        safeSend(ws, { type: "invalidPlacement", teamId, reason: r });
-        safeSend(ws, { type: "pixelReject", reason: r });
+        safeSend(ws, { type: "invalidPlacement", teamId, reason: "enemy_base" });
+        safeSend(ws, { type: "pixelReject", reason: "enemy_base" });
         return;
       }
 
