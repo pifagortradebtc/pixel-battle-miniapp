@@ -185,16 +185,30 @@
     </div>
   </div>
 
+  <div id="browser-telegram-invite-overlay" class="overlay" hidden>
+    <div class="overlay__card overlay__card--settings">
+      <h2 class="overlay__title">Откройте в Telegram</h2>
+      <p class="overlay__hint" id="browser-telegram-invite-hint"></p>
+      <div class="overlay__actions overlay__actions--stack" id="browser-telegram-invite-actions">
+        <a id="browser-telegram-invite-open" class="overlay__btn" href="#" hidden>Открыть в Telegram</a>
+        <button type="button" id="browser-telegram-invite-dismiss" class="overlay__btn overlay__btn--secondary">
+          Закрыть
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div id="referral-splash-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Команда создана</h2>
       <p class="overlay__hint">
-        Отправьте ссылку друзьям — они сразу окажутся в вашей команде. Когда человек первый раз зайдёт в игру из Telegram по
-        вашей ссылке, вы получите <strong>+10 квантов</strong> (один раз на каждого приглашённого).
+        Друг должен открыть ссылку <strong>внутри Telegram</strong> (строка вида <code>t.me/…</code> в поле ниже). Ссылка на сайт
+        <code>onrender.com</code> в браузере <strong>не подойдёт</strong> — без Mini App нет подписи аккаунта.
+        Первый заход из Telegram по приглашению даёт вам <strong>+10 квантов</strong> (один раз на человека).
       </p>
       <label class="field">
-        <span class="field__label">Реферальная ссылка</span>
-        <textarea id="referral-splash-text" class="field__input field__input--textarea" readonly rows="4" spellcheck="false"></textarea>
+        <span class="field__label">Ссылка для Telegram (Mini App)</span>
+        <textarea id="referral-splash-text" class="field__input field__input--textarea" readonly rows="3" spellcheck="false"></textarea>
       </label>
       <div class="overlay__actions">
         <button type="button" id="referral-splash-copy" class="overlay__btn">Копировать</button>

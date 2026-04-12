@@ -2901,6 +2901,47 @@ async function readRequestBody(req, maxBytes = HTTP_BODY_MAX) {
   });
 }
 
+/** После NOWPayments IPN баланс в БД обновлён, но открытый Mini App не узнаёт об этом без пакета wallet по WebSocket. */
+async function pushWalletToPlayerKey(playerKey) {
+  if (!wss) return;
+  const pk = sanitizePlayerKey(playerKey);
+  if (!pk) return;
+  for (const c of wss.clients) {
+    if (c.readyState !== 1) continue;
+    if (sanitizePlayerKey(c.playerKey) !== pk) continue;
+    try {
+      safeSend(c, await buildWalletPayload(c));
+    } catch (e) {
+      console.warn("[ipn] push wallet:", e?.message || e);
+    }
+  }
+}
+
+function parseNowpaymentsIpnCreditUsdt(body) {
+  const pick = (v) => {
+    const n = typeof v === "string" && String(v).trim() !== "" ? Number(String(v).trim()) : Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : NaN;
+  };
+  const keys = ["price_amount", "outcome_amount", "pay_amount", "actually_paid"];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (body[k] == null || body[k] === "") continue;
+    const n = pick(body[k]);
+    if (!Number.isNaN(n)) return n;
+  }
+  return NaN;
+}
+
+function nowpaymentsIpnStatusMeansCredited(statusRaw) {
+  const s = String(statusRaw || "").trim().toLowerCase();
+  return (
+    s === "finished" ||
+    s === "confirmed" ||
+    s === "partially_paid" ||
+    s === "completed"
+  );
+}
+
 async function handleApi(req, res) {
   const url = (req.url || "").split("?")[0];
   res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -2938,33 +2979,38 @@ async function handleApi(req, res) {
       verifyNowpaymentsSignature(body, String(sig), NOWPAYMENTS_IPN_SECRET) ||
       verifyNowpaymentsSignatureRaw(raw, String(sig), NOWPAYMENTS_IPN_SECRET);
     if (!NOWPAYMENTS_IPN_SECRET || !okSig) {
+      console.warn("[ipn] отклонено: неверная подпись или пустой NOWPAYMENTS_IPN_SECRET");
       res.writeHead(401);
       res.end(JSON.stringify({ ok: false, error: "bad signature" }));
       return;
     }
     const status = String(body.payment_status || body.status || "");
-    const finished = status === "finished" || status === "confirmed" || status === "partially_paid";
+    const finished = nowpaymentsIpnStatusMeansCredited(status);
     if (!finished) {
+      console.warn("[ipn] пропуск статуса:", status || "(пусто)");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, ignored: true }));
       return;
     }
     const npId = body.payment_id ?? body.id;
     if (npId == null) {
+      console.warn("[ipn] нет payment_id в теле");
       res.writeHead(200);
       res.end(JSON.stringify({ ok: false, error: "no payment id" }));
       return;
     }
-    const orderId = String(body.order_id || "");
+    const orderId = String(body.order_id || body.orderId || "");
     const parts = orderId.split("|");
     if (parts[0] !== "dep" || !parts[1]) {
+      console.warn("[ipn] неверный order_id:", orderId.slice(0, 120));
       res.writeHead(200);
       res.end(JSON.stringify({ ok: false, error: "bad order" }));
       return;
     }
     const playerKey = sanitizePlayerKey(parts[1]);
-    const creditUsdt = Number(body.price_amount ?? body.actually_paid ?? body.pay_amount);
+    const creditUsdt = parseNowpaymentsIpnCreditUsdt(body);
     if (!playerKey || !Number.isFinite(creditUsdt) || creditUsdt <= 0) {
+      console.warn("[ipn] нет суммы или playerKey; order=", orderId.slice(0, 80));
       res.writeHead(200);
       res.end(JSON.stringify({ ok: false }));
       return;
@@ -2982,6 +3028,14 @@ async function handleApi(req, res) {
     const dep = await walletStore.finalizeDeposit(npId, playerKey, creditUsdt + extraUsdt, {
       txHash: String(body.outcome_hash || ""),
     });
+    if (dep.ok) {
+      console.warn("[ipn] зачислено", String(npId), "→", playerKey.slice(0, 28));
+    } else if (dep.duplicate === true) {
+      console.warn("[ipn] повтор callback (уже зачислено)", String(npId));
+    } else {
+      console.warn("[ipn] finalizeDeposit не прошёл", String(npId));
+    }
+    await pushWalletToPlayerKey(playerKey);
     res.writeHead(200);
     res.end(JSON.stringify({ ok: dep.ok, duplicate: dep.duplicate === true }));
     return;

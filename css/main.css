@@ -1425,6 +1425,14 @@ body {
   color: var(--tg-text);
 }
 
+a.overlay__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  text-align: center;
+}
+
 .overlay__btn--secondary {
   border-color: color-mix(in srgb, var(--tg-hint) 40%, transparent);
   background: color-mix(in srgb, var(--tg-bg) 92%, #fff);

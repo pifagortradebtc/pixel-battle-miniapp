@@ -255,6 +255,10 @@ const referralSplashOverlay = document.getElementById("referral-splash-overlay")
 const referralSplashText = document.getElementById("referral-splash-text");
 const btnReferralSplashCopy = document.getElementById("referral-splash-copy");
 const btnReferralSplashOk = document.getElementById("referral-splash-ok");
+const browserTelegramInviteOverlay = document.getElementById("browser-telegram-invite-overlay");
+const browserTelegramInviteHint = document.getElementById("browser-telegram-invite-hint");
+const browserTelegramInviteOpen = document.getElementById("browser-telegram-invite-open");
+const browserTelegramInviteDismiss = document.getElementById("browser-telegram-invite-dismiss");
 const leaderboardPanel = document.getElementById("leaderboard-panel");
 const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
@@ -662,6 +666,8 @@ let ws = null;
 let reconnectTimer = null;
 /** Если сокет завис в CONNECTING — закрыть и дать сработать переподключению */
 let connectingHangTimer = null;
+/** Throttle для повторной отправки clientProfile при возврате из фона (например после оплаты) */
+let lastVisibilityWalletRefreshAt = 0;
 
 /** Онлайн-режим: есть URL WebSocket */
 let wantOnline = false;
@@ -2057,32 +2063,107 @@ function buildWebReferralUrl() {
   return nu.toString();
 }
 
-function buildTelegramReferralUrl() {
+function readTelegramMiniAppMeta() {
   const bot = document.querySelector('meta[name="pixel-battle-tg-bot"]')?.getAttribute("content")?.trim();
   const app = document.querySelector('meta[name="pixel-battle-tg-app"]')?.getAttribute("content")?.trim();
-  if (!bot || !app || myTeamId == null) return null;
-  const cleanBot = bot.replace(/^@/, "");
-  const cleanApp = app.replace(/^\//, "");
-  const u = getTelegramUserForServer();
-  const refSuffix = u && u.id != null ? `_r_${u.id}` : "";
-  return `https://t.me/${cleanBot}/${cleanApp}?startapp=team_${myTeamId}${refSuffix}`;
+  if (!bot || !app) return null;
+  return { bot: bot.replace(/^@/, ""), app: app.replace(/^\//, "") };
 }
 
+/** Payload для ?startapp= — совпадает с тем, что парсит parseStartParamRef из initDataUnsafe.start_param */
+function buildTelegramStartAppInviteString(teamId, inviteTelegramId) {
+  if (teamId == null || !Number.isFinite(Number(teamId))) return "";
+  const tid = Math.floor(Number(teamId));
+  const inv = inviteTelegramId != null ? Number(inviteTelegramId) : NaN;
+  const refSuffix = Number.isFinite(inv) && inv > 0 ? `_r_${Math.floor(inv)}` : "";
+  return `team_${tid}${refSuffix}`;
+}
+
+function buildTelegramInviteTmeUrl(teamId, inviteTelegramId) {
+  const meta = readTelegramMiniAppMeta();
+  if (!meta) return null;
+  const payload = buildTelegramStartAppInviteString(teamId, inviteTelegramId);
+  if (!payload) return null;
+  return `https://t.me/${meta.bot}/${meta.app}?startapp=${encodeURIComponent(payload)}`;
+}
+
+function buildTelegramReferralUrl() {
+  if (myTeamId == null) return null;
+  const u = getTelegramUserForServer();
+  return buildTelegramInviteTmeUrl(myTeamId, u && u.id != null ? u.id : null);
+}
+
+/** Для гостя в браузере: восстановить t.me-ссылку из ?team= / ?refu= и meta на странице */
+function buildTelegramInviteDeepLinkFromUrlParams() {
+  const { teamId, inviteTelegramId } = parseStartParamRef();
+  if (teamId == null) return null;
+  return buildTelegramInviteTmeUrl(teamId, inviteTelegramId);
+}
+
+function hasInviteQueryInUrl() {
+  try {
+    const q = new URLSearchParams(location.search);
+    return q.has("team") || q.has("ref") || q.has("refu");
+  } catch {
+    return false;
+  }
+}
+
+function setupBrowserTelegramInviteOverlay() {
+  browserTelegramInviteDismiss?.addEventListener("click", () => {
+    if (browserTelegramInviteOverlay) browserTelegramInviteOverlay.hidden = true;
+  });
+  browserTelegramInviteOverlay?.addEventListener("click", (e) => {
+    if (e.target === browserTelegramInviteOverlay) browserTelegramInviteOverlay.hidden = true;
+  });
+}
+
+function maybeShowBrowserTelegramInvite() {
+  if (getTelegramInitDataForServer().trim()) return;
+  if (!hasInviteQueryInUrl()) return;
+  if (!browserTelegramInviteOverlay || !browserTelegramInviteHint) return;
+  const deep = buildTelegramInviteDeepLinkFromUrlParams();
+  if (browserTelegramInviteOpen) {
+    if (deep) {
+      browserTelegramInviteOpen.href = deep;
+      browserTelegramInviteOpen.hidden = false;
+    } else {
+      browserTelegramInviteOpen.hidden = true;
+      browserTelegramInviteOpen.removeAttribute("href");
+    }
+  }
+  if (deep) {
+    browserTelegramInviteHint.textContent =
+      "Приглашение открыто в обычном браузере (Safari, Chrome). С аккаунтом и квантами игра работает только внутри Telegram Mini App. Нажмите кнопку — откроется бот и мини-приложение с нужной командой.";
+  } else {
+    browserTelegramInviteHint.textContent =
+      "Ссылка ведёт на сайт без Telegram: подписи аккаунта нет, игра не сможет вас идентифицировать. Попросите друга прислать ссылку, которая начинается с https://t.me/… (из кнопки «Пригласить» в Mini App). Если в буфере только onrender.com — на сервере задайте TELEGRAM_BOT_USERNAME и TELEGRAM_MINIAPP_SHORT_NAME (имя Mini App из BotFather), затем перезапустите деплой.";
+  }
+  browserTelegramInviteOverlay.hidden = false;
+}
+
+/** Для приглашений важна ссылка t.me/…/…?startapp=… — она открывает Mini App в Telegram; веб-URL ведёт в браузер. */
 function getReferralLinkText() {
   if (myTeamId == null) return "";
-  const web = buildWebReferralUrl();
   const tgUrl = buildTelegramReferralUrl();
-  return tgUrl ? `${web}\n${tgUrl}` : web;
+  if (tgUrl) return tgUrl;
+  return buildWebReferralUrl();
 }
 
 async function copyReferralLink() {
   if (myTeamId == null) return;
   const text = getReferralLinkText();
+  const usedTgMiniApp = /^https:\/\/t\.me\//i.test(text);
   const tg = window.Telegram?.WebApp;
   try {
     await navigator.clipboard.writeText(text);
-    if (typeof tg?.showAlert === "function") tg.showAlert("Ссылка скопирована в буфер.");
-    else if (typeof tg?.HapticFeedback?.notificationOccurred === "function") {
+    if (typeof tg?.showAlert === "function") {
+      tg.showAlert(
+        usedTgMiniApp
+          ? "Ссылка для Telegram скопирована — по ней игра откроется в Mini App."
+          : "Ссылка скопирована (веб). Чтобы давать ссылку в Telegram Mini App, на сервере задайте TELEGRAM_BOT_USERNAME и TELEGRAM_MINIAPP_SHORT_NAME (или TELEGRAM_MINIAPP_LINK на t.me)."
+      );
+    } else if (typeof tg?.HapticFeedback?.notificationOccurred === "function") {
       tg.HapticFeedback.notificationOccurred("success");
     }
   } catch {
@@ -2634,7 +2715,11 @@ function notifyReject(reason) {
     reason === "need_telegram" ||
     reason === "team_eliminated";
   const telegramAlert = hard && reason !== "team_eliminated";
-  showPlacementFeedback(text, hard ? "error" : "warn", { telegramAlert });
+  showPlacementFeedback(text, hard ? "error" : "warn", {
+    telegramAlert,
+    /* Дубль: тот же текст на placement-banner и в строке таймера — выглядит как два разных предупреждения */
+    skipCooldownChrome: reason === "need_telegram",
+  });
   if (reason === "not_adjacent" || reason === "enemy_base_not_adjacent") {
     remindInvalidPlacementBase(false);
   }
@@ -4120,6 +4205,27 @@ function wsSendJson(obj) {
   }
 }
 
+function sendClientProfileToServer() {
+  if (!wantOnline || !getWsUrl()) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(
+      JSON.stringify({
+        type: "clientProfile",
+        playerKey: getOrCreatePlayerKey(),
+        telegramUser: getTelegramUserForServer(),
+        initData: getTelegramInitDataForServer(),
+        inviteTelegramId: (() => {
+          const x = parseStartParamRef().inviteTelegramId;
+          return x != null ? x : undefined;
+        })(),
+      })
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
 function connectWs() {
   clearTimeout(reconnectTimer);
   const url = getWsUrl();
@@ -4174,24 +4280,7 @@ function connectWs() {
     setFooterMode();
     updateRoundTimer();
     startMapAnimLoop();
-    try {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: "clientProfile",
-            playerKey: getOrCreatePlayerKey(),
-            telegramUser: getTelegramUserForServer(),
-            initData: getTelegramInitDataForServer(),
-            inviteTelegramId: (() => {
-              const x = parseStartParamRef().inviteTelegramId;
-              return x != null ? x : undefined;
-            })(),
-          })
-        );
-      }
-    } catch {
-      /* ignore */
-    }
+    sendClientProfileToServer();
   });
 
   ws.addEventListener("message", (ev) => {
@@ -6823,6 +6912,8 @@ async function bootstrap() {
   setupPalettePickerUi();
   setFooterMode();
   setupReferralButton();
+  setupBrowserTelegramInviteOverlay();
+  maybeShowBrowserTelegramInvite();
   setupWelcomeUi();
   setupTeamSettingsUi();
   setupCreateTeamUi();
@@ -6848,6 +6939,14 @@ async function bootstrap() {
   if (canvasVfx) boardVfx = createBoardVfx(canvasVfx);
   requestAnimationFrame(vfxLoop);
   connectWs();
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    const now = Date.now();
+    if (now - lastVisibilityWalletRefreshAt < 2500) return;
+    lastVisibilityWalletRefreshAt = now;
+    sendClientProfileToServer();
+  });
 
   if (perfDebug) {
     window.__pixelBattlePerf = () => ({
