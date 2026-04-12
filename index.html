@@ -581,7 +581,16 @@
           <button type="button" id="btn-toolbar-base" class="toolbar__btn" hidden title="Показать базу 6×6">
             🏠 База
           </button>
-          <button type="button" id="btn-toolbar-session" class="toolbar__btn" title="">Сменить команду</button>
+          <div class="toolbar__session-col">
+            <button type="button" id="btn-toolbar-session" class="toolbar__btn" title="">Сменить команду</button>
+            <div
+              id="territory-isolation-hud"
+              class="territory-isolation-hud"
+              hidden
+              role="status"
+              aria-live="polite"
+            ></div>
+          </div>
           <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
           <div
             id="toolbar-buffs"

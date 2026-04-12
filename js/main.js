@@ -274,6 +274,7 @@ const defeatBtnDismiss = document.getElementById("defeat-btn-dismiss");
 const defeatOverlayTitleEl = document.getElementById("defeat-overlay-title");
 const territoryDramaBannerEl = document.getElementById("territory-drama-banner");
 const placementFeedbackBannerEl = document.getElementById("placement-feedback-banner");
+const territoryIsolationHudEl = document.getElementById("territory-isolation-hud");
 const defeatFlashEl = document.getElementById("defeat-flash");
 const stageWrapEl = document.getElementById("stage-wrap");
 const btnToolbarBase = document.getElementById("btn-toolbar-base");
@@ -514,7 +515,8 @@ let territoryIsolationCellMeta = new Map();
 const territoryIsolationWarnedGroupIds = new Set();
 /** Смещение времени сервера относительно клиента: serverNow − Date.now() в момент последнего sync изоляции. */
 let territoryIsolationSkewMs = 0;
-let territoryIsolationBannerIntervalId = null;
+/** Интервал обновления таймера «отрезанный участок» под кнопкой смены команды. */
+let territoryIsolationHudIntervalId = null;
 
 const INVALID_PLACEMENT_HINTS = [
   "Ставьте пиксели только рядом с территорией команды (включая диагональ).",
@@ -885,10 +887,57 @@ function triggerDefeatScreenFlash() {
   setTimeout(() => defeatFlashEl.classList.remove("defeat-flash--on"), 900);
 }
 
-function clearTerritoryIsolationBannerInterval() {
-  if (territoryIsolationBannerIntervalId) {
-    clearInterval(territoryIsolationBannerIntervalId);
-    territoryIsolationBannerIntervalId = null;
+function formatTerritoryIsolationRemainMs(ms) {
+  const m = Math.max(0, ms);
+  if (m >= 60000) {
+    const min = Math.floor(m / 60000);
+    const rem = m - min * 60000;
+    if (rem < 1000) return `${min} мин`;
+    const sec = Math.ceil(rem / 1000);
+    return `${min} мин ${sec} с`;
+  }
+  if (m >= 1000) return `${Math.ceil(m / 1000)} с`;
+  if (m > 0) return `${Math.ceil(m / 1000)} с`;
+  return "0 с";
+}
+
+function buildIsolationCorridorBannerLine(msLeft) {
+  if (!Number.isFinite(msLeft)) return null;
+  const human = formatTerritoryIsolationRemainMs(msLeft);
+  return `Территория отрезана от базы! Соедините коридор за ${human} — иначе клетки станут нейтральными.`;
+}
+
+function stopTerritoryIsolationHud() {
+  if (territoryIsolationHudIntervalId) {
+    clearInterval(territoryIsolationHudIntervalId);
+    territoryIsolationHudIntervalId = null;
+  }
+  if (territoryIsolationHudEl) territoryIsolationHudEl.hidden = true;
+}
+
+function syncTerritoryIsolationHudDom() {
+  if (!territoryIsolationHudEl) return;
+  const ms = getMyTeamIsolationMinMsLeft();
+  if (!Number.isFinite(ms)) {
+    stopTerritoryIsolationHud();
+    return;
+  }
+  const t = formatTerritoryIsolationRemainMs(ms);
+  territoryIsolationHudEl.textContent = `Отрезанный участок станет ничьим через ${t}`;
+  territoryIsolationHudEl.hidden = false;
+}
+
+function ensureTerritoryIsolationHudInterval() {
+  if (territoryIsolationHudIntervalId != null) return;
+  territoryIsolationHudIntervalId = setInterval(() => syncTerritoryIsolationHudDom(), 250);
+}
+
+function refreshTerritoryIsolationHudPresence() {
+  if (Number.isFinite(getMyTeamIsolationMinMsLeft())) {
+    ensureTerritoryIsolationHudInterval();
+    syncTerritoryIsolationHudDom();
+  } else {
+    stopTerritoryIsolationHud();
   }
 }
 
@@ -900,14 +949,6 @@ function parseServerTimeMs(v) {
     if (Number.isFinite(n)) return n;
   }
   return NaN;
-}
-
-function updatePlacementFeedbackBannerText(text) {
-  if (placementFeedbackBannerEl && text) placementFeedbackBannerEl.textContent = text;
-  if (cooldownLabel && text) {
-    cooldownLabel.textContent = text;
-    cooldownLabel.title = text;
-  }
 }
 
 /**
@@ -951,34 +992,14 @@ function getMyTeamIsolationMinMsLeft() {
     if ((meta.teamId | 0) !== (myTeamId | 0)) continue;
     const exp = Number(meta.expiresAtMs);
     if (!Number.isFinite(exp)) continue;
-    const ms = exp - Date.now() - territoryIsolationSkewMs;
+    const raw = exp - Date.now() - territoryIsolationSkewMs;
+    const ms = Math.max(0, raw);
     if (ms < minMs) minMs = ms;
   }
   return Number.isFinite(minMs) && minMs !== Infinity ? minMs : NaN;
 }
 
-function buildIsolationCorridorWarningText() {
-  const minMs = getMyTeamIsolationMinMsLeft();
-  if (!Number.isFinite(minMs)) return null;
-  const secFull = Math.ceil(minMs / 1000);
-  const secPart = secFull < 1 ? "менее 1" : String(Math.max(0, secFull));
-  return `Территория отрезана от базы! Соедините коридор за ${secPart} с — иначе клетки станут нейтральными.`;
-}
-
-function startTerritoryIsolationBannerTicker() {
-  clearTerritoryIsolationBannerInterval();
-  territoryIsolationBannerIntervalId = setInterval(() => {
-    const t = buildIsolationCorridorWarningText();
-    if (!t) {
-      clearTerritoryIsolationBannerInterval();
-      return;
-    }
-    updatePlacementFeedbackBannerText(t);
-  }, 1000);
-}
-
 function hidePlacementFeedbackBanner() {
-  clearTerritoryIsolationBannerInterval();
   if (placementFeedbackHideTimer) {
     clearTimeout(placementFeedbackHideTimer);
     placementFeedbackHideTimer = null;
@@ -999,11 +1020,11 @@ function hidePlacementFeedbackBanner() {
 /**
  * Явный фидбек по отклонённым действиям: полоска под статусом + тактильный отклик; не полагаемся только на Telegram alert.
  * @param {"warn"|"error"} severity
- * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, isolationTicker?: boolean }} opts
+ * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, skipCooldownChrome?: boolean }} opts
  */
 function showPlacementFeedback(text, severity, opts = {}) {
   const telegramAlert = opts.telegramAlert === true;
-  if (!opts.isolationTicker) clearTerritoryIsolationBannerInterval();
+  const skipCooldownChrome = opts.skipCooldownChrome === true;
   const hideMs =
     typeof opts.bannerDurationMs === "number" && Number.isFinite(opts.bannerDurationMs) && opts.bannerDurationMs > 0
       ? opts.bannerDurationMs
@@ -1019,7 +1040,7 @@ function showPlacementFeedback(text, severity, opts = {}) {
       hidePlacementFeedbackBanner();
     }, hideMs);
   }
-  if (cooldownLabel && text) {
+  if (cooldownLabel && text && !skipCooldownChrome) {
     cooldownLabel.hidden = false;
     cooldownLabel.textContent = text;
     cooldownLabel.classList.add("toolbar__cooldown--alert");
@@ -1038,7 +1059,6 @@ function showPlacementFeedback(text, severity, opts = {}) {
   if (telegramAlert && typeof tg?.showAlert === "function") {
     tg.showAlert(text);
   }
-  if (opts.isolationTicker) startTerritoryIsolationBannerTicker();
 }
 
 function triggerMapShake(ms = 560) {
@@ -1050,7 +1070,7 @@ function triggerMapShake(ms = 560) {
 }
 
 function clearClientTerritoryIsolation() {
-  clearTerritoryIsolationBannerInterval();
+  stopTerritoryIsolationHud();
   territoryIsolationCellMeta.clear();
   territoryIsolationWarnedGroupIds.clear();
 }
@@ -1115,17 +1135,18 @@ function applyClientTerritoryIsolationFromServer(payload) {
     } else {
       msLeft = TERRITORY_ISOLATION_GRACE_MS;
     }
-    const secFull = Math.ceil(msLeft / 1000);
-    const secPart = secFull < 1 ? "менее 1" : String(Math.max(0, secFull));
-    const line = `Территория отрезана от базы! Соедините коридор за ${secPart} с — иначе клетки станут нейтральными.`;
-    const hideBannerMs = Math.min(45_000, Math.max(10_000, msLeft + 2500));
-    showPlacementFeedback(line, "warn", {
-      telegramAlert: false,
-      isolationTicker: true,
-      bannerDurationMs: hideBannerMs,
-    });
+    msLeft = Math.max(0, msLeft);
+    const line = buildIsolationCorridorBannerLine(msLeft);
+    if (line) {
+      showPlacementFeedback(line, "warn", {
+        telegramAlert: false,
+        skipCooldownChrome: true,
+        bannerDurationMs: 2000,
+      });
+    }
     break;
   }
+  refreshTerritoryIsolationHudPresence();
   scheduleDraw({ full: true });
 }
 
@@ -2601,14 +2622,17 @@ function computeClientFlagDisplayEffHp(raw, nowMs) {
     Number.isFinite(srv) &&
     typeof t0 === "number" &&
     Number.isFinite(t0) &&
-    srv > h0 + 0.015
+    h0 < maxH
   ) {
-    const u0 = Math.min(1, Math.max(0, (srv - h0) / (maxH - h0)));
-    const regenStart = t0 - u0 * FLAG_REGEN_DURATION_MS;
-    const u = (nowMs - regenStart) / FLAG_REGEN_DURATION_MS;
-    if (u >= 1) eff = maxH;
-    else if (u > 0) eff = h0 + (maxH - h0) * u;
-    else eff = h0;
+    const span = maxH - h0;
+    if (span > 0 && srv > h0 + 1e-6) {
+      const u0 = Math.min(1, Math.max(0, (srv - h0) / span));
+      const regenStart = t0 - u0 * FLAG_REGEN_DURATION_MS;
+      const u = (nowMs - regenStart) / FLAG_REGEN_DURATION_MS;
+      if (u >= 1) eff = maxH;
+      else if (u > 0) eff = h0 + span * u;
+      else eff = h0;
+    }
   }
   return Math.min(maxH, Math.max(0, eff));
 }
@@ -2660,11 +2684,27 @@ function syncFlagCaptureStateFromMeta(flags) {
       attackerTeamId: Number(f.attackerTeamId) | 0,
     };
     if (typeof f.effectiveHp === "number" && Number.isFinite(f.effectiveHp)) {
-      entry.effectiveHp = f.effectiveHp;
-      entry.flagStateServerNow =
+      const newSn =
         typeof f.flagStateServerNow === "number" && Number.isFinite(f.flagStateServerNow)
           ? f.flagStateServerNow
-          : Date.now();
+          : NaN;
+      let effOut = f.effectiveHp;
+      let snOut = Number.isFinite(newSn) ? newSn : Date.now();
+      if (
+        prev &&
+        prev.hp === hp &&
+        typeof prev.effectiveHp === "number" &&
+        Number.isFinite(prev.effectiveHp) &&
+        typeof prev.flagStateServerNow === "number" &&
+        Number.isFinite(prev.flagStateServerNow)
+      ) {
+        if (prev.flagStateServerNow > snOut + 300 || prev.effectiveHp > effOut + 0.03) {
+          effOut = prev.effectiveHp;
+          snOut = prev.flagStateServerNow;
+        }
+      }
+      entry.effectiveHp = effOut;
+      entry.flagStateServerNow = snOut;
     }
     next.set(tid, entry);
   }
@@ -4336,6 +4376,7 @@ function connectWs() {
           { telegramAlert: false }
         );
       }
+      refreshTerritoryIsolationHudPresence();
       triggerMapShake(480);
       scheduleDraw({ full: true });
       return;
@@ -4386,6 +4427,24 @@ function connectWs() {
               prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
             ) {
               lh = prev.lastHitAt | 0;
+            } else if (
+              msg.regen &&
+              typeof msg.effectiveHp === "number" &&
+              Number.isFinite(msg.effectiveHp) &&
+              typeof msg.serverNow === "number" &&
+              Number.isFinite(msg.serverNow) &&
+              maxHp > hp
+            ) {
+              const srv = msg.effectiveHp;
+              const t0 = msg.serverNow;
+              const span = maxHp - hp;
+              const u0 = span > 0 ? Math.min(1, Math.max(0, (srv - hp) / span)) : 0;
+              lh = Math.floor(t0 - u0 * FLAG_REGEN_DURATION_MS - FLAG_REGEN_IDLE_MS);
+              if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+                lh = Math.floor(t0 - FLAG_REGEN_IDLE_MS);
+              }
+            } else if (msg.regen && typeof msg.serverNow === "number" && Number.isFinite(msg.serverNow)) {
+              lh = Math.floor(msg.serverNow - FLAG_REGEN_IDLE_MS);
             } else {
               lh = Date.now();
             }
@@ -4405,7 +4464,7 @@ function connectWs() {
           }
           flagCaptureClientState.set(did, row);
           if (!msg.regen && teamsMeta && boardVfx) {
-            const def = teamsMeta.find((x) => x.id === did);
+            const def = teamsMeta.find((x) => (Number(x.id) | 0) === did);
             if (def?.spawn) {
               const { x: fgx, y: fgy } = flagCellFromSpawn(def.spawn.x0, def.spawn.y0);
               const aid = msg.attackerTeamId | 0;
@@ -4473,6 +4532,7 @@ function connectWs() {
     if (msg.type === "flagCaptured") {
       const aid = msg.attackerTeamId | 0;
       const did = msg.defenderTeamId | 0;
+      const wasMyDefeat = myTeamId != null && (myTeamId | 0) === did;
       flagCaptureClientState.delete(did);
       for (const [k, v] of [...pixels.entries()]) {
         const tid = typeof v === "number" ? v : v.teamId;
@@ -4492,20 +4552,34 @@ function connectWs() {
         flushBoardVfxFrame();
         requestAnimationFrame(() => flushBoardVfxFrame());
       }
-      const an = teamsMeta?.find((x) => x.id === aid)?.name || "атакующие";
-      const dn = teamsMeta?.find((x) => x.id === did)?.name || "защита";
-      triggerMapShake(1200);
-      enqueueBaseCapturedPresentation(String(an), String(dn));
-      showFlagAlertBanner(`BASE CAPTURED — база «${dn}» уничтожена`, 5200);
-      showPlacementFeedback(
-        `BASE CAPTURED / БАЗА ЗАХВАЧЕНА. «${dn}» уничтожена — вся территория у «${an}».`,
-        "error",
-        { telegramAlert: true }
-      );
-      try {
-        window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
-      } catch {
-        /* ignore */
+      if (wasMyDefeat) {
+        tryPlayTeamEliminationVfx({
+          teamId: did,
+          destroyGx: msg.gx,
+          destroyGy: msg.gy,
+          teamColor: msg.defenderColor || "#888888",
+        });
+        const canRe =
+          typeof msg.canReenter === "boolean" ? msg.canReenter : roundIndexMeta === 0;
+        applyMyTeamEliminatedClientState(canRe);
+      }
+      const an = teamsMeta?.find((x) => (Number(x.id) | 0) === aid)?.name || "атакующие";
+      const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "защита";
+      if (!wasMyDefeat) {
+        triggerMapShake(1200);
+        enqueueBaseCapturedPresentation(String(an), String(dn));
+        showFlagAlertBanner(`BASE CAPTURED — база «${dn}» уничтожена`, 5200);
+        /* Модальный showAlert в TG часто подвешивает WebView; баннеров достаточно. */
+        showPlacementFeedback(
+          `BASE CAPTURED / БАЗА ЗАХВАЧЕНА. «${dn}» уничтожена — вся территория у «${an}».`,
+          "error",
+          { telegramAlert: false }
+        );
+        try {
+          window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
+        } catch {
+          /* ignore */
+        }
       }
       scheduleDraw({ full: true });
       schedulePersist();
@@ -4868,47 +4942,8 @@ function connectWs() {
     if (msg.type === "teamEliminated") {
       tryPlayTeamEliminationVfx(msg);
       const tid = msg.teamId | 0;
-      if (myTeamId != null && myTeamId === tid) {
-        hidePlacementFeedbackBanner();
-        showPlacementFeedback("Команда уничтожена. Территории больше нет.", "error", { telegramAlert: false });
-        triggerDefeatScreenFlash();
-        triggerMapShake(920);
-        cancelTeamDefeatUiTimer();
-        revertOptimisticPixel();
-        revertOptimisticWeapon();
-        optimisticPixelPending = null;
-        optimisticWeaponPending = null;
-        myTeamId = null;
-        clearTeamIdentityFromSession();
-        stripTeamFromUrl();
-        teamSpawnOnboardUntil = 0;
-        baseReminderUntil = 0;
-        myTerritoryDangerUntil = 0;
-        myTerritoryLastCellUntil = 0;
-        clearClientTerritoryIsolation();
-        if (teamSpawnHintTimer) {
-          clearTimeout(teamSpawnHintTimer);
-          teamSpawnHintTimer = 0;
-        }
-        const canReenter = msg.canReenter === true;
-        if (!canReenter) {
-          spectatorMode = true;
-        } else {
-          spectatorMode = false;
-        }
-        invalidateTeamColorByIdCache();
-        hideCrisisOverlay();
-        hideReferralSplash();
-        if (welcomeOverlay) welcomeOverlay.hidden = true;
-        if (teamOverlay) teamOverlay.hidden = true;
-        closeCreateTeamOverlay();
-        closeTeamSettings();
-        scheduleTeamDefeatOverlay(canReenter);
-        rebuildTeamList();
-        updateTeamBadge();
-        setFooterMode();
-        scheduleDraw();
-        schedulePersist();
+      if (myTeamId != null && (myTeamId | 0) === tid) {
+        applyMyTeamEliminatedClientState(msg.canReenter === true);
       }
       return;
     }
@@ -5982,7 +6017,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       const dangerLow = displayHp <= 10 && displayHp > 0;
       const dangerMid = displayHp <= 5 && displayHp > 0;
       const dangerCrit = displayHp <= 1 && displayHp > 0;
-      const dangerHpZero = displayHp <= 0 && stForHp != null;
+      const dangerHpZero = displayHp <= 0 && raw != null;
       const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + dmgTaken * 0.15);
       const pulseRed =
         dangerCrit && shNowF < myFlagCriticalUntil && tidFlag === (myTeamId | 0)

@@ -210,9 +210,10 @@ export function createBoardVfx(canvas) {
     const gyi = gy | 0;
     const ac = typeof attackerColor === "string" && attackerColor.startsWith("#") ? attackerColor : "#66ff99";
     const dc = typeof defenderColor === "string" && defenderColor.startsWith("#") ? defenderColor : "#ff6655";
-    burst(gxi, gyi, ac, transform, 56);
-    burst(gxi, gyi, dc, transform, 36);
-    burst(gxi, gyi, "#ffffff", transform, 26);
+    /* Меньше частиц — тяжёлый взрыв ломал отрисовку в Telegram WebView (артефакты / «зависание»). */
+    burst(gxi, gyi, ac, transform, 22);
+    burst(gxi, gyi, dc, transform, 16);
+    burst(gxi, gyi, "#ffffff", transform, 12);
     shockwaves.push({
       t0: performance.now(),
       gcx: gxi + 0.5,

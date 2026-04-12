@@ -2089,10 +2089,18 @@ function applyClusterGameReplication(msg) {
       if (!Number.isFinite(lastHitAt) || lastHitAt < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
         lastHitAt = nowRepl - FLAG_REGEN_IDLE_MS;
       }
+      const prevSt = flagCaptureByDefender.get(did);
       flagCaptureByDefender.set(did, {
         hp,
         lastHitAt,
         attackerTeamId: msg.attackerTeamId | 0,
+        ...(prevSt && typeof prevSt === "object"
+          ? {
+              _lastRegenBroadcastHp: prevSt._lastRegenBroadcastHp,
+              _flagRegenBroadcastPhase: prevSt._flagRegenBroadcastPhase,
+              _lastRegenBroadcastAt: prevSt._lastRegenBroadcastAt,
+            }
+          : {}),
       });
       return;
     }
@@ -2318,7 +2326,7 @@ function buildFlagsSnapshot() {
 function tickFlagBaseRegen(now) {
   if (!isClusterLeader()) return;
   if (gameFinished || roundEnding) return;
-  const regenBroadcastPeriodMs = 1500;
+  const regenBroadcastPeriodMs = 800;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
     if (!st) continue;
@@ -2487,6 +2495,8 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
     attackerColor: dtAtk.color || "#888888",
     defenderColor: dtDef.color || "#888888",
     banner: "BASE CAPTURED",
+    roundIndex,
+    canReenter: roundIndex === 0,
   });
 
   eliminateTeamByTerritoryLoss(defenderId);

@@ -266,6 +266,28 @@ body {
   font-weight: 500;
 }
 
+.toolbar__session-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  flex-shrink: 0;
+  max-width: min(56vw, 240px);
+}
+
+.territory-isolation-hud {
+  font-size: 0.52rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #ffb34a;
+  text-align: right;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+  white-space: normal;
+  max-width: 100%;
+  word-break: break-word;
+}
+
 .toolbar__actions {
   display: flex;
   flex-wrap: nowrap;
