@@ -87,6 +87,42 @@ const DATA_DIR = path.join(ROOT, "data");
 /** @type {Awaited<ReturnType<typeof createWalletBackend>>} */
 const walletStore = await createWalletBackend(DATA_DIR);
 
+/** Chat id личных чатов с ботом (после /start) — для админской команды broadcast / рассылка. */
+const TELEGRAM_SUBSCRIBERS_PATH = path.join(DATA_DIR, "telegram-bot-subscribers.json");
+/** @type {Set<number>} */
+let telegramSubscriberChatIds = new Set();
+
+function loadTelegramSubscribersSync() {
+  try {
+    if (!fs.existsSync(TELEGRAM_SUBSCRIBERS_PATH)) return;
+    const j = JSON.parse(fs.readFileSync(TELEGRAM_SUBSCRIBERS_PATH, "utf8"));
+    const arr = Array.isArray(j.ids) ? j.ids : [];
+    telegramSubscriberChatIds = new Set(arr.map(Number).filter((n) => Number.isFinite(n) && n > 0));
+  } catch (e) {
+    console.warn("[telegram] subscribers load:", e?.message || e);
+  }
+}
+
+function persistTelegramSubscribersSync() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const ids = [...telegramSubscriberChatIds].sort((a, b) => a - b);
+    fs.writeFileSync(TELEGRAM_SUBSCRIBERS_PATH, JSON.stringify({ ids }, null, 0), "utf8");
+  } catch (e) {
+    console.warn("[telegram] subscribers save:", e?.message || e);
+  }
+}
+
+function rememberTelegramSubscriberChat(chatId) {
+  const id = Number(chatId);
+  if (!Number.isFinite(id) || id <= 0) return;
+  if (telegramSubscriberChatIds.has(id)) return;
+  telegramSubscriberChatIds.add(id);
+  persistTelegramSubscribersSync();
+}
+
+loadTelegramSubscribersSync();
+
 /** Пакеты пополнения: бонус в квантах (1 USDT = 7 квантов). Кредит USDT += bonusQuant/7. */
 const DEPOSIT_PACK_BONUS_QUANT = new Map([
   [1, 0],
@@ -268,6 +304,58 @@ function getDiscussionChatUrlForClient() {
   }
 }
 
+function escapeHtmlAttr(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/[\r\n]/g, " ");
+}
+
+function envStrLoose(name) {
+  const v = process.env[name];
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/**
+ * Мета для рефералок в клиенте (`index.html` → pixel-battle-tg-*).
+ * Берётся из TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME, из TELEGRAM_MINIAPP_LINK (t.me/бот/short),
+ * иначе из Render-переменных pixel-battle-tg-bot / pixel-battle-tg-app (short name ≠ username бота).
+ */
+function getTelegramReferralMetaForHtml() {
+  let bot = TELEGRAM_BOT_USERNAME;
+  let app = TELEGRAM_MINIAPP_SHORT_NAME;
+  if (!bot || !app) {
+    const link = getTelegramMiniAppLaunchUrl();
+    if (/^https:\/\/t\.me\//i.test(link)) {
+      const parts = link
+        .replace(/^https:\/\/t\.me\//i, "")
+        .split("/")
+        .filter(Boolean);
+      if (parts.length >= 2) {
+        if (!bot) bot = parts[0];
+        if (!app) app = parts[1].split("?")[0];
+      }
+    }
+  }
+  if (!bot) bot = envStrLoose("pixel-battle-tg-bot").replace(/^@/, "");
+  if (!app) app = envStrLoose("pixel-battle-tg-app");
+  return { bot, app };
+}
+
+function injectTelegramMetaIntoIndexHtml(html) {
+  const { bot, app } = getTelegramReferralMetaForHtml();
+  return html
+    .replace(
+      /<meta\s+name="pixel-battle-tg-bot"\s+content="[^"]*"\s*\/>/i,
+      `<meta name="pixel-battle-tg-bot" content="${escapeHtmlAttr(bot)}" />`
+    )
+    .replace(
+      /<meta\s+name="pixel-battle-tg-app"\s+content="[^"]*"\s*\/>/i,
+      `<meta name="pixel-battle-tg-app" content="${escapeHtmlAttr(app)}" />`
+    );
+}
+
 /** Параметр после /start (реферал и т.д.) → добавляем в ссылку как ?startapp= */
 function parseStartPayload(text) {
   const m = /^\/start(?:@[\w]+)?\s*(.*)$/i.exec(String(text || "").trim());
@@ -326,6 +414,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "restart" || fw === "рестарт") return true;
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event") return true;
+  if (fw === "broadcast" || fw === "рассылка") return true;
   return MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw);
 }
 
@@ -1782,6 +1871,22 @@ function serveStatic(req, res) {
       return;
     }
     const ext = path.extname(full).toLowerCase();
+    if (ext === ".html" && path.basename(full) === "index.html") {
+      fs.readFile(full, "utf8", (readErr, html) => {
+        if (readErr) {
+          res.writeHead(500);
+          res.end("Error");
+          return;
+        }
+        const out = injectTelegramMetaIntoIndexHtml(html);
+        res.writeHead(200, {
+          "Content-Type": MIME[".html"],
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end(out);
+      });
+      return;
+    }
     res.writeHead(200, {
       "Content-Type": MIME[ext] || "application/octet-stream",
       "X-Content-Type-Options": "nosniff",
@@ -4389,9 +4494,13 @@ async function telegramSendMessage(chatId, text, extra = {}) {
   try {
     data = await res.json();
   } catch {
-    return;
+    return false;
   }
-  if (!data.ok) console.warn("Telegram sendMessage:", data.description || res.status);
+  if (!data.ok) {
+    console.warn("Telegram sendMessage:", data.description || res.status);
+    return false;
+  }
+  return true;
 }
 
 /** Команда paint: playerKey в игре = tg_<Telegram user id>. */
@@ -4617,6 +4726,7 @@ async function telegramPollLoop() {
         let t = String(msg.text).trim();
 
         if (isStartCommand(t)) {
+          rememberTelegramSubscriberChat(chatId);
           const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
           const startBtn = launchUrl ? buildTelegramStartInlineButton(launchUrl) : null;
           if (startBtn) {
@@ -4677,6 +4787,39 @@ async function telegramPollLoop() {
             );
           }
           continue;
+        }
+
+        {
+          const bw = (restartNorm.split(/\s+/)[0] || "").replace(/@\w+$/i, "");
+          if (bw === "broadcast" || bw === "рассылка") {
+            let custom = "";
+            if (bw === "broadcast" && restartNorm.startsWith("broadcast ")) {
+              custom = restartNorm.slice("broadcast ".length).trim();
+            } else if (bw === "рассылка" && restartNorm.startsWith("рассылка ")) {
+              custom = restartNorm.slice("рассылка ".length).trim();
+            }
+            const textOut = custom || TELEGRAM_START_MESSAGE;
+            const launchUrl = buildMiniAppOpenUrl("");
+            const startBtn = launchUrl ? buildTelegramStartInlineButton(launchUrl) : null;
+            const ids = [...telegramSubscriberChatIds];
+            let ok = 0;
+            let fail = 0;
+            for (const cid of ids) {
+              const sent = await telegramSendMessage(
+                cid,
+                textOut,
+                startBtn ? { reply_markup: { inline_keyboard: [[startBtn]] } } : {}
+              );
+              if (sent) ok++;
+              else fail++;
+              await new Promise((r) => setTimeout(r, 55));
+            }
+            await telegramSendMessage(
+              chatId,
+              `Рассылка: доставлено ${ok}, ошибок ${fail}, в списке ${ids.length} чат(ов). Учитываются только те, кто писал /start боту после этого обновления сервера. На Render без постоянного диска список сбрасывается при деплое.`
+            );
+            continue;
+          }
         }
 
         {
@@ -4816,6 +4959,9 @@ server.listen(PORT, () => {
       }
       if (isClusterLeader()) {
         console.log("[Telegram] long poll запущен (getUpdates).");
+        console.log(
+          "[Telegram] Рассылка: админ пишет в бот «broadcast» или «рассылка» (опционально текст после пробела) — всем, кто нажимал /start; список: data/telegram-bot-subscribers.json"
+        );
         telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
       } else {
         console.log("[cluster] Telegram long poll отключён (CLUSTER_LEADER=false на этом инстансе).");
