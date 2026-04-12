@@ -1205,7 +1205,7 @@ const teamFirstHitPeakAt = new Map();
 
 /**
  * HP базы по защищающейся команде. hp — целое после последнего удара; реген вычисляется по lastHitAt.
- * @type {Map<number, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number }>}
+ * @type {Map<number, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number, _flagRegenBroadcastPhase?: boolean, _lastRegenBroadcastAt?: number }>}
  */
 const flagCaptureByDefender = new Map();
 
@@ -2078,14 +2078,17 @@ function applyClusterGameReplication(msg) {
         flagCaptureByDefender.delete(did);
         return;
       }
-      let lastHitAt = Date.now();
+      let lastHitAt = 0;
       const rawLh = msg.lastHitAt;
       if (typeof rawLh === "number" && Number.isFinite(rawLh)) lastHitAt = rawLh | 0;
       else if (typeof rawLh === "string" && String(rawLh).trim() !== "") {
         const n = Number(rawLh);
         if (Number.isFinite(n)) lastHitAt = n | 0;
       }
-      if (lastHitAt < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) lastHitAt = Date.now();
+      const nowRepl = Date.now();
+      if (!Number.isFinite(lastHitAt) || lastHitAt < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+        lastHitAt = nowRepl - FLAG_REGEN_IDLE_MS;
+      }
       flagCaptureByDefender.set(did, {
         hp,
         lastHitAt,
@@ -2288,15 +2291,25 @@ function buildFlagsSnapshot() {
       ? Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0))
       : displayFloor;
     const attackerTeamId = (st?.attackerTeamId | 0) || 0;
+    let lhMeta = now;
+    if (st) {
+      const lh = Number(st.lastHitAt) | 0;
+      lhMeta =
+        Number.isFinite(lh) && lh >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
+          ? lh
+          : now - FLAG_REGEN_IDLE_MS;
+    }
     out.push({
       teamId: t.id,
       fx: x,
       fy: y,
       hp: metaHp,
       maxHp: FLAG_BASE_MAX_HP,
-      lastHitAt: st?.lastHitAt | 0,
+      lastHitAt: lhMeta,
       attackerTeamId,
       underAttack: displayFloor < FLAG_BASE_MAX_HP,
+      effectiveHp: eff,
+      flagStateServerNow: now,
     });
   }
   return out;
@@ -2305,6 +2318,7 @@ function buildFlagsSnapshot() {
 function tickFlagBaseRegen(now) {
   if (!isClusterLeader()) return;
   if (gameFinished || roundEnding) return;
+  const regenBroadcastPeriodMs = 1500;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
     if (!st) continue;
@@ -2320,10 +2334,22 @@ function tickFlagBaseRegen(now) {
       continue;
     }
     const idleEnd = st.lastHitAt + FLAG_REGEN_IDLE_MS;
-    if (now < idleEnd) continue;
+    if (now < idleEnd) {
+      st._flagRegenBroadcastPhase = false;
+      continue;
+    }
+    if (!st._flagRegenBroadcastPhase) {
+      st._flagRegenBroadcastPhase = true;
+      st._lastRegenBroadcastHp = -1;
+    }
     const curInt = Math.max(0, Math.min(FLAG_BASE_MAX_HP - 1, Math.floor(eff + 1e-9)));
-    if (st._lastRegenBroadcastHp === curInt) continue;
+    const needBroadcast =
+      st._lastRegenBroadcastHp !== curInt ||
+      !st._lastRegenBroadcastAt ||
+      now - st._lastRegenBroadcastAt >= regenBroadcastPeriodMs;
+    if (!needBroadcast) continue;
     st._lastRegenBroadcastHp = curInt;
+    st._lastRegenBroadcastAt = now;
     broadcast({
       type: "flagCaptureProgress",
       defenderTeamId: d,
@@ -2332,6 +2358,8 @@ function tickFlagBaseRegen(now) {
       maxHp: FLAG_BASE_MAX_HP,
       lastHitAt: st.lastHitAt,
       regen: true,
+      effectiveHp: eff,
+      serverNow: now,
     });
   }
 }
@@ -2389,6 +2417,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     st.attackerTeamId = aid;
   }
   st._lastRegenBroadcastHp = newHp;
+  st._flagRegenBroadcastPhase = false;
 
   if (curHp === FLAG_BASE_MAX_HP) {
     broadcast({
@@ -2400,6 +2429,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     });
   }
 
+  const effAfterHit = computeEffectiveBaseHp(st, now);
   broadcast({
     type: "flagCaptureProgress",
     defenderTeamId: did,
@@ -2407,6 +2437,8 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     hp: newHp,
     maxHp: FLAG_BASE_MAX_HP,
     lastHitAt: now,
+    effectiveHp: effAfterHit,
+    serverNow: now,
   });
 
   for (const th of FLAG_WARN_THRESHOLDS) {

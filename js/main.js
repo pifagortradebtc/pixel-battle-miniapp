@@ -24,6 +24,7 @@ import {
   flagCellFromSpawn,
   FLAG_BASE_MAX_HP,
   FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
+  FLAG_REGEN_DURATION_MS,
   FLAG_REGEN_IDLE_MS,
   FLAG_VISUAL_CELLS_ABOVE,
   computeEffectiveBaseHp,
@@ -907,6 +908,40 @@ function updatePlacementFeedbackBannerText(text) {
     cooldownLabel.textContent = text;
     cooldownLabel.title = text;
   }
+}
+
+/**
+ * Изолированные карманы своей команды: одна запись на groupId (границы в клетках + дедлайн).
+ * @returns {{ expiresAtMs: number, gx0: number, gy0: number, gx1: number, gy1: number }[]}
+ */
+function aggregateMyTeamIsolationPockets() {
+  const mid = myTeamId | 0;
+  /** @type {Map<string, { expiresAtMs: number, gx0: number, gy0: number, gx1: number, gy1: number }>} */
+  const byGid = new Map();
+  for (const [key, meta] of territoryIsolationCellMeta) {
+    if ((meta.teamId | 0) !== mid) continue;
+    const gid = meta.groupId && String(meta.groupId).length ? String(meta.groupId) : key;
+    const parts = key.split(",");
+    const gx = Number(parts[0]) | 0;
+    const gy = Number(parts[1]) | 0;
+    let b = byGid.get(gid);
+    if (!b) {
+      b = {
+        expiresAtMs: Number(meta.expiresAtMs),
+        gx0: gx,
+        gy0: gy,
+        gx1: gx,
+        gy1: gy,
+      };
+      byGid.set(gid, b);
+    } else {
+      b.gx0 = Math.min(b.gx0, gx);
+      b.gy0 = Math.min(b.gy0, gy);
+      b.gx1 = Math.max(b.gx1, gx);
+      b.gy1 = Math.max(b.gy1, gy);
+    }
+  }
+  return [...byGid.values()];
 }
 
 /** Минимальный остаток до обвала среди изолированных карманов моей команды (мс). */
@@ -2551,6 +2586,33 @@ function notifyReject(reason) {
   }
 }
 
+/** HP полоски флага: якорь + lastHitAt и при наличии снимок effectiveHp с сервера (реген без рассинхрона). */
+function computeClientFlagDisplayEffHp(raw, nowMs) {
+  const maxH = FLAG_BASE_MAX_HP;
+  if (!raw || typeof raw.hp !== "number") return maxH;
+  const h0 = Math.min(maxH, Math.max(0, raw.hp | 0));
+  if (h0 >= maxH) return maxH;
+  const tHit = Number(raw.lastHitAt) | 0;
+  let eff = computeEffectiveBaseHp({ hp: h0, lastHitAt: tHit }, nowMs);
+  const srv = raw.effectiveHp;
+  const t0 = raw.flagStateServerNow;
+  if (
+    typeof srv === "number" &&
+    Number.isFinite(srv) &&
+    typeof t0 === "number" &&
+    Number.isFinite(t0) &&
+    srv > h0 + 0.015
+  ) {
+    const u0 = Math.min(1, Math.max(0, (srv - h0) / (maxH - h0)));
+    const regenStart = t0 - u0 * FLAG_REGEN_DURATION_MS;
+    const u = (nowMs - regenStart) / FLAG_REGEN_DURATION_MS;
+    if (u >= 1) eff = maxH;
+    else if (u > 0) eff = h0 + (maxH - h0) * u;
+    else eff = h0;
+  }
+  return Math.min(maxH, Math.max(0, eff));
+}
+
 function syncFlagCaptureStateFromMeta(flags) {
   /* Не очищаем карту до проверки: иначе при meta без flags вся карта «сбрасывается» в 20/20 для всех баз. */
   if (!Array.isArray(flags)) return;
@@ -2583,19 +2645,28 @@ function syncFlagCaptureStateFromMeta(flags) {
       if (
         prev &&
         Number.isFinite(prev.lastHitAt) &&
-        prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
+        prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS &&
+        prev.hp === hp
       ) {
         lh = prev.lastHitAt | 0;
       } else {
         lh = Date.now() - FLAG_REGEN_IDLE_MS;
       }
     }
-    next.set(tid, {
+    const entry = {
       hp,
       maxHp,
       lastHitAt: lh,
       attackerTeamId: Number(f.attackerTeamId) | 0,
-    });
+    };
+    if (typeof f.effectiveHp === "number" && Number.isFinite(f.effectiveHp)) {
+      entry.effectiveHp = f.effectiveHp;
+      entry.flagStateServerNow =
+        typeof f.flagStateServerNow === "number" && Number.isFinite(f.flagStateServerNow)
+          ? f.flagStateServerNow
+          : Date.now();
+    }
+    next.set(tid, entry);
   }
   flagCaptureClientState = next;
 }
@@ -4319,12 +4390,20 @@ function connectWs() {
               lh = Date.now();
             }
           }
-          flagCaptureClientState.set(did, {
+          const row = {
             hp,
             maxHp,
             lastHitAt: lh,
             attackerTeamId: msg.attackerTeamId | 0,
-          });
+          };
+          if (typeof msg.effectiveHp === "number" && Number.isFinite(msg.effectiveHp)) {
+            row.effectiveHp = msg.effectiveHp;
+            row.flagStateServerNow =
+              typeof msg.serverNow === "number" && Number.isFinite(msg.serverNow)
+                ? msg.serverNow
+                : Date.now();
+          }
+          flagCaptureClientState.set(did, row);
           if (!msg.regen && teamsMeta && boardVfx) {
             const def = teamsMeta.find((x) => x.id === did);
             if (def?.spawn) {
@@ -5658,6 +5737,46 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
+  /* Обратный отсчёт у отрезанного кармана своей команды — компактная метка сбоку от пятна. */
+  if (!lite && online && myTeamId != null && cell >= 2 && territoryIsolationCellMeta.size > 0) {
+    const pockets = aggregateMyTeamIsolationPockets();
+    if (pockets.length > 0) {
+      const nowAdj = Date.now() + territoryIsolationSkewMs;
+      ctx.save();
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";
+      const fs = Math.max(9, Math.min(14, cell * 0.38));
+      ctx.font = `700 ${fs}px system-ui,Segoe UI,sans-serif`;
+      for (let pi = 0; pi < pockets.length; pi++) {
+        const p = pockets[pi];
+        if (p.gx1 < x0 || p.gx0 > x1 || p.gy1 < y0 || p.gy0 > y1) continue;
+        const msLeft = p.expiresAtMs - nowAdj;
+        const secLeft = Math.ceil(msLeft / 1000);
+        if (secLeft < 0) continue;
+        const label =
+          secLeft >= 60
+            ? `${Math.floor(secLeft / 60)}:${String(secLeft % 60).padStart(2, "0")}`
+            : `${secLeft} с`;
+        const pad = Math.max(3, cell * 0.08);
+        const cy = offsetY + ((p.gy0 + p.gy1 + 1) * 0.5) * cell;
+        let sx = offsetX + (p.gx1 + 1) * cell + pad;
+        const tw = ctx.measureText(label).width + pad * 2.4;
+        const th = fs + pad * 1.7;
+        if (sx + tw > w - 4) sx = offsetX + p.gx0 * cell - tw - pad;
+        if (sx < 4) sx = 4;
+        const ry = cy - th * 0.5;
+        ctx.fillStyle = "rgba(10,12,22,0.94)";
+        ctx.fillRect(sx, ry, tw, th);
+        ctx.strokeStyle = "rgba(255,130,80,0.9)";
+        ctx.lineWidth = Math.max(1, cell * 0.045);
+        ctx.strokeRect(sx + 0.5, ry + 0.5, tw - 1, th - 1);
+        ctx.fillStyle = "#ffeae3";
+        ctx.fillText(label, sx + pad * 1.15, cy);
+      }
+      ctx.restore();
+    }
+  }
+
   /* События боя: золото / сжатие / экономика / предпросмотр сейсмики (сервер задаёт зоны). */
   if (!lite && online) {
     const ge = getClientGlobalEventSnapshot();
@@ -5853,11 +5972,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) continue;
       const tidFlag = Number(t.id) | 0;
       const raw = flagCaptureClientState.get(tidFlag);
-      const stForHp =
-        raw && typeof raw.hp === "number"
-          ? { hp: raw.hp | 0, lastHitAt: raw.lastHitAt | 0 }
-          : null;
-      const effHpFloat = computeEffectiveBaseHp(stForHp, shNowF);
+      const effHpFloat = computeClientFlagDisplayEffHp(raw, shNowF);
       const displayHp = Math.min(maxH, Math.max(0, Math.floor(effHpFloat + 1e-9)));
       const dmgTaken = maxH - displayHp;
       const px = offsetX + fgx * cell;
