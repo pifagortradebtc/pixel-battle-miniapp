@@ -42,10 +42,7 @@ import {
   battleDurationForRound,
   DUEL_INSTANT_WIN_SCORE_SHARE,
 } from "./lib/tournament-flow.js";
-import {
-  aggregateScoresFromPixels,
-  computeTotalAvailableScore,
-} from "./lib/scoring.js";
+import { aggregateScoresFromPixels } from "./lib/scoring.js";
 import {
   buildBattleEventsClientPayload,
   cellsInManhattanBall,
@@ -900,7 +897,26 @@ function buildBattleProtectedMask() {
   return mask;
 }
 
-function applySeismicForLeader(defId, uniqueEventKey) {
+/** Пауза перед ударом сейсмики из бота: баннер у игроков + подсветка зон. */
+const MANUAL_SEISMIC_WARNING_MS = 3000;
+
+/** @type {ReturnType<typeof setTimeout> | null} */
+let pendingManualSeismicTimer = null;
+/** @type {{ cleared: [number, number][]; uniqueEventKey: string } | null} */
+let pendingManualSeismicPayload = null;
+
+function clearPendingManualSeismicSchedule() {
+  if (pendingManualSeismicTimer != null) {
+    clearTimeout(pendingManualSeismicTimer);
+    pendingManualSeismicTimer = null;
+  }
+  pendingManualSeismicPayload = null;
+}
+
+/**
+ * @returns {{ balls: { cx: number; cy: number; r: number }[]; cleared: [number, number][] }}
+ */
+function computeSeismicClearData(defId) {
   const play = getPlayStartMs();
   const protectedMask = buildBattleProtectedMask();
   const balls = computeSeismicManhattanBalls(roundIndex, play, defId, gridW, gridH, landGrid, protectedMask);
@@ -930,10 +946,18 @@ function applySeismicForLeader(defId, uniqueEventKey) {
     const v = pixels.get(key);
     if (v == null) continue;
     if ((pixelTeam(v) | 0) === 0) continue;
-    pixels.delete(key);
     cleared.push([x, y]);
   }
+  return { balls, cleared };
+}
+
+function broadcastSeismicImpact(cleared, uniqueEventKey) {
   if (!cleared.length) return;
+  for (let i = 0; i < cleared.length; i++) {
+    const x = cleared[i][0];
+    const y = cleared[i][1];
+    pixels.delete(`${x},${y}`);
+  }
   const tl = getRoundTimeline(roundIndex);
   const sev = tl.find((e) => e.eventType === "seismic");
   const aftermathMs =
@@ -946,6 +970,38 @@ function applySeismicForLeader(defId, uniqueEventKey) {
     aftermathUntilMs: impactNow + aftermathMs,
   });
   afterTerritoryMutation();
+}
+
+/**
+ * Ручная сейсмика из бота: сначала preview 3 с (баннер + зоны), затем очистка.
+ * @returns {{ ok: true } | { ok: false; reason: "no_cells" }}
+ */
+function scheduleManualSeismicFromBot(defId, uniqueEventKey) {
+  clearPendingManualSeismicSchedule();
+  const { balls, cleared } = computeSeismicClearData(defId);
+  if (!cleared.length) return { ok: false, reason: "no_cells" };
+  const regions = balls.map((b) => ({
+    kind: "manhattan_ball",
+    cx: b.cx,
+    cy: b.cy,
+    r: b.r,
+  }));
+  const impactAtMs = Date.now() + MANUAL_SEISMIC_WARNING_MS;
+  broadcast({
+    type: "seismicPreview",
+    eventId: uniqueEventKey,
+    regions,
+    impactAtMs,
+  });
+  pendingManualSeismicPayload = { cleared, uniqueEventKey };
+  pendingManualSeismicTimer = setTimeout(() => {
+    pendingManualSeismicTimer = null;
+    const p = pendingManualSeismicPayload;
+    pendingManualSeismicPayload = null;
+    if (!p) return;
+    broadcastSeismicImpact(p.cleared, p.uniqueEventKey);
+  }, MANUAL_SEISMIC_WARNING_MS);
+  return { ok: true };
 }
 
 function tickRoundEventTransitions(nowMs) {
@@ -989,6 +1045,7 @@ function resetBattleEventsStateForNewBattleRound() {
   battleEventsApplied = {};
   lastAnnouncedActiveEventIds = new Set();
   manualBattleSlotsByCmd.clear();
+  clearPendingManualSeismicSchedule();
 }
 
 function teamsForMeta() {
@@ -1389,14 +1446,15 @@ function buildScoringContext(nowMs = Date.now()) {
 }
 
 /**
- * Полный авторитетный пересчёт: очки и число занятых клеток по текущему `pixels` и getCellValue.
+ * Полный авторитетный пересчёт: очки (вклад клетки × число клеток команды) и число занятых клеток по `pixels`.
  * Вызывается из buildStatsPayload; при конце раунда — тот же путь (без отдельного кэша на кластере).
  */
 function recalculateAllTeamScores(nowMs = Date.now()) {
   const ctx = buildScoringContext(nowMs);
   if (!ctx) return { agg: new Map(), totalAvailableScore: 0 };
   const agg = aggregateScoresFromPixels(pixels, pixelTeam, ctx);
-  const totalAvailableScore = computeTotalAvailableScore(ctx);
+  let totalAvailableScore = 0;
+  for (const a of agg.values()) totalAvailableScore += a.score;
   return { agg, totalAvailableScore };
 }
 
@@ -3233,7 +3291,7 @@ function buildStatsPayload() {
       pixels: pix,
       score,
       scoreSharePercent,
-      /** Доля суммарно доступных очков (не «% занятой карты»). Совместимость: старые клиенты читали `percent`. */
+      /** Доля от суммы очков всех команд в этом stats (не «% карты»). Совместимость: старые клиенты читали `percent`. */
       percent: scoreSharePercent,
     };
   });
@@ -4709,8 +4767,18 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
       return;
     }
     const seed = `manual_seismic_${now}`;
-    applySeismicForLeader(seed, seed);
-    await telegramSendMessage(chatId, "Сейсмика выполнена (очистка клеток по шарам Манхэттена).");
+    const res = scheduleManualSeismicFromBot(seed, seed);
+    if (!res.ok) {
+      await telegramSendMessage(
+        chatId,
+        "Сейсмика: в зонах удара нет закрашенных клеток (или карта уже пустая в этих шарах)."
+      );
+      return;
+    }
+    await telegramSendMessage(
+      chatId,
+      `Сейсмика: предупреждение игрокам ${MANUAL_SEISMIC_WARNING_MS / 1000} с, затем очистка клеток по шарам Манхэттена.`
+    );
     return;
   }
   const def = resolveManualBattleCommandToTimelineDef(cmd0, roundIndex);

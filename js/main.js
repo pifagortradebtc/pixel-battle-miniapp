@@ -9,7 +9,6 @@ import {
   initEventPresentation,
   resetEventPresentationForRound,
   notifyRoundEventFromServer,
-  notifySeismicPreview,
   syncPremiumBattlePresentation,
   enqueueBaseCapturedPresentation,
   fillPremiumAlertPanel,
@@ -282,6 +281,7 @@ const defeatBtnJoin = document.getElementById("defeat-btn-join");
 const defeatBtnDismiss = document.getElementById("defeat-btn-dismiss");
 const defeatOverlayTitleEl = document.getElementById("defeat-overlay-title");
 const territoryDramaBannerEl = document.getElementById("territory-drama-banner");
+const seismicWarningBannerEl = document.getElementById("seismic-warning-banner");
 const placementFeedbackBannerEl = document.getElementById("placement-feedback-banner");
 const territoryIsolationHudEl = document.getElementById("territory-isolation-hud");
 const defeatFlashEl = document.getElementById("defeat-flash");
@@ -362,15 +362,18 @@ let myTerritoryDangerUntil = 0;
 let myTerritoryLastCellUntil = 0;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let territoryBannerHideTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let seismicBannerHideTimer = null;
 /** Автоскрытие алертов «база / последняя клетка» (мс). */
 const ALERT_AUTO_HIDE_MS = 2000;
 const ALERT_SWIPE_MIN_PX = 44;
 const ALERT_FLY_OUT_PX = 180;
 
-/** @type {{ territory: { cleanup: (() => void) | null }; flag: { cleanup: (() => void) | null } }} */
+/** @type {{ territory: { cleanup: (() => void) | null }; flag: { cleanup: (() => void) | null }; seismic: { cleanup: (() => void) | null } }} */
 const swipeDismissSlots = {
   territory: { cleanup: null },
   flag: { cleanup: null },
+  seismic: { cleanup: null },
 };
 
 function detachSwipeDismissSlot(slot) {
@@ -428,7 +431,7 @@ function flyOutDismissibleBanner(el, dirX, dirY, hideNow) {
 
 /**
  * Смахивание влево / вправо / вверх (вниз игнорируем).
- * @param {"territory" | "flag"} slot
+ * @param {"territory" | "flag" | "seismic"} slot
  */
 function attachSwipeDismissSlot(slot, el, hideNow) {
   detachSwipeDismissSlot(slot);
@@ -482,6 +485,10 @@ function attachSwipeDismissSlot(slot, el, hideNow) {
     if (slot === "flag" && showFlagAlertBanner._hideTimer) {
       clearTimeout(showFlagAlertBanner._hideTimer);
       showFlagAlertBanner._hideTimer = null;
+    }
+    if (slot === "seismic" && seismicBannerHideTimer) {
+      clearTimeout(seismicBannerHideTimer);
+      seismicBannerHideTimer = null;
     }
     flyOutDismissibleBanner(el, ux, uy, hideNow);
   };
@@ -726,6 +733,10 @@ let lastStatsGlobalEvent = null;
 let seismicPreviewClient = null;
 /** Визуальный «хвост» после удара (пыль / трещины). */
 let seismicAftermathUntilMs = 0;
+/** Тремор body.pb-seismic-tremor: превью + несколько секунд после удара (vfxLoop подстраховывает класс). */
+let seismicAfterglowTremorUntilMs = 0;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let boardSeismicShakeClearTimer = null;
 /** Доля доступных очков (score share), для кризис-оверлея при просадке. */
 let lastMyTeamScoreShare = null;
 /** Прогресс захвата флага по защищающейся команде: teamId → { progress, attackerTeamId }. */
@@ -1092,6 +1103,50 @@ function triggerMapShake(ms = 560) {
   setTimeout(() => stageWrapEl.classList.remove("map-shake"), ms);
 }
 
+function stopBoardSeismicShake() {
+  if (boardSeismicShakeClearTimer) {
+    clearTimeout(boardSeismicShakeClearTimer);
+    boardSeismicShakeClearTimer = null;
+  }
+  if (canvas) canvas.classList.remove("map-shake-board", "map-shake-board--hit");
+}
+
+/** Лёгкая тряска канвы на время превью сейсмики (не конфликтует с тремором #stage-wrap). */
+function startBoardSeismicPreviewShake(durationMs = 3500) {
+  if (!canvas) return;
+  stopBoardSeismicShake();
+  canvas.classList.remove("map-shake-board--hit");
+  void canvas.offsetWidth;
+  canvas.classList.add("map-shake-board");
+  boardSeismicShakeClearTimer = setTimeout(() => {
+    boardSeismicShakeClearTimer = null;
+    canvas.classList.remove("map-shake-board");
+  }, durationMs);
+}
+
+/** Крупные толчки в момент удара (~4–5 с). */
+function runBoardSeismicHitShake() {
+  if (!canvas) return;
+  stopBoardSeismicShake();
+  canvas.classList.remove("map-shake-board");
+  void canvas.offsetWidth;
+  canvas.classList.add("map-shake-board--hit");
+  boardSeismicShakeClearTimer = setTimeout(() => {
+    boardSeismicShakeClearTimer = null;
+    canvas.classList.remove("map-shake-board--hit");
+  }, 5000);
+}
+
+function applySeismicTremorBodyOverride() {
+  if (typeof document === "undefined" || !document.body) return;
+  const previewOn =
+    seismicPreviewClient &&
+    typeof seismicPreviewClient.impactAtMs === "number" &&
+    Date.now() < seismicPreviewClient.impactAtMs;
+  const want = previewOn || Date.now() < seismicAfterglowTremorUntilMs;
+  document.body.classList.toggle("pb-seismic-tremor", want);
+}
+
 function clearClientTerritoryIsolation() {
   stopTerritoryIsolationHud();
   territoryIsolationCellMeta.clear();
@@ -1196,6 +1251,46 @@ function showTerritoryDramaBanner(text, durationMs = ALERT_AUTO_HIDE_MS, critica
   territoryBannerHideTimer = setTimeout(() => {
     territoryBannerHideTimer = null;
     hideTerritoryDramaBannerNow();
+  }, durationMs);
+}
+
+const SEISMIC_WARNING_BANNER_MS = 3000;
+
+function hideSeismicWarningBannerNow() {
+  if (!seismicWarningBannerEl) return;
+  if (seismicBannerHideTimer) {
+    clearTimeout(seismicBannerHideTimer);
+    seismicBannerHideTimer = null;
+  }
+  detachSwipeDismissSlot("seismic");
+  resetDismissibleBannerNode(seismicWarningBannerEl);
+  seismicWarningBannerEl.hidden = true;
+}
+
+function showSeismicWarningBanner(
+  title,
+  sub,
+  durationMs = SEISMIC_WARNING_BANNER_MS
+) {
+  if (!seismicWarningBannerEl) return;
+  if (seismicBannerHideTimer) {
+    clearTimeout(seismicBannerHideTimer);
+    seismicBannerHideTimer = null;
+  }
+  detachSwipeDismissSlot("seismic");
+  resetDismissibleBannerNode(seismicWarningBannerEl);
+  fillPremiumAlertPanel(
+    seismicWarningBannerEl,
+    escapeHtml(String(title || "")),
+    escapeHtml(String(sub || "")),
+    "seismic-warn",
+    "event-banner event-banner--swipe-dismiss"
+  );
+  seismicWarningBannerEl.hidden = false;
+  attachSwipeDismissSlot("seismic", seismicWarningBannerEl, hideSeismicWarningBannerNow);
+  seismicBannerHideTimer = setTimeout(() => {
+    seismicBannerHideTimer = null;
+    hideSeismicWarningBannerNow();
   }, durationMs);
 }
 
@@ -1627,9 +1722,7 @@ function updateRoundTimer() {
     }
     if (roundEndsAtMs == null && roundIndexMeta === 0) {
       roundTimerEl.hidden = false;
-      roundTimerEl.textContent = lobbyBeforeGoMeta
-        ? "Свободная игра\nдо «go» в боте"
-        : "Ожидание старта\n«go» в боте";
+      roundTimerEl.textContent = lobbyBeforeGoMeta ? "Разминка" : "Ожидание старта\n«go» в боте";
       syncTournamentWarmupOverlay();
       return;
     }
@@ -2602,6 +2695,8 @@ function onMeta(msg) {
   if (nextRi !== lastRoundIndexForPresentation) {
     lastRoundIndexForPresentation = nextRi;
     resetEventPresentationForRound();
+    seismicAfterglowTremorUntilMs = 0;
+    stopBoardSeismicShake();
   }
   roundIndexMeta = nextRi;
   lobbyBeforeGoMeta = !!msg.lobbyBeforeGo;
@@ -2928,6 +3023,9 @@ function syncEventBanner() {
   if (!online || spectatorMode || gameFinishedMeta) {
     eventBannerEl.hidden = true;
     seismicPreviewClient = null;
+    seismicAfterglowTremorUntilMs = 0;
+    stopBoardSeismicShake();
+    hideSeismicWarningBannerNow();
     syncPremiumBattlePresentation({
       ge: null,
       seismicPreview: null,
@@ -2963,6 +3061,7 @@ function syncEventBanner() {
     roundEndsAtMs,
     leaderboardHint: finalHint,
   });
+  applySeismicTremorBodyOverride();
 
   if (hideLegacyBattle) {
     if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
@@ -2990,17 +3089,6 @@ function syncEventBanner() {
     const sub = ge.subtitle ? String(ge.subtitle) : "";
     const timer = formatBattleCountdown(ge.until);
     eventBannerEl.innerHTML = `<strong>${escapeHtml(String(ge.title))}</strong><div class="event-banner__sub">${escapeHtml(sub)}</div><div class="event-banner__timer">${escapeHtml(timer)}</div>`;
-    return;
-  }
-  if (
-    seismicPreviewClient &&
-    typeof seismicPreviewClient.impactAtMs === "number" &&
-    seismicPreviewClient.impactAtMs > Date.now()
-  ) {
-    eventBannerEl.hidden = false;
-    eventBannerEl.className = "event-banner event-banner--seismic-warn";
-    const timer = formatBattleCountdown(seismicPreviewClient.impactAtMs);
-    eventBannerEl.innerHTML = `<strong>${escapeHtml("SEISMIC ACTIVITY")}</strong><div class="event-banner__sub">${escapeHtml("Some territories will collapse and become neutral")}</div><div class="event-banner__timer">${escapeHtml(timer)}</div>`;
     return;
   }
   if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
@@ -3827,6 +3915,7 @@ function stopMapAnimLoop() {
 }
 
 function vfxLoop(now) {
+  applySeismicTremorBodyOverride();
   try {
     if (boardVfx && canvasVfx) {
       boardVfx.render(now || performance.now(), getVfxTransform());
@@ -4472,7 +4561,13 @@ function connectWs() {
         regions: Array.isArray(msg.regions) ? msg.regions : [],
         impactAtMs: typeof msg.impactAtMs === "number" ? msg.impactAtMs : 0,
       };
-      notifySeismicPreview(seismicPreviewClient);
+      startBoardSeismicPreviewShake(3500);
+      showSeismicWarningBanner(
+        "Землетрясение",
+        "Некоторые ваши пиксели могут быть повреждены.",
+        SEISMIC_WARNING_BANNER_MS
+      );
+      applySeismicTremorBodyOverride();
       syncEventBanner();
       scheduleDraw({ full: true });
       return;
@@ -4515,7 +4610,9 @@ function connectWs() {
       return;
     }
     if (msg.type === "seismicImpact") {
+      hideSeismicWarningBannerNow();
       seismicPreviewClient = null;
+      seismicAfterglowTremorUntilMs = Math.max(seismicAfterglowTremorUntilMs, Date.now() + 4500);
       const au = typeof msg.aftermathUntilMs === "number" ? msg.aftermathUntilMs : 0;
       if (au > Date.now()) seismicAftermathUntilMs = au;
       const cells = Array.isArray(msg.cells) ? msg.cells : [];
@@ -4528,7 +4625,8 @@ function connectWs() {
         boardVfx.seismicCrackBurst(cells);
         flushBoardVfxFrame();
       }
-      triggerMapShake(850);
+      runBoardSeismicHitShake();
+      applySeismicTremorBodyOverride();
       syncEventBanner();
       scheduleDraw({ full: true });
       return;
@@ -6080,7 +6178,7 @@ function draw(time = performance.now(), drawOpts = {}) {
             const L = layers[li];
             const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
             if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
-              ctx.fillStyle = `rgba(255, 210, 45, ${0.4 + pulseEv * 0.14})`;
+              ctx.fillStyle = `rgba(255, 220, 60, ${0.55 + pulseEv * 0.22})`;
               ctx.fillRect(px, py, cw, ch);
             }
             const econKinds = [
@@ -6093,10 +6191,10 @@ function draw(time = performance.now(), drawOpts = {}) {
             if (econKinds.includes(L.kind)) {
               const zone = cellInEconomicLayer(L, gx, gy);
               if (zone === "boom") {
-                ctx.fillStyle = `rgba(55, 255, 130, ${0.32 + pulseEv * 0.12})`;
+                ctx.fillStyle = `rgba(70, 255, 140, ${0.42 + pulseEv * 0.18})`;
                 ctx.fillRect(px, py, cw, ch);
               } else if (zone === "rec") {
-                ctx.fillStyle = `rgba(110, 175, 255, ${0.34 + pulseEv * 0.1})`;
+                ctx.fillStyle = `rgba(120, 195, 255, ${0.44 + pulseEv * 0.14})`;
                 ctx.fillRect(px, py, cw, ch);
               }
             }
@@ -6107,7 +6205,7 @@ function draw(time = performance.now(), drawOpts = {}) {
               ctx.fillStyle = `rgba(35, 50, 95, ${Math.min(0.58, (1 - m) * 0.75)})`;
               ctx.fillRect(px, py, cw, ch);
             } else if (m > 1.08) {
-              ctx.fillStyle = `rgba(255, 205, 70, ${Math.min(0.48, (m - 1) * 0.72)})`;
+              ctx.fillStyle = `rgba(255, 215, 85, ${Math.min(0.58, (m - 1) * 0.85)})`;
               ctx.fillRect(px, py, cw, ch);
             }
           }
@@ -6123,6 +6221,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         "economic_rotation",
         "resource_surge",
       ];
+      const blackOutlinePulse = 0.42 + 0.58 * (0.5 + 0.5 * Math.sin(time * 0.0075));
       for (let oli = 0; oli < layers.length; oli++) {
         const L = layers[oli];
         if (goldKindsOutline.includes(L.kind) && L.rect) {
@@ -6132,7 +6231,11 @@ function draw(time = performance.now(), drawOpts = {}) {
           const sw = r.w * cell;
           const sh = r.h * cell;
           const p = 0.78 + pulseEv * 0.2;
+          const padOut = Math.max(4, cell * 0.5);
           ctx.save();
+          ctx.strokeStyle = `rgba(0, 0, 0, ${0.55 * blackOutlinePulse + 0.2})`;
+          ctx.lineWidth = Math.max(5, cell * 0.55);
+          ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
           ctx.strokeStyle = `rgba(255, 200, 30, ${0.95 * p})`;
           ctx.lineWidth = Math.max(3.5, cell * 0.42);
           ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
@@ -6152,7 +6255,11 @@ function draw(time = performance.now(), drawOpts = {}) {
             const sy0 = offsetY + rr.y0 * cell;
             const sw = rr.w * cell;
             const sh = rr.h * cell;
+            const padOut = Math.max(4, cell * 0.48);
             ctx.save();
+            ctx.strokeStyle = `rgba(0, 0, 0, ${0.52 * blackOutlinePulse + 0.22})`;
+            ctx.lineWidth = Math.max(5, cell * 0.52);
+            ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
             ctx.strokeStyle = boom ? "rgba(30, 255, 110, 0.95)" : "rgba(120, 200, 255, 0.95)";
             ctx.lineWidth = Math.max(3.5, cell * 0.4);
             ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
@@ -6283,7 +6390,7 @@ function draw(time = performance.now(), drawOpts = {}) {
   }
 
   /* Флаги баз: HP 0–20, реген на клиенте по lastHitAt; визуальные стадии опасности. */
-  if (!lite && online && teamsMeta && cell >= 2) {
+  if (!lite && online && teamsMeta && cell >= 1.5) {
     const shNowF = Date.now();
     const maxH = FLAG_BASE_MAX_HP;
     for (const t of teamsMeta) {
@@ -6316,34 +6423,40 @@ function draw(time = performance.now(), drawOpts = {}) {
               : 0;
       const teamHex = t.color || teamColor(t.id);
       const { r, g, b } = hexToRgb(teamHex);
-      const mastW = Math.max(2.5, cell * 0.14);
-      const mastX = px + cw * 0.72;
+      const rb = Math.min(255, Math.round(r * 1.14 + 28));
+      const gb = Math.min(255, Math.round(g * 1.14 + 28));
+      const bb = Math.min(255, Math.round(b * 1.14 + 28));
+      const mastW = Math.max(4, cell * 0.24);
+      const mastX = px + cw * 0.66;
       const topY = py - FLAG_VISUAL_CELLS_ABOVE * ch;
-      const wave = Math.sin(time * 0.0033 + fgx * 0.35 + fgy * 0.22) * ch * 0.09;
+      const wave = Math.sin(time * 0.0033 + fgx * 0.35 + fgy * 0.22) * ch * 0.11;
       ctx.save();
-      ctx.fillStyle = "rgba(0,0,0,0.22)";
-      ctx.fillRect(mastX + 1.2, topY + 1.2, mastW, py + ch - topY);
-      ctx.fillStyle = "rgba(32,32,36,0.94)";
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(mastX + 1.6, topY + 1.6, mastW, py + ch - topY);
+      ctx.fillStyle = "rgba(48,48,52,0.98)";
       ctx.fillRect(mastX, topY, mastW, py + ch - topY);
-      const cLeft = px + cw * 0.05;
-      const cTop = topY + ch * 0.12;
-      const cW = cw * 0.64;
-      const cH = py + ch * 0.9 - cTop;
+      const cLeft = px - cw * 0.1;
+      const cTop = topY + ch * 0.06;
+      const cW = cw * 1.02;
+      const cH = py + ch * 0.92 - cTop;
       ctx.beginPath();
       ctx.moveTo(mastX, cTop + wave * 0.25);
       ctx.lineTo(cLeft + cW, cTop + wave);
       ctx.lineTo(cLeft + cW * 0.9, cTop + cH + wave * 0.15);
       ctx.lineTo(cLeft, cTop + cH * 0.96);
       ctx.closePath();
-      const clothA = 0.88 + pulseF * 0.08 - pulseRed * 0.25;
-      ctx.fillStyle = `rgba(${r},${g},${b},${Math.max(0.45, clothA)})`;
+      const clothA = 0.94 + pulseF * 0.05 - pulseRed * 0.22;
+      ctx.fillStyle = `rgba(${rb},${gb},${bb},${Math.max(0.9, clothA)})`;
       ctx.fill();
       if (pulseRed > 0) {
         ctx.fillStyle = `rgba(255, 40, 60, ${pulseRed * 0.55})`;
         ctx.fill();
       }
-      ctx.strokeStyle = "rgba(0,0,0,0.48)";
-      ctx.lineWidth = Math.max(1, cell * 0.05);
+      ctx.strokeStyle = "rgba(0,0,0,0.62)";
+      ctx.lineWidth = Math.max(1.5, cell * 0.085);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(255,255,255,${0.42 + pulseF * 0.12})`;
+      ctx.lineWidth = Math.max(1, cell * 0.045);
       ctx.stroke();
       ctx.restore();
       /* Не заливаем якорь базы цветом атакующего: клетка остаётся цветом защитника в данных и на канве;
@@ -6357,11 +6470,14 @@ function draw(time = performance.now(), drawOpts = {}) {
         ? `rgba(255,90,40,${0.5 + 0.4 * Math.sin(time * 0.1)})`
         : dangerCrit
           ? `rgba(255,50,50,${0.55 + 0.35 * Math.sin(time * 0.08)})`
-          : `rgba(0,0,0,${0.35 + pulseF * 0.12})`;
-      ctx.lineWidth = Math.max(1, cell * (dangerHpZero ? 0.12 : dangerCrit ? 0.1 : 0.06));
+          : `rgba(255,255,255,${0.5 + pulseF * 0.22})`;
+      ctx.lineWidth = Math.max(2, cell * (dangerHpZero ? 0.14 : dangerCrit ? 0.12 : 0.095));
       ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
-      const barW = cw * 0.92;
-      const barH = Math.max(4, cell * 0.17);
+      ctx.strokeStyle = "rgba(0,0,0,0.45)";
+      ctx.lineWidth = Math.max(1, cell * 0.055);
+      ctx.strokeRect(px + 1.5, py + 1.5, cw - 3, ch - 3);
+      const barW = cw * 0.94;
+      const barH = Math.max(5, cell * 0.22);
       const bx = px + (cw - barW) / 2;
       const by = py + ch - barH - 2;
       ctx.fillStyle = "rgba(0,0,0,0.55)";
@@ -6370,12 +6486,12 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.fillStyle =
         displayHp <= 5 ? "#ff4444" : displayHp <= 10 ? "#ffaa33" : displayHp < maxH ? "#66dd88" : "rgba(100,220,130,0.85)";
       ctx.fillRect(bx, by, barW * hpFrac, barH);
-      ctx.strokeStyle = "rgba(255,255,255,0.25)";
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(255,255,255,0.45)";
+      ctx.lineWidth = Math.max(1, cell * 0.035);
       ctx.strokeRect(bx + 0.5, by + 0.5, barW - 1, barH - 1);
-      if (cell >= 4) {
+      if (cell >= 2.8) {
         ctx.save();
-        const fs = Math.max(7, Math.min(12, cell * 0.34));
+        const fs = Math.max(8, Math.min(15, cell * 0.4));
         ctx.font = `700 ${fs}px system-ui,sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";

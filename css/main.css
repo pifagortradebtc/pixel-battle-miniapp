@@ -1785,6 +1785,17 @@ a.overlay__btn {
   animation: map-shake-anim 0.68s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
 }
 
+/* Тряска только канвы: не конфликтует с body.pb-seismic-tremor #stage-wrap */
+.board.map-shake-board {
+  transform-origin: center center;
+  animation: map-shake-anim 0.62s cubic-bezier(0.36, 0.07, 0.19, 0.97) infinite;
+}
+
+.board.map-shake-board--hit {
+  transform-origin: center center;
+  animation: map-shake-anim 0.52s cubic-bezier(0.36, 0.07, 0.19, 0.97) 9;
+}
+
 @keyframes map-shake-anim {
   0%,
   100% {

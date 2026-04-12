@@ -465,7 +465,7 @@ export function enqueueBaseCapturedPresentation(attackerLabel, defenderLabel) {
  * @param {HTMLElement} el
  * @param {string} titleHtml escaped
  * @param {string} subHtml escaped
- * @param {'flag-warn'|'flag-danger'|'flag-crit'|'territory-warn'|'territory-crit'} variant
+ * @param {'flag-warn'|'flag-danger'|'flag-crit'|'territory-warn'|'territory-crit'|'seismic-warn'} variant
  * @param {string} [extraClasses] доп. классы (например `event-banner event-banner--swipe-dismiss`)
  */
 export function fillPremiumAlertPanel(el, titleHtml, subHtml, variant, extraClasses = "") {
@@ -553,8 +553,8 @@ export function syncPremiumBattlePresentation(opts) {
   if (seismicPreview && typeof seismicPreview.impactAtMs === "number" && seismicPreview.impactAtMs > Date.now()) {
     chips.push({
       kind: "seismic_preview",
-      title: "SEISMIC",
-      status: "Удар по карте",
+      title: "СЕЙСМИКА",
+      status: "Скоро удар по карте",
       untilMs: seismicPreview.impactAtMs,
       theme: "seismic",
     });
