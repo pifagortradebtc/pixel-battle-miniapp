@@ -263,6 +263,9 @@ const browserTelegramInviteDismiss = document.getElementById("browser-telegram-i
 const leaderboardPanel = document.getElementById("leaderboard-panel");
 const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
+const leaderboardExpandBtn = document.getElementById("leaderboard-expand-btn");
+const hudRoundBadgeEl = document.getElementById("hud-round-badge");
+const hudMyScoreEl = document.getElementById("hud-my-score");
 const roundTimerEl = document.getElementById("round-timer");
 const spectatorBadgeEl = document.getElementById("spectator-badge");
 const walletBalanceEl = document.getElementById("wallet-balance");
@@ -287,6 +290,9 @@ const seismicWarningBannerEl = document.getElementById("seismic-warning-banner")
 const placementFeedbackBannerEl = document.getElementById("placement-feedback-banner");
 const territoryIsolationHudEl = document.getElementById("territory-isolation-hud");
 const defeatFlashEl = document.getElementById("defeat-flash");
+const treasureFoundOverlayEl = document.getElementById("treasure-found-overlay");
+const treasureFoundAmountEl = document.getElementById("treasure-found-amount");
+const treasureFoundDismissBtn = document.getElementById("treasure-found-dismiss");
 const stageWrapEl = document.getElementById("stage-wrap");
 const btnToolbarBase = document.getElementById("btn-toolbar-base");
 const roundStartSplashEl = document.getElementById("round-start-splash");
@@ -707,6 +713,19 @@ let teamsMeta = null;
 let teamCounts = {};
 /** Последние строки рейтинга (stats) — подсказка «вы впереди / отстаёте» в финале. */
 let lastLeaderboardRows = [];
+/** Последний пакет stats для перерисовки при смене режима лидерборда. */
+let lastStatsPayload = null;
+/** Очки команд на прошлом кадре рейтинга — для лёгкой анимации при росте. */
+const lastLbScoreByTeam = new Map();
+const LB_COMPACT_TOP = 5;
+const LB_EXPANDED_TOP = 12;
+const LB_EXPANDED_STORAGE_KEY = "pb-lb-expanded";
+let leaderboardExpanded = false;
+try {
+  leaderboardExpanded = sessionStorage.getItem(LB_EXPANDED_STORAGE_KEY) === "1";
+} catch {
+  leaderboardExpanded = false;
+}
 /** Сброс кинематографии событий при смене раунда. */
 let lastRoundIndexForPresentation = -1;
 let maxPerTeam = 200;
@@ -1716,24 +1735,29 @@ function updateRoundTimer() {
     const online = wantOnline && getWsUrl();
     if (!online) {
       roundTimerEl.hidden = true;
+      roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
       return;
     }
     if (gameFinishedMeta) {
       roundTimerEl.hidden = true;
+      roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
       return;
     }
     if (roundEndsAtMs == null && roundIndexMeta === 0) {
       roundTimerEl.hidden = false;
+      roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
       roundTimerEl.textContent = lobbyBeforeGoMeta ? "Разминка" : "Ожидание старта\n«go» в боте";
       syncTournamentWarmupOverlay();
       return;
     }
     if (roundEndsAtMs == null) {
       roundTimerEl.hidden = true;
+      roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
       syncTournamentWarmupOverlay();
       return;
     }
     roundTimerEl.hidden = false;
+    roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
     if (isClientWarmupPhase()) {
       const wLeft = Math.max(0, (playStartsAtMs || 0) - Date.now());
       const ws = Math.max(0, Math.ceil(wLeft / 1000));
@@ -1750,10 +1774,13 @@ function updateRoundTimer() {
         const m = Math.floor((s % 3600) / 60);
         const sec = s % 60;
         roundTimerEl.textContent = h > 0 ? `Бой ${h}ч ${m}м` : m > 0 ? `Бой ${m}м ${sec}с` : `Бой ${sec}с`;
+        if (ms <= 3 * 60 * 1000) roundTimerEl.classList.add("toolbar__round--critical");
+        else if (ms <= 10 * 60 * 1000) roundTimerEl.classList.add("toolbar__round--urgent");
       }
     }
     syncTournamentWarmupOverlay();
   } finally {
+    syncHudRoundBadge();
     syncEventBanner();
     syncTeamBuffBanner();
     syncToolbarHeightCssVar();
@@ -1902,47 +1929,159 @@ function updateTeamBadge() {
   syncTeamBadgeColorSwatch();
 }
 
+function formatHudScore(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  const num = Number(n);
+  const ax = Math.abs(num);
+  if (ax >= 1_000_000) {
+    const v = num / 1_000_000;
+    const s = ax >= 10_000_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
+    return `${s}M`;
+  }
+  if (ax >= 1000) {
+    const v = num / 1000;
+    const s = ax >= 10_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
+    return `${s}K`;
+  }
+  const rounded = Math.round(num * 1000) / 1000;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
+function syncLeaderboardPanelMode() {
+  if (!leaderboardPanel || !leaderboardExpandBtn) return;
+  leaderboardPanel.classList.toggle("lb-widget--expanded", leaderboardExpanded);
+  leaderboardPanel.classList.toggle("lb-widget--compact", !leaderboardExpanded);
+  leaderboardExpandBtn.setAttribute("aria-expanded", leaderboardExpanded ? "true" : "false");
+  leaderboardExpandBtn.setAttribute(
+    "aria-label",
+    leaderboardExpanded ? "Свернуть рейтинг" : "Развернуть полный рейтинг"
+  );
+}
+
+function syncHudRoundBadge() {
+  if (!hudRoundBadgeEl) return;
+  const online = wantOnline && getWsUrl();
+  if (!online || gameFinishedMeta) {
+    hudRoundBadgeEl.hidden = true;
+    return;
+  }
+  const labels = ["Массовый", "Полуфинал", "Финал команд", "Дуэль 1×1"];
+  const ri = Math.min(Math.max(roundIndexMeta | 0, 0), 3);
+  hudRoundBadgeEl.textContent = labels[ri] || `Раунд ${ri + 1}`;
+  hudRoundBadgeEl.hidden = false;
+}
+
 function renderLeaderboard(msg) {
   if (!onlineCountEl || !leaderboardListEl) return;
+  lastStatsPayload = msg;
   if (msg.globalEvent) {
     lastStatsGlobalEvent = msg.globalEvent;
     if (walletState) walletState.globalEvent = msg.globalEvent;
   }
-  lastLeaderboardRows = Array.isArray(msg.rows) ? msg.rows : [];
+  const rows = Array.isArray(msg.rows) ? msg.rows : [];
+  lastLeaderboardRows = rows;
   onlineCountEl.textContent = String(msg.online ?? 0);
+  syncLeaderboardPanelMode();
+
+  const prevScores = new Map(lastLbScoreByTeam);
+  const topN = leaderboardExpanded ? LB_EXPANDED_TOP : LB_COMPACT_TOP;
+  const slice = rows.slice(0, topN);
+  const myRow = myTeamId != null ? rows.find((r) => (r.teamId | 0) === (myTeamId | 0)) : null;
+  const myInSlice = !!(myRow && slice.some((r) => (r.teamId | 0) === (myTeamId | 0)));
+
   leaderboardListEl.replaceChildren();
-  for (const row of msg.rows || []) {
+
+  for (let i = 0; i < slice.length; i++) {
+    const row = slice[i];
     const li = document.createElement("li");
-    li.className = "leaderboard__row";
-    if (myTeamId != null && row.teamId === myTeamId) li.classList.add("leaderboard__row--mine");
-    li.style.borderLeftColor = row.color || "#888";
-    const top = document.createElement("div");
-    top.className = "leaderboard__topline";
-    const rank = document.createElement("span");
-    rank.className = "leaderboard__rank";
-    rank.textContent = `#${row.rank}`;
+    li.className = "lb-row";
+    li.style.setProperty("--lb-accent", row.color || "#64748b");
+    if ((row.rank | 0) === 1) li.classList.add("lb-row--leader");
+    if (myTeamId != null && (row.teamId | 0) === (myTeamId | 0)) li.classList.add("lb-row--mine");
+
+    const main = document.createElement("div");
+    main.className = "lb-row__main";
+    const rankEl = document.createElement("span");
+    rankEl.className = "lb-row__rank";
+    rankEl.textContent = String(row.rank | 0);
     const em = document.createElement("span");
-    em.className = "leaderboard__emoji";
+    em.className = "lb-row__emoji";
     em.textContent = row.emoji || "";
-    top.append(rank, em);
-    const name = document.createElement("div");
-    name.className = "leaderboard__name";
+    const name = document.createElement("span");
+    name.className = "lb-row__name";
     setCompactTeamName(name, row.name || "");
-    const meta = document.createElement("div");
-    meta.className = "leaderboard__meta";
-    const players = typeof row.players === "number" ? row.players : 0;
+    const scoreEl = document.createElement("span");
+    scoreEl.className = "lb-row__score";
     const sc = typeof row.score === "number" ? row.score : null;
-    const behind =
-      typeof row.pointsBehindLeader === "number" && row.rank > 1 && row.pointsBehindLeader > 0
-        ? ` · −${Math.round(row.pointsBehindLeader * 1000) / 1000} до лидера по очкам`
-        : "";
-    meta.textContent =
-      sc != null ? `Очки ${sc}${behind} · ${players} чел.` : `${players} чел.`;
-    li.append(top, name, meta);
+    scoreEl.textContent = formatHudScore(sc);
+    const prevSc = prevScores.get(row.teamId | 0);
+    if (prevSc != null && sc != null && sc > prevSc) {
+      scoreEl.classList.add("lb-row__score--tick");
+      setTimeout(() => scoreEl.classList.remove("lb-row__score--tick"), 550);
+    }
+    main.append(rankEl, em, name, scoreEl);
+    li.append(main);
+
+    if (leaderboardExpanded) {
+      const sub = document.createElement("div");
+      sub.className = "lb-row__sub";
+      const players = typeof row.players === "number" ? row.players : 0;
+      const behind =
+        typeof row.pointsBehindLeader === "number" &&
+        (row.rank | 0) > 1 &&
+        row.pointsBehindLeader > 0
+          ? ` · −${formatHudScore(row.pointsBehindLeader)} до лидера`
+          : "";
+      sub.textContent = `${players} в команде${behind}`;
+      li.append(sub);
+    }
     leaderboardListEl.appendChild(li);
   }
+
+  if (myRow && !myInSlice && !spectatorMode && myTeamId != null && !gameFinishedMeta) {
+    const sep = document.createElement("li");
+    sep.className = "lb-row lb-row--sep";
+    sep.textContent = "···";
+    leaderboardListEl.appendChild(sep);
+    const yours = document.createElement("li");
+    yours.className = "lb-row lb-row--mine lb-row--yours";
+    yours.style.setProperty("--lb-accent", myRow.color || "#5288c1");
+    const yMain = document.createElement("div");
+    yMain.className = "lb-row__main";
+    const yLabel = document.createElement("span");
+    yLabel.className = "lb-row__name";
+    yLabel.textContent = "Ваша команда";
+    yLabel.style.flex = "1";
+    const ySc = document.createElement("span");
+    ySc.className = "lb-row__score";
+    ySc.textContent = `#${myRow.rank | 0} · ${formatHudScore(myRow.score)}`;
+    yMain.append(yLabel, ySc);
+    yours.append(yMain);
+    leaderboardListEl.appendChild(yours);
+  }
+
+  lastLbScoreByTeam.clear();
+  for (let ri = 0; ri < rows.length; ri++) {
+    const r = rows[ri];
+    if (typeof r.score === "number") lastLbScoreByTeam.set(r.teamId | 0, r.score);
+  }
+
+  if (hudMyScoreEl) {
+    if (myRow && typeof myRow.score === "number" && myTeamId != null && !spectatorMode && !gameFinishedMeta) {
+      const p = prevScores.get(myTeamId | 0);
+      if (p != null && myRow.score > p) {
+        hudMyScoreEl.classList.add("hud-my-score--pop");
+        setTimeout(() => hudMyScoreEl.classList.remove("hud-my-score--pop"), 500);
+      }
+      hudMyScoreEl.textContent = `Вы · ${formatHudScore(myRow.score)}`;
+      hudMyScoreEl.hidden = false;
+    } else {
+      hudMyScoreEl.hidden = true;
+    }
+  }
+
   if (myTeamId != null && !spectatorMode && !gameFinishedMeta) {
-    const mine = (msg.rows || []).find((r) => r.teamId === myTeamId);
+    const mine = rows.find((r) => (r.teamId | 0) === (myTeamId | 0));
     const share =
       mine && typeof mine.scoreSharePercent === "number"
         ? mine.scoreSharePercent
@@ -1955,6 +2094,7 @@ function renderLeaderboard(msg) {
     }
     lastMyTeamScoreShare = share;
   }
+  syncHudRoundBadge();
   syncEventBanner();
 }
 
@@ -2298,6 +2438,26 @@ function hideDefeatOverlay() {
   if (defeatOverlayEl) defeatOverlayEl.hidden = true;
 }
 
+function hideTreasureFoundOverlay() {
+  if (treasureFoundOverlayEl) treasureFoundOverlayEl.hidden = true;
+}
+
+/**
+ * @param {number} quant
+ */
+function showTreasureFoundOverlay(quant) {
+  if (!treasureFoundOverlayEl || !treasureFoundAmountEl) return;
+  const q = quant | 0;
+  if (q < 1) return;
+  treasureFoundAmountEl.textContent = `+${q} ${quantWord(q)}`;
+  treasureFoundOverlayEl.hidden = false;
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
+  } catch {
+    /* ignore */
+  }
+}
+
 function cancelTeamDefeatUiTimer() {
   if (teamDefeatUiTimer) {
     clearTimeout(teamDefeatUiTimer);
@@ -2555,6 +2715,20 @@ function setupCreateTeamUi() {
   defeatBtnDismiss?.addEventListener("click", hideDefeatOverlay);
   defeatOverlayEl?.addEventListener("click", (e) => {
     if (e.target === defeatOverlayEl) hideDefeatOverlay();
+  });
+  treasureFoundDismissBtn?.addEventListener("click", hideTreasureFoundOverlay);
+  treasureFoundOverlayEl?.addEventListener("click", (e) => {
+    if (e.target === treasureFoundOverlayEl) hideTreasureFoundOverlay();
+  });
+  leaderboardExpandBtn?.addEventListener("click", () => {
+    leaderboardExpanded = !leaderboardExpanded;
+    try {
+      sessionStorage.setItem(LB_EXPANDED_STORAGE_KEY, leaderboardExpanded ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    syncLeaderboardPanelMode();
+    if (lastStatsPayload) renderLeaderboard(lastStatsPayload);
   });
   roundEndedDismissBtn?.addEventListener("click", hideRoundEndedOverlay);
   btnToolbarBase?.addEventListener("click", () => {
@@ -3006,15 +3180,6 @@ function computeLeaderboardGapHint() {
   return "";
 }
 
-function formatBattleCountdown(untilMs) {
-  const left = untilMs - Date.now();
-  if (left <= 0) return "0:00";
-  const s = Math.max(0, Math.ceil(left / 1000));
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${String(sec).padStart(2, "0")}`;
-}
-
 function getClientGlobalEventSnapshot() {
   return walletState?.globalEvent || lastStatsGlobalEvent;
 }
@@ -3085,21 +3250,10 @@ function syncEventBanner() {
     return;
   }
 
-  const prim = ge?.battleEvents?.primary;
-  const dramaticBanner =
-    prim &&
-    (prim.dramatic === true ||
-      prim.kind === "dramatic_pressure" ||
-      prim.style === "final_hour" ||
-      prim.style === "final_ten");
   if (ge && ge.active && ge.title && typeof ge.until === "number" && ge.until > Date.now()) {
-    eventBannerEl.hidden = false;
-    eventBannerEl.className = dramaticBanner
-      ? "event-banner event-banner--battle event-banner--dramatic"
-      : "event-banner event-banner--battle";
-    const sub = ge.subtitle ? String(ge.subtitle) : "";
-    const timer = formatBattleCountdown(ge.until);
-    eventBannerEl.innerHTML = `<strong>${escapeHtml(String(ge.title))}</strong><div class="event-banner__sub">${escapeHtml(sub)}</div><div class="event-banner__timer">${escapeHtml(timer)}</div>`;
+    /* Активное событие боя: заголовок и таймер только в #event-hud-dock, без закреплённой верхней «золотой» плашки. */
+    eventBannerEl.hidden = true;
+    eventBannerEl.textContent = "";
     return;
   }
   if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
@@ -4406,6 +4560,7 @@ function connectWs() {
       myTeamId = sess?.teamId ?? null;
     }
     if (leaderboardPanel) leaderboardPanel.hidden = false;
+    syncLeaderboardPanelMode();
     setFooterMode();
     updateRoundTimer();
     startMapAnimLoop();
@@ -5295,6 +5450,11 @@ function connectWs() {
     }
     if (msg.type === "wallet") {
       applyWalletFromServer(msg);
+      return;
+    }
+    if (msg.type === "treasureFound") {
+      const q = typeof msg.quant === "number" ? msg.quant | 0 : 0;
+      if (q > 0) showTreasureFoundOverlay(q);
       return;
     }
     if (msg.type === "purchaseVfx") {

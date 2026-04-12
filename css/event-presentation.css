@@ -334,16 +334,16 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 
-/* ——— Док HUD (правый верх под тулбаром) ——— */
+/* ——— Док HUD: правый верх под тулбаром (таймеры активных событий) ——— */
 .event-hud-dock {
   position: fixed;
   top: calc(52px + env(safe-area-inset-top, 0px));
-  left: 8px;
-  right: auto;
+  left: auto;
+  right: 8px;
   z-index: 520;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: 8px;
   max-width: min(340px, calc(100vw - 16px));
   pointer-events: none;
@@ -357,11 +357,11 @@
   gap: 10px;
   padding: 10px 14px 10px 14px;
   border-radius: 12px;
-  background: rgba(10, 12, 20, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(10, 12, 20, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
   overflow: hidden;
   animation: hud-chip-enter 0.48s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -369,11 +369,12 @@
 .event-hud-chip::before {
   content: "";
   position: absolute;
-  left: 0;
+  right: 0;
+  left: auto;
   top: 8px;
   bottom: 8px;
   width: 3px;
-  border-radius: 0 3px 3px 0;
+  border-radius: 3px 0 0 3px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.08));
   opacity: 0.9;
 }
@@ -394,7 +395,7 @@
 @keyframes hud-chip-enter {
   from {
     opacity: 0;
-    transform: translateX(-14px) scale(0.96);
+    transform: translateX(14px) scale(0.96);
   }
   to {
     opacity: 1;

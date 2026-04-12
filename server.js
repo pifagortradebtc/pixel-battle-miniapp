@@ -71,6 +71,7 @@ import {
   computeIsolatedTerritoryGroups,
 } from "./lib/territory-isolation.js";
 import { isWorldMapWaterPixel } from "./lib/world-map-water.js";
+import { buildRandomTreasureMap } from "./lib/map-treasures.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -475,6 +476,12 @@ let roundEnding = false;
 let gameFinished = false;
 /** Ключи playerKey, допущенные в текущий раунд (после 0-го — только победители прошлого). Пустой при roundIndex===0 = не используется. */
 let eligiblePlayerKeys = new Set();
+/** Восстановление кладов с диска после пересборки сетки (перезапуск в том же раунде). */
+let pendingTreasureRestore = null;
+/** Ключ "x,y" → бонус в квантах (1..200). */
+let treasureQuantByCell = new Map();
+/** Уже выданные клады по ключу клетки. */
+let treasureClaimedKeys = new Set();
 
 function sanitizeTeamName(s) {
   return String(s ?? "")
@@ -1158,6 +1165,10 @@ function saveRoundState() {
         winnerTokensByPlayerKey,
         battleEventsApplied,
         manualBattleSlots: Object.fromEntries(manualBattleSlotsByCmd),
+        treasureGridW: gridW,
+        treasureGridH: gridH,
+        mapTreasures: Object.fromEntries(treasureQuantByCell),
+        mapTreasureClaimed: [...treasureClaimedKeys],
       }),
       "utf8"
     );
@@ -1233,6 +1244,23 @@ function loadRoundState() {
           if (Number.isFinite(u) && u > 0) manualBattleSlotsByCmd.set(normalizeManualBattleCmdKey(k), u);
         }
       }
+      pendingTreasureRestore = null;
+      const tw = typeof j.treasureGridW === "number" ? j.treasureGridW | 0 : 0;
+      const th = typeof j.treasureGridH === "number" ? j.treasureGridH | 0 : 0;
+      const expectSz = gridSizeForRoundIndex(roundIndex);
+      if (
+        j.mapTreasures &&
+        typeof j.mapTreasures === "object" &&
+        !Array.isArray(j.mapTreasures) &&
+        tw === expectSz &&
+        th === expectSz &&
+        tw > 0
+      ) {
+        pendingTreasureRestore = {
+          mapTreasures: j.mapTreasures,
+          claimed: Array.isArray(j.mapTreasureClaimed) ? j.mapTreasureClaimed.filter((x) => typeof x === "string") : [],
+        };
+      }
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
@@ -1246,6 +1274,7 @@ function loadRoundState() {
       manualBattleSlotsByCmd.clear();
       roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
       round0WarmupMs = WARMUP_MS;
+      pendingTreasureRestore = null;
       saveRoundState();
     }
   } catch (e) {
@@ -1262,6 +1291,7 @@ function loadRoundState() {
     manualBattleSlotsByCmd.clear();
     roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
     round0WarmupMs = WARMUP_MS;
+    pendingTreasureRestore = null;
   }
 }
 
@@ -1415,6 +1445,7 @@ function rebuildLandFromRound(ri) {
   }
   clearAllFlagCaptureState();
   afterTerritoryMutation();
+  applyTreasuresAfterLandRebuild();
 }
 
 function cellIsLand(x, y) {
@@ -1428,6 +1459,53 @@ function cellAllowsPixelPlacement(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
   if (!playableGrid || playableGrid.length !== gridW * gridH) return cellIsLand(x, y);
   return playableGrid[y * gridW + x] !== 0;
+}
+
+function regenerateMapTreasures() {
+  treasureQuantByCell = new Map();
+  treasureClaimedKeys = new Set();
+  if (!playableGrid || playableGrid.length !== gridW * gridH) return;
+  let playable = 0;
+  for (let i = 0; i < playableGrid.length; i++) {
+    if (playableGrid[i]) playable++;
+  }
+  const raw = process.env.MAP_TREASURE_COUNT;
+  let target = NaN;
+  if (raw != null && String(raw).trim() !== "") {
+    const n = parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n >= 0) target = n;
+  }
+  if (!Number.isFinite(target) || target <= 0) {
+    target = Math.min(900, Math.max(150, Math.floor(playable * 0.006)));
+  }
+  target = Math.min(target | 0, playable);
+  if (target <= 0) return;
+  treasureQuantByCell = buildRandomTreasureMap(playableGrid, gridW, gridH, target);
+}
+
+function applyTreasuresAfterLandRebuild() {
+  if (pendingTreasureRestore && typeof pendingTreasureRestore.mapTreasures === "object") {
+    treasureQuantByCell = new Map();
+    treasureClaimedKeys = new Set();
+    for (const [ks, v] of Object.entries(pendingTreasureRestore.mapTreasures)) {
+      const q = Number(v);
+      if (!Number.isFinite(q) || q < 1 || q > 200) continue;
+      const parts = String(ks).split(",");
+      const sx = Number(parts[0]);
+      const sy = Number(parts[1]);
+      if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+      const xi = sx | 0;
+      const yi = sy | 0;
+      if (!cellAllowsPixelPlacement(xi, yi)) continue;
+      treasureQuantByCell.set(`${xi},${yi}`, q | 0);
+    }
+    for (const c of pendingTreasureRestore.claimed) {
+      if (typeof c === "string" && c) treasureClaimedKeys.add(c);
+    }
+    pendingTreasureRestore = null;
+  } else {
+    regenerateMapTreasures();
+  }
 }
 
 /** Контекст для lib/scoring.js: roundIndex, сетка, суша, снимок событий боя. */
@@ -4485,7 +4563,24 @@ wss.on("connection", (ws, req) => {
       broadcast({ type: "pixel", x, y, t: teamId, ownerPlayerKey: pk, shieldedUntil: 0 });
       scheduleStatsBroadcast();
       afterTerritoryMutation();
+
+      let foundTreasureQuant = 0;
+      if (treasureQuantByCell.has(key) && !treasureClaimedKeys.has(key)) {
+        const tq = treasureQuantByCell.get(key) | 0;
+        if (tq >= 1 && tq <= 200) {
+          treasureClaimedKeys.add(key);
+          foundTreasureQuant = tq;
+          if (!isDevUnlimitedWallet(pk)) {
+            await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}` });
+          }
+          saveRoundState();
+        }
+      }
+
       safeSend(ws, await buildWalletPayload(ws));
+      if (foundTreasureQuant > 0) {
+        safeSend(ws, { type: "treasureFound", quant: foundTreasureQuant, x, y });
+      }
       return;
     }
     })();

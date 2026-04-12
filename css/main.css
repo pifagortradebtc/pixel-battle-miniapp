@@ -78,107 +78,7 @@ body {
   flex-direction: column;
 }
 
-/* Рейтинг — компактный список поверх карты без тёмной «рамки» */
-.leaderboard {
-  position: absolute;
-  z-index: 12;
-  left: 2px;
-  top: calc(var(--safe-top) + var(--toolbar-h) + 1px);
-  /* На ~10% уже — меньше заходит к центру карты */
-  width: min(23.4vw, 101px);
-  max-width: 110px;
-  max-height: min(38vh, 220px);
-  display: flex;
-  flex-direction: column;
-  padding: 2px 2px 4px 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  font-size: 0.6rem;
-  line-height: 1.2;
-  overflow: hidden;
-  box-shadow: none;
-  pointer-events: auto;
-}
-
-.leaderboard[hidden] {
-  display: none !important;
-}
-
-.leaderboard__online {
-  font-weight: 600;
-  font-size: 0.62rem;
-  margin-bottom: 4px;
-  color: #f8fafc;
-  letter-spacing: 0.02em;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 1), 0 0 14px rgba(0, 0, 0, 0.65);
-}
-
-.leaderboard__list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  margin: 0;
-  padding: 0 2px 0 0;
-  list-style: none;
-  -webkit-overflow-scrolling: touch;
-}
-
-.leaderboard__row {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  padding: 2px 2px 2px 4px;
-  margin-bottom: 2px;
-  border-left: 2px solid #888;
-  border-radius: 0 4px 4px 0;
-  background: transparent;
-}
-
-.leaderboard__row--mine {
-  background: color-mix(in srgb, var(--tg-button) 14%, transparent);
-}
-
-.leaderboard__topline {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.leaderboard__rank {
-  font-weight: 700;
-  font-size: 0.55rem;
-  color: #f1f5f9;
-  flex-shrink: 0;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 1), 0 0 10px rgba(0, 0, 0, 0.55);
-}
-
-.leaderboard__emoji {
-  font-size: 0.72rem;
-  line-height: 1;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.65));
-}
-
-.leaderboard__name {
-  font-weight: 600;
-  font-size: 0.6rem;
-  max-width: 100%;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: clip;
-  color: #ffffff;
-  line-height: 1.15;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 1), 0 0 12px rgba(0, 0, 0, 0.55);
-}
-
-.leaderboard__meta {
-  font-size: 0.52rem;
-  color: #e2e8f0;
-  margin-top: 1px;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 1), 0 0 10px rgba(0, 0, 0, 0.6);
-}
+/* Рейтинг: см. css/hud-premium.css (.lb-widget) */
 
 .toolbar {
   position: absolute;
@@ -1917,6 +1817,50 @@ a.overlay__btn {
   margin: 0 0 4px;
   color: var(--tg-hint);
   font-size: 0.9rem;
+}
+
+.treasure-found-overlay__card {
+  max-width: 400px;
+  border: 1px solid rgba(255, 200, 120, 0.45);
+  background: linear-gradient(165deg, rgba(28, 22, 12, 0.97), rgba(12, 14, 22, 0.98));
+  box-shadow:
+    0 0 0 1px rgba(255, 220, 140, 0.12),
+    0 0 40px rgba(255, 170, 60, 0.22),
+    0 20px 48px rgba(0, 0, 0, 0.55);
+}
+
+.treasure-found-overlay__kicker {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 210, 140, 0.85);
+}
+
+.treasure-found-overlay__title {
+  margin: 0 0 12px;
+  color: #fff8e8;
+  text-shadow: 0 0 20px rgba(255, 190, 80, 0.35);
+}
+
+.treasure-found-overlay__amount {
+  margin: 0 0 10px;
+  font-size: 1.75rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #ffe08a;
+  text-shadow: 0 0 18px rgba(255, 200, 80, 0.45);
+}
+
+.treasure-found-overlay__hint {
+  margin: 0;
+  color: rgba(255, 252, 245, 0.72);
+}
+
+.treasure-found-overlay__btn {
+  width: 100%;
+  margin-top: 4px;
 }
 
 .fx-btn-press {

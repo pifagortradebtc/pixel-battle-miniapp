@@ -9,6 +9,7 @@
   <meta name="pixel-battle-tg-app" content="" />
   <title>Pixel Battle</title>
   <link rel="stylesheet" href="css/main.css" />
+  <link rel="stylesheet" href="css/hud-premium.css" />
   <link rel="stylesheet" href="css/event-presentation.css" />
   <link rel="stylesheet" href="css/shop.css" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -168,6 +169,18 @@
         <button type="button" class="overlay__btn overlay__btn--secondary" id="crisis-cta-raid">💥 Масс-захват 6×6</button>
       </div>
       <button type="button" class="overlay__btn overlay__btn--secondary crisis-overlay__dismiss" id="crisis-dismiss">Позже</button>
+    </div>
+  </div>
+
+  <div id="treasure-found-overlay" class="overlay treasure-found-overlay" hidden>
+    <div class="overlay__card treasure-found-overlay__card">
+      <p class="treasure-found-overlay__kicker">Случайный клад на карте</p>
+      <h2 class="overlay__title treasure-found-overlay__title">Вы нашли клад!</h2>
+      <p class="treasure-found-overlay__amount" id="treasure-found-amount" aria-live="polite"></p>
+      <p class="overlay__hint treasure-found-overlay__hint">Кванты уже зачислены на ваш счёт в шапке.</p>
+      <div class="overlay__actions">
+        <button type="button" class="overlay__btn treasure-found-overlay__btn" id="treasure-found-dismiss">Отлично</button>
+      </div>
     </div>
   </div>
 
@@ -561,20 +574,46 @@
   </div>
 
   <div id="app" class="app">
-    <aside id="leaderboard-panel" class="leaderboard" hidden aria-label="Рейтинг команд">
-      <div class="leaderboard__online">Онлайн: <span id="online-count">0</span></div>
-      <ol id="leaderboard-list" class="leaderboard__list"></ol>
+    <aside
+      id="leaderboard-panel"
+      class="lb-widget lb-widget--compact"
+      hidden
+      aria-label="Рейтинг команд"
+    >
+      <div class="lb-widget__chrome">
+        <span class="lb-widget__title">Рейтинг</span>
+        <span class="lb-widget__online" title="Игроков онлайн"
+          ><span id="online-count">0</span></span
+        >
+        <button
+          type="button"
+          id="leaderboard-expand-btn"
+          class="lb-widget__toggle"
+          aria-expanded="false"
+          aria-controls="leaderboard-list"
+          aria-label="Развернуть полный рейтинг"
+        >
+          <span class="lb-widget__toggle-icon" aria-hidden="true"></span>
+        </button>
+      </div>
+      <ol id="leaderboard-list" class="lb-widget__list" role="list"></ol>
     </aside>
 
     <div class="app__main">
       <header class="toolbar">
         <div class="toolbar__lead" aria-label="Раунд и интервал пикселя">
-          <span
-            id="round-timer"
-            class="toolbar__round toolbar__round--lead"
-            hidden
-            title="Время до конца текущего раунда"
-          ></span>
+          <div class="hud-lead-stack">
+            <div class="hud-lead-stack__row">
+              <span id="hud-round-badge" class="hud-round-badge" hidden></span>
+              <span id="hud-my-score" class="hud-my-score" hidden title="Ваши очки в рейтинге"></span>
+            </div>
+            <span
+              id="round-timer"
+              class="toolbar__round toolbar__round--lead"
+              hidden
+              title="Время до конца текущего раунда"
+            ></span>
+          </div>
           <div
             id="toolbar-pixel-timer"
             class="toolbar__pixel-timer"

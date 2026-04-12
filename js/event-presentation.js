@@ -580,7 +580,7 @@ function updateHudTimersFromDom() {
 }
 
 /**
- * Синхронизация дока HUD и атмосферы. Всегда оставляет верхний #event-banner видимым для таймера основного события.
+ * Синхронизация дока HUD и атмосферы. Таймер активных слоёв боя — в боковом доке (#event-hud-dock), не в #event-banner.
  * @param {{
  *   ge: object | null | undefined;
  *   seismicPreview: { impactAtMs?: number; eventId?: string } | null;
@@ -704,6 +704,5 @@ export function syncPremiumBattlePresentation(opts) {
     }
   }
 
-  /* Верхний event-banner не скрываем: там остаётся таймер основного события; боковой HUD дублирует список активных слоёв. */
   return false;
 }
