@@ -9,7 +9,8 @@
   /* Плавающая шапка и низ — карта на весь экран под ними */
   --toolbar-h: 34px;
   /* Жёсткий потолок высоты шапки: иначе длинный текст + sync --toolbar-h раздувают тёмную полосу на пол-экрана */
-  --toolbar-h-max: 58px;
+  /* Две строки шапки (кнопки + подсказка «База 6×6…») без обрезки */
+  --toolbar-h-max: 88px;
   --hud-bg: rgba(5, 10, 18, 0.42);
   --hud-border: rgba(255, 255, 255, 0.08);
 }
@@ -189,6 +190,7 @@ body {
   /* grid: правая колонка (кнопки) не сжимается ниже контента — иначе «Магазин» обрезался слева */
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
   align-items: center;
   gap: 4px;
   column-gap: 6px;
@@ -205,6 +207,8 @@ body {
 }
 
 .toolbar__lead {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -289,6 +293,8 @@ body {
 }
 
 .toolbar__actions {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex-wrap: nowrap;
   align-items: center;
@@ -309,15 +315,18 @@ body {
   flex-shrink: 0;
 }
 
-/* Подсказка к зоне — одна строка с ellipsis; иначе длинный текст ломает сетку шапки */
-.toolbar__actions .toolbar__cooldown {
-  flex: 1 1 auto;
-  flex-shrink: 1;
+/* Подсказки под первой строкой шапки — не в flex с кнопками, иначе колонка раздувается и ряд «уезжает» */
+.toolbar__cooldown--toolbar-row {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  justify-self: stretch;
   min-width: 0;
-  max-width: min(46vw, 200px);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding-top: 1px;
+  line-height: 1.25;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .toolbar__conn {
@@ -375,6 +384,10 @@ body {
   background: linear-gradient(90deg, rgba(146, 64, 14, 0.88), rgba(180, 83, 9, 0.82));
   border: 1px solid rgba(253, 224, 71, 0.45);
   animation: feedback-banner-pulse 1s ease-in-out infinite;
+}
+
+.toolbar__cooldown--toolbar-row.toolbar__cooldown--alert {
+  max-width: 100%;
 }
 
 /* Старый компактный вид раунда в правом ряду (если где-то останется без --lead) */
@@ -637,6 +650,14 @@ body {
   overflow: hidden;
   /* Совпадает с заливкой канвы: при глюке композитинга WebView не «вспыхивает» чёрным. */
   background-color: #050810;
+  /* Десктопный TG иногда отдаёт нулевую высоту контейнера на кадр — min-height снижает шанс «полоски». */
+  min-height: 120px;
+}
+
+@media (min-width: 600px) {
+  .stage-wrap {
+    min-height: min(42vh, 720px);
+  }
 }
 
 .board {
@@ -678,7 +699,91 @@ body {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
+  flex-direction: row;
   align-items: center;
+  gap: 6px;
+}
+
+/* Смена команды: иконка двери слева от бейджа команды */
+.btn-session-door {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 9px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--tg-hint) 42%, transparent);
+  background: rgba(0, 0, 0, 0.32);
+  color: color-mix(in srgb, var(--tg-text) 96%, transparent);
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-session-door:hover {
+  border-color: color-mix(in srgb, var(--tg-hint) 58%, transparent);
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.btn-session-door:active {
+  transform: scale(0.96);
+}
+
+.btn-session-door:focus-visible {
+  outline: 2px solid var(--tg-button);
+  outline-offset: 2px;
+}
+
+.btn-session-door--icon-only {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+}
+
+.btn-session-door__svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.btn-session-door__label {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  white-space: nowrap;
+  max-width: min(38vw, 120px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn-session-door--icon-only .btn-session-door__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.btn-session-door:not(.btn-session-door--icon-only) .btn-session-door__icon {
+  display: none;
+}
+
+.btn-session-door {
+  position: relative;
+}
+
+.palette-bar__lead .team-badge {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
 }
 
 .palette-trigger {

@@ -54,7 +54,7 @@
 
   <div id="tournament-warmup-overlay" class="tournament-warmup-overlay" hidden>
     <div class="tournament-warmup-overlay__card">
-      <div class="tournament-warmup-overlay__badge">Разминка 2:00</div>
+      <div class="tournament-warmup-overlay__badge" id="tournament-warmup-badge">Разминка</div>
       <h2 class="tournament-warmup-overlay__title" id="tournament-warmup-title">Подготовка</h2>
       <div class="tournament-warmup-overlay__timer" id="tournament-warmup-countdown">—</div>
       <div class="tournament-warmup-overlay__body" id="tournament-warmup-body"></div>
@@ -568,7 +568,6 @@
         </div>
         <div class="toolbar__actions">
           <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить кванты (оплата USDT)">Кванты +</button>
-          <button type="button" id="btn-shop" class="toolbar__btn" hidden title="Улучшения и бусты">Магазин</button>
           <a
             id="toolbar-discussion-link"
             class="toolbar__discussion"
@@ -576,13 +575,13 @@
             hidden
             title="Чат обсуждения игры в Telegram"
           >💬</a>
+          <button type="button" id="btn-shop" class="toolbar__btn" hidden title="Улучшения и бусты">🛒 Магазин</button>
           <span id="conn-status" class="toolbar__conn" title="Состояние сети" data-state="local">локально</span>
           <span id="spectator-badge" class="toolbar__spectator" hidden>Наблюдение</span>
           <button type="button" id="btn-toolbar-base" class="toolbar__btn" hidden title="Показать базу 6×6">
             🏠 База
           </button>
           <div class="toolbar__session-col">
-            <button type="button" id="btn-toolbar-session" class="toolbar__btn" title="">Сменить команду</button>
             <div
               id="territory-isolation-hud"
               class="territory-isolation-hud"
@@ -591,7 +590,6 @@
               aria-live="polite"
             ></div>
           </div>
-          <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
           <div
             id="toolbar-buffs"
             class="toolbar-buffs"
@@ -606,6 +604,11 @@
             </div>
           </div>
         </div>
+        <span
+          id="cooldown-label"
+          class="toolbar__cooldown toolbar__cooldown--toolbar-row"
+          hidden
+        ></span>
       </header>
 
       <div id="final-pressure-strip" class="final-pressure-strip" hidden role="status" aria-live="polite"></div>
@@ -620,6 +623,34 @@
       <footer class="palette-bar">
         <div class="palette-bar__inner">
           <div class="palette-bar__lead">
+            <button
+              type="button"
+              id="btn-toolbar-session"
+              class="btn-session-door"
+              title=""
+              aria-label=""
+            >
+              <span class="btn-session-door__icon" aria-hidden="true">
+                <svg class="btn-session-door__svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <!-- косяк / стена -->
+                  <path
+                    d="M4 3h11v18H4V3z"
+                    stroke="currentColor"
+                    stroke-width="1.75"
+                    stroke-linejoin="round"
+                  />
+                  <!-- дверь приоткрыта -->
+                  <path
+                    d="M15 3.5l6.2 2.2v12.6L15 20.5V3.5z"
+                    stroke="currentColor"
+                    stroke-width="1.75"
+                    stroke-linejoin="round"
+                  />
+                  <circle cx="18.2" cy="12" r="0.9" fill="currentColor" />
+                </svg>
+              </span>
+              <span class="btn-session-door__label"></span>
+            </button>
             <div id="team-badge" class="team-badge" hidden>
               <span class="team-badge__label">Команда:</span>
               <span id="team-badge-emoji" class="team-badge__emoji" aria-hidden="true"></span>

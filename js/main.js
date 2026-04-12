@@ -39,6 +39,8 @@ let gridH = 360;
 const BASE_CELL = 4;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 8;
+/** Предел сдвига карты (px) — защита от NaN/∞ при зуме в десктопном WebView. */
+const MAP_VIEW_OFFSET_LIM = 8_000_000;
 /** Видимых клеток больше — без градиента на каждую (иначе createLinearGradient ×10⁵/сек). */
 const DRAW_DETAIL_GRADIENT_MAX_CELLS = 7000;
 /** Ещё тяжелее — без анимированных рёбер между командами (второй полный проход по сетке). */
@@ -285,6 +287,7 @@ const roundStartSplashTitleEl = document.getElementById("round-start-splash-titl
 const tournamentWarmupOverlayEl = document.getElementById("tournament-warmup-overlay");
 const tournamentWarmupTitleEl = document.getElementById("tournament-warmup-title");
 const tournamentWarmupCountdownEl = document.getElementById("tournament-warmup-countdown");
+const tournamentWarmupBadgeEl = document.getElementById("tournament-warmup-badge");
 const tournamentWarmupBodyEl = document.getElementById("tournament-warmup-body");
 const roundEndedOverlayEl = document.getElementById("round-ended-overlay");
 const roundEndedWinnerEl = document.getElementById("round-ended-winner");
@@ -536,6 +539,12 @@ let mapWheelEndTimer = 0;
 
 /** DPR слоя карты / board-vfx (обновляется в resizeCanvas) — для VFX после жёсткого reset контекста. */
 let boardVfxDpr = 1;
+
+/** Последний доверенный CSS-размер stage-wrap (TG Desktop / visualViewport иногда отдаёт краткий «нулевой» rect). */
+let lastStableStageCssW = 0;
+let lastStableStageCssH = 0;
+/** Debounce цепочки ResizeObserver + visualViewport перед чтением layout. */
+let resizeLayoutDebounceTimer = 0;
 
 /** Следующий кадр: полный проход видимой области (true) или только dirtyRect (false). */
 let pendingRedrawFull = false;
@@ -871,6 +880,7 @@ function focusCameraOnTeamSpawn(spawn) {
   const cy = spawn.y0 + spawn.h / 2;
   offsetX = cw / 2 - cx * cell;
   offsetY = ch / 2 - cy * cell;
+  sanitizeMapPanOffsets();
   pendingRedrawFull = true;
   scheduleDraw();
 }
@@ -1508,6 +1518,9 @@ function syncTournamentWarmupOverlay() {
     if (tournamentWarmupCountdownEl) {
       tournamentWarmupCountdownEl.textContent = `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} до боя`;
     }
+    if (tournamentWarmupBadgeEl) {
+      tournamentWarmupBadgeEl.textContent = `Разминка ${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    }
     if (myTeamId != null) {
       const until = playStartsAtMs;
       teamSpawnOnboardUntil = Math.max(teamSpawnOnboardUntil, until);
@@ -1716,9 +1729,10 @@ function setFooterMode() {
   renderQuickBuyRail();
 }
 
-/** Подпись кнопки в шапке: не глобальная очистка карты, а сессия / локальный сброс. */
+/** Кнопка сессии внизу у бейджа: онлайн в команде — только иконка двери; иначе короткий текст. */
 function refreshToolbarSessionButton() {
   if (!btnToolbarSession) return;
+  const labelEl = btnToolbarSession.querySelector(".btn-session-door__label");
   const online = wantOnline && getWsUrl();
   if (online && spectatorMode) {
     btnToolbarSession.hidden = true;
@@ -1727,16 +1741,25 @@ function refreshToolbarSessionButton() {
   btnToolbarSession.hidden = false;
   if (online) {
     if (myTeamId != null) {
-      btnToolbarSession.textContent = "Сменить команду";
+      btnToolbarSession.classList.add("btn-session-door--icon-only");
+      if (labelEl) labelEl.textContent = "";
+      btnToolbarSession.setAttribute("aria-label", "Сменить команду");
       btnToolbarSession.title = isCurrentTeamSolo()
         ? "Выбор другой команды или создание новой. Можно закрыть окно (×) — останетесь в соло."
         : "Выбор другой команды или создание новой. Можно закрыть окно (×) — останетесь в текущей команде.";
     } else {
-      btnToolbarSession.textContent = "Войти";
+      btnToolbarSession.classList.remove("btn-session-door--icon-only");
+      if (labelEl) labelEl.textContent = "Войти";
+      btnToolbarSession.setAttribute("aria-label", "Войти — создать команду или вступить");
       btnToolbarSession.title = "Создать команду или вступить в существующую (окно можно закрыть без действия)";
     }
   } else {
-    btnToolbarSession.textContent = "Очистить локально";
+    btnToolbarSession.classList.remove("btn-session-door--icon-only");
+    if (labelEl) labelEl.textContent = "Очистить локально";
+    btnToolbarSession.setAttribute(
+      "aria-label",
+      "Очистить только локальную картинку на этом устройстве"
+    );
     btnToolbarSession.title =
       "Стереть только вашу локальную картинку на этом устройстве (на общую карту не влияет)";
   }
@@ -1859,6 +1882,7 @@ function loadFromStorage() {
       if (typeof v.offsetX === "number") offsetX = v.offsetX;
       if (typeof v.offsetY === "number") offsetY = v.offsetY;
       if (typeof v.color === "number" && v.color >= 0 && v.color < PALETTE.length) selectedColor = v.color;
+      sanitizeMapPanOffsets();
     }
   } catch {
     /* ignore */
@@ -5258,26 +5282,93 @@ function buildPalette() {
   updatePaletteTriggerPreview();
 }
 
-/** Один «двойной rAF» на бурст событий: иначе ResizeObserver/visualViewport дают серию сбросов bitmap → мигание в TG Desktop. */
+function clampFiniteMap(n, fallback = 0) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return fallback;
+  return Math.max(-MAP_VIEW_OFFSET_LIM, Math.min(MAP_VIEW_OFFSET_LIM, n));
+}
+
+function sanitizeMapPanOffsets() {
+  offsetX = clampFiniteMap(offsetX);
+  offsetY = clampFiniteMap(offsetY);
+}
+
+/**
+ * Зум к точке (колесо / pinch): единый clamp scale, якорь в мировых координатах, без NaN offset.
+ * @param {number} nextScale
+ * @param {number} anchorClientX
+ * @param {number} anchorClientY
+ * @param {number} rectLeft
+ * @param {number} rectTop
+ */
+function applyMapZoomAroundScreenPoint(nextScale, anchorClientX, anchorClientY, rectLeft, rectTop) {
+  const mx = anchorClientX - rectLeft;
+  const my = anchorClientY - rectTop;
+  const oldScale = scale;
+  let s = typeof nextScale === "number" && Number.isFinite(nextScale) ? nextScale : oldScale;
+  s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
+  const denomOld = BASE_CELL * oldScale;
+  const safeDenom = Math.abs(denomOld) < 1e-9 ? BASE_CELL * MIN_SCALE : denomOld;
+  const worldX = (mx - offsetX) / safeDenom;
+  const worldY = (my - offsetY) / safeDenom;
+  scale = s;
+  offsetX = mx - worldX * BASE_CELL * scale;
+  offsetY = my - worldY * BASE_CELL * scale;
+  sanitizeMapPanOffsets();
+}
+
+/**
+ * Один debounce + двойной rAF: бурст resize/visualViewport в Telegram Desktop успевает «успокоиться»,
+ * иначе читаем промежуточный микро-rect → канва сбрасывается в полоску и кадр чёрный.
+ */
 let resizeCanvasChainScheduled = false;
 function scheduleResizeCanvas() {
   if (resizeCanvasChainScheduled) return;
-  resizeCanvasChainScheduled = true;
-  requestAnimationFrame(() => {
+  if (resizeLayoutDebounceTimer) clearTimeout(resizeLayoutDebounceTimer);
+  resizeLayoutDebounceTimer = window.setTimeout(() => {
+    resizeLayoutDebounceTimer = 0;
+    if (resizeCanvasChainScheduled) return;
+    resizeCanvasChainScheduled = true;
     requestAnimationFrame(() => {
-      resizeCanvasChainScheduled = false;
-      resizeCanvas();
+      requestAnimationFrame(() => {
+        resizeCanvasChainScheduled = false;
+        resizeCanvas();
+      });
     });
-  });
+  }, 28);
+}
+
+/** Читает размер контейнера карты; подавляет кратковременные выбросы layout в десктопном WebView. */
+function readStageWrapCssSize(wrap) {
+  const rect = wrap.getBoundingClientRect();
+  const crw = wrap.clientWidth | 0;
+  const crh = wrap.clientHeight | 0;
+  let w = Math.max(1, Math.round(rect.width), crw);
+  let h = Math.max(1, Math.round(rect.height), crh);
+
+  const MIN_STABLE = 72;
+  /* Не трогаем законное сужение окна: только явный «глюк» (крошечная высота/ширина или <22% от стабильного). */
+  if (lastStableStageCssW >= MIN_STABLE && lastStableStageCssH >= MIN_STABLE) {
+    if (w < 48 || (w < 128 && w < lastStableStageCssW * 0.2)) w = lastStableStageCssW;
+    if (h < 48 || (h < 128 && h < lastStableStageCssH * 0.2)) h = lastStableStageCssH;
+  }
+
+  if (w >= 48 && h >= 48) {
+    lastStableStageCssW = w;
+    lastStableStageCssH = h;
+  }
+
+  if (perfDebug && (crh > h * 2 || crw > w * 2 || rect.height < lastStableStageCssH * 0.25)) {
+    console.debug("[canvas stage]", { rectW: rect.width, rectH: rect.height, crw, crh, usedW: w, usedH: h, lastW: lastStableStageCssW, lastH: lastStableStageCssH });
+  }
+
+  return { w, h };
 }
 
 function resizeCanvas() {
   const wrap = canvas.parentElement;
   if (!wrap) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const rect = wrap.getBoundingClientRect();
-  const w = Math.max(1, Math.round(rect.width));
-  const h = Math.max(1, Math.round(rect.height));
+  const { w, h } = readStageWrapCssSize(wrap);
   const bw = Math.max(1, Math.round(w * dpr));
   const bh = Math.max(1, Math.round(h * dpr));
   const mainUnchanged =
@@ -5295,7 +5386,7 @@ function resizeCanvas() {
   if (mainUnchanged && vfxUnchanged) {
     centerIfNeeded(w, h);
     syncToolbarHeightCssVar();
-    draw();
+    draw(performance.now(), { lite: mapDrawUseLite() });
     return;
   }
   boardVfxDpr = dpr;
@@ -5318,7 +5409,8 @@ function resizeCanvas() {
   }
   centerIfNeeded(w, h);
   syncToolbarHeightCssVar();
-  draw();
+  /* Сразу полный кадр после сброса bitmap (clear→draw в одном синхронном проходе; lite при активном жесте). */
+  draw(performance.now(), { lite: mapDrawUseLite() });
 }
 
 /** Смена размеров без window.resize (Telegram expand, адресная строка, клавиатура). */
@@ -5459,6 +5551,7 @@ function endMapWheelInteraction() {
       canvasFrameRafId = 0;
     }
     drawFull();
+    scheduleResizeCanvas();
   }
 }
 
@@ -5628,9 +5721,18 @@ function consumeDuplicatePurchaseVfx(msg) {
 
 function draw(time = performance.now(), drawOpts = {}) {
   const _perf0 = perfDebug ? performance.now() : 0;
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  const cell = BASE_CELL * scale;
+  let w = canvas.clientWidth;
+  let h = canvas.clientHeight;
+  if (w < 1 || h < 1) {
+    scheduleResizeCanvas();
+    return;
+  }
+  const stage = canvas.parentElement;
+  if (stage && (stage.clientHeight | 0) > 32 && h > 0 && h < (stage.clientHeight | 0) * 0.42) {
+    scheduleResizeCanvas();
+  }
+  const cellRaw = BASE_CELL * scale;
+  const cell = cellRaw < 1e-4 ? 1e-4 : cellRaw;
   const lite = drawOpts.lite === true;
   const pulse = lite ? 0 : 0.5 + 0.5 * Math.sin(time * 0.0018);
 
@@ -5657,6 +5759,7 @@ function draw(time = performance.now(), drawOpts = {}) {
     x1 = Math.min(vx1, d.gx1);
     y1 = Math.min(vy1, d.gy1);
     if (x0 > x1 || y0 > y1) {
+      /* Dirty-регион не пересёкся с вьюпортом — канву не трогаем (нет clear), предыдущий кадр остаётся. */
       if (perfDebug) perfRecordDraw(performance.now() - _perf0, lite);
       return;
     }
@@ -6507,11 +6610,8 @@ function setupGestures() {
           const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, pinchStartScale * factor));
           const midX = (a.clientX + b.clientX) / 2;
           const midY = (a.clientY + b.clientY) / 2;
-          const worldXBefore = (midX - offsetX) / (BASE_CELL * scale);
-          const worldYBefore = (midY - offsetY) / (BASE_CELL * scale);
-          scale = newScale;
-          offsetX = midX - worldXBefore * BASE_CELL * scale;
-          offsetY = midY - worldYBefore * BASE_CELL * scale;
+          const rect = canvas.getBoundingClientRect();
+          applyMapZoomAroundScreenPoint(newScale, midX, midY, rect.left, rect.top);
           mapInteractionActive = true;
           scheduleCanvasFrame();
         }
@@ -6522,8 +6622,8 @@ function setupGestures() {
         // Порог выше, иначе лёгкая дрожь пальца считается «панорамой» и тап не ставит пиксель
         if (Math.hypot(dx, dy) > 28) oneFinger.panning = true;
         if (oneFinger.panning) {
-          offsetX = oneFinger.ox + dx;
-          offsetY = oneFinger.oy + dy;
+          offsetX = clampFiniteMap(oneFinger.ox + dx);
+          offsetY = clampFiniteMap(oneFinger.oy + dy);
           mapInteractionActive = true;
           scheduleCanvasFrame();
         }
@@ -6587,8 +6687,8 @@ function setupGestures() {
     const dy = e.clientY - mousePan.y;
     if (Math.hypot(dx, dy) > 28) mousePan.panning = true;
     if (mousePan.panning) {
-      offsetX = mousePan.ox + dx;
-      offsetY = mousePan.oy + dy;
+      offsetX = clampFiniteMap(mousePan.ox + dx);
+      offsetY = clampFiniteMap(mousePan.oy + dy);
       mapInteractionActive = true;
       scheduleCanvasFrame();
     }
@@ -6638,15 +6738,8 @@ function setupGestures() {
     (e) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
       const delta = e.deltaY > 0 ? 0.92 : 1.08;
-      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale * delta));
-      const worldX = (mx - offsetX) / (BASE_CELL * scale);
-      const worldY = (my - offsetY) / (BASE_CELL * scale);
-      scale = newScale;
-      offsetX = mx - worldX * BASE_CELL * scale;
-      offsetY = my - worldY * BASE_CELL * scale;
+      applyMapZoomAroundScreenPoint(scale * delta, e.clientX, e.clientY, rect.left, rect.top);
       mapWheelActive = true;
       scheduleCanvasFrame();
       if (mapWheelEndTimer) clearTimeout(mapWheelEndTimer);
@@ -6693,6 +6786,7 @@ async function bootstrap() {
   if (document.fonts?.ready) await document.fonts.ready;
   resizeCanvas();
   scheduleResizeCanvas();
+  sanitizeMapPanOffsets();
   if (canvasVfx) boardVfx = createBoardVfx(canvasVfx);
   requestAnimationFrame(vfxLoop);
   connectWs();
