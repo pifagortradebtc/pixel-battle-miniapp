@@ -635,6 +635,8 @@ body {
   inset: 0;
   z-index: 1;
   overflow: hidden;
+  /* Совпадает с заливкой канвы: при глюке композитинга WebView не «вспыхивает» чёрным. */
+  background-color: #050810;
 }
 
 .board {

@@ -207,8 +207,8 @@ const TEAM_CREATE_PALETTE = [
 ];
 
 const canvas = document.getElementById("board");
-/** desynchronized: ниже задержка вывода на части устройств (плавность важнее идеального compositing). */
-const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+/** desynchronized: true давал мигание/чёрные полосы при зуме в Telegram Desktop (Chromium WebView); стабильный композитинг важнее. */
+const ctx = canvas.getContext("2d", { alpha: false, desynchronized: false });
 const paletteEl = document.getElementById("palette");
 const paletteTriggerBtn = document.getElementById("palette-trigger");
 const palettePickerOverlay = document.getElementById("palette-picker-overlay");
@@ -5258,10 +5258,16 @@ function buildPalette() {
   updatePaletteTriggerPreview();
 }
 
-/** Два rAF — после первого кадра layout в Telegram Desktop/WebView часто ещё не финальный размер wrap. */
+/** Один «двойной rAF» на бурст событий: иначе ResizeObserver/visualViewport дают серию сбросов bitmap → мигание в TG Desktop. */
+let resizeCanvasChainScheduled = false;
 function scheduleResizeCanvas() {
+  if (resizeCanvasChainScheduled) return;
+  resizeCanvasChainScheduled = true;
   requestAnimationFrame(() => {
-    requestAnimationFrame(() => resizeCanvas());
+    requestAnimationFrame(() => {
+      resizeCanvasChainScheduled = false;
+      resizeCanvas();
+    });
   });
 }
 
@@ -5274,6 +5280,24 @@ function resizeCanvas() {
   const h = Math.max(1, Math.round(rect.height));
   const bw = Math.max(1, Math.round(w * dpr));
   const bh = Math.max(1, Math.round(h * dpr));
+  const mainUnchanged =
+    canvas.width === bw &&
+    canvas.height === bh &&
+    canvas.style.width === `${w}px` &&
+    canvas.style.height === `${h}px` &&
+    boardVfxDpr === dpr;
+  const vfxUnchanged =
+    !canvasVfx ||
+    (canvasVfx.width === bw &&
+      canvasVfx.height === bh &&
+      canvasVfx.style.width === `${w}px` &&
+      canvasVfx.style.height === `${h}px`);
+  if (mainUnchanged && vfxUnchanged) {
+    centerIfNeeded(w, h);
+    syncToolbarHeightCssVar();
+    draw();
+    return;
+  }
   boardVfxDpr = dpr;
   canvas.width = bw;
   canvas.height = bh;
@@ -5907,6 +5931,18 @@ function draw(time = performance.now(), drawOpts = {}) {
         const sh = gh * cell;
         const sweep = (time * 0.00055) % 1;
         ctx.save();
+        ctx.beginPath();
+        for (let gy = gy0; gy < gy0 + gh; gy++) {
+          for (let gx = gx0; gx < gx0 + gw; gx++) {
+            if (!isClientLandCell(gx, gy)) continue;
+            const px = offsetX + gx * cell;
+            const py = offsetY + gy * cell;
+            const cw = Math.ceil(cell);
+            const ch = Math.ceil(cell);
+            ctx.rect(px, py, cw, ch);
+          }
+        }
+        ctx.clip();
         const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
         grd.addColorStop(0, "rgba(255,255,255,0)");
         grd.addColorStop(0.5, "rgba(255,235,170,0.2)");

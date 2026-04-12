@@ -50,10 +50,9 @@ import {
   cellsInManhattanBall,
   computeBattleScoringSnapshot,
   computeSeismicManhattanBalls,
-  eventWindowEndMs,
   getNextTimelineEvent,
   getRoundTimeline,
-  isEventActiveAt,
+  MANUAL_BATTLE_EVENT_DEFAULT_DURATION_MS,
   MANUAL_BATTLE_EVENT_HELP_RU,
   MANUAL_TELEGRAM_CMD_FIRST_WORDS,
   mergeManualBattleSlotsIntoSnapshot,
@@ -764,15 +763,14 @@ function getGlobalEventPayload(nowMs = Date.now()) {
   let debugRoundEvents;
   if (DEBUG_ROUND_EVENTS) {
     const elapsed = nowMs - ctx.playStartMs;
-    const timeline = getRoundTimeline(roundIndex);
-    const activeIds = [];
-    for (const ev of timeline) {
-      if (isEventActiveAt(nowMs, ctx.playStartMs, ctx.battleEndMs, ev)) activeIds.push(ev.eventId);
+    const manualActive = [];
+    for (const [cmd, u] of manualBattleSlotsByCmd) {
+      if (typeof u === "number" && u > nowMs) manualActive.push(cmd);
     }
     debugRoundEvents = {
       roundIndex,
       elapsedMs: elapsed,
-      activeEventIds: activeIds,
+      manualBattleActive: manualActive,
       next: getNextTimelineEvent(nowMs, roundIndex, ctx.playStartMs, ctx.battleEndMs),
     };
   }
@@ -853,28 +851,9 @@ function tickRoundEventTransitions(nowMs) {
   if (!isClusterLeader()) return;
   const ctx = getBattleEventsContext(nowMs);
   if (!ctx) return;
-  const timeline = getRoundTimeline(roundIndex);
+  /** Старт/конец roundEvent по таймлайну отключён — кинематограф и HUD только после evt … в боте. */
   /** @type {Set<string>} */
   const active = new Set();
-  for (let i = 0; i < timeline.length; i++) {
-    const ev = timeline[i];
-    if (ev.eventType === "seismic") continue;
-    if (!isEventActiveAt(nowMs, ctx.playStartMs, ctx.battleEndMs, ev)) continue;
-    active.add(ev.eventId);
-    if (!lastAnnouncedActiveEventIds.has(ev.eventId)) {
-      const until = eventWindowEndMs(ev, ctx.playStartMs, ctx.battleEndMs);
-      broadcast({
-        type: "roundEvent",
-        phase: "start",
-        eventId: ev.eventId,
-        eventType: ev.eventType,
-        title: ev.uiTitle,
-        subtitle: ev.uiSubtitle,
-        untilMs: until,
-        roundIndex,
-      });
-    }
-  }
   for (const prev of lastAnnouncedActiveEventIds) {
     if (!active.has(prev)) {
       broadcast({ type: "roundEvent", phase: "end", eventId: prev, roundIndex });
@@ -887,7 +866,7 @@ function tickRoundEventTransitions(nowMs) {
     const elapsed = nowMs - ctx.playStartMs;
     const next = getNextTimelineEvent(nowMs, roundIndex, ctx.playStartMs, ctx.battleEndMs);
     console.log(
-      `[round-events] ri=${roundIndex} elapsed=${(elapsed / 60000).toFixed(1)}m active=${[...active].join(",") || "—"} next=${next.next?.eventId ?? "—"}`
+      `[round-events] ri=${roundIndex} elapsed=${(elapsed / 60000).toFixed(1)}m timeline_ui=off manual_next=${next.next?.eventId ?? "—"}`
     );
   }
 }
@@ -902,35 +881,7 @@ function tickBattleEvents(nowMs) {
 
   tickRoundEventTransitions(nowMs);
 
-  const timeline = getRoundTimeline(roundIndex);
-  for (let i = 0; i < timeline.length; i++) {
-    const def = timeline[i];
-    if (def.eventType !== "seismic") continue;
-    const id = def.eventId;
-    const warnKey = `${id}__warn`;
-    const atMs = ctx.playStartMs + def.startOffsetMs;
-    const warnLead = Math.max(3500, Number(def.warnLeadMs) || 4500);
-
-    if (!battleEventsApplied[warnKey] && nowMs >= atMs - warnLead && nowMs < atMs) {
-      battleEventsApplied[warnKey] = true;
-      const protectedMask = buildBattleProtectedMask();
-      const balls = computeSeismicManhattanBalls(roundIndex, ctx.playStartMs, id, gridW, gridH, landGrid, protectedMask);
-      const regions = balls.map((b) => ({
-        kind: "manhattan_ball",
-        cx: b.cx,
-        cy: b.cy,
-        r: b.r,
-      }));
-      broadcast({ type: "seismicPreview", eventId: id, regions, impactAtMs: atMs });
-      saveRoundState();
-    }
-
-    if (!battleEventsApplied[id] && nowMs >= atMs) {
-      battleEventsApplied[id] = true;
-      applySeismicForLeader(id, id);
-      saveRoundState();
-    }
-  }
+  /* Автосейсмика по таймлайну отключена — только команда seismic / evt seismic в боте (лидер кластера). */
 }
 
 function resetBattleEventsStateForNewBattleRound() {
@@ -4535,7 +4486,7 @@ async function handleTelegramPaintCommand(chatId, telegramUid) {
 
 /**
  * Ручное включение событий карты (только TELEGRAM_ADMIN_IDS, только лидер кластера).
- * Сообщения: evt gold, gold, evt mapcomp 45 (минут), gold off, evt off, seismic, evt help.
+ * Сообщения: evt gold, gold, gold 45 (минут, иначе 20 мин по умолчанию), gold off, evt off, seismic, evt help.
  */
 async function handleTelegramManualBattleCommand(chatId, lineRaw) {
   if (!isClusterLeader()) {
@@ -4597,7 +4548,7 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
   }
   const battleEnd = getRoundBattleEndRealMs();
   const now = Date.now();
-  let until = battleEnd;
+  let until = Math.min(now + MANUAL_BATTLE_EVENT_DEFAULT_DURATION_MS, battleEnd);
   if (parts[1] && /^\d/.test(parts[1])) {
     const mins = parseFloat(parts[1].replace(",", "."));
     if (Number.isFinite(mins) && mins > 0) {
@@ -4612,6 +4563,17 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
   pruneExpiredManualBattleSlots(now);
   saveRoundState();
   broadcastManualBattleSyncAndStats();
+  const eventIdForClient = `${def.eventId}_${until}`;
+  broadcast({
+    type: "roundEvent",
+    phase: "start",
+    eventId: eventIdForClient,
+    eventType: def.eventType,
+    title: def.uiTitle,
+    subtitle: def.uiSubtitle,
+    untilMs: until,
+    roundIndex,
+  });
   const leftMin = Math.max(1, Math.round((until - now) / 60000));
   await telegramSendMessage(
     chatId,

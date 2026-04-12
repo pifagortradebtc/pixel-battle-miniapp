@@ -48,6 +48,7 @@ function escapeHtml(s) {
 }
 
 function formatHudTime(untilMs) {
+  if (typeof untilMs !== "number" || !Number.isFinite(untilMs)) return "—";
   const left = untilMs - Date.now();
   if (left <= 0) return "0:00";
   const s = Math.max(0, Math.ceil(left / 1000));
@@ -164,7 +165,7 @@ function sortLayersForHud(layers) {
     const sa = ia === -1 ? 99 : ia;
     const sb = ib === -1 ? 99 : ib;
     if (sa !== sb) return sa - sb;
-    return (b.untilMs | 0) - (a.untilMs | 0);
+    return b.untilMs - a.untilMs;
   });
 }
 
@@ -500,7 +501,8 @@ function updateHudTimersFromDom() {
   const times = hudDock.querySelectorAll("[data-until]");
   for (let i = 0; i < times.length; i++) {
     const el = times[i];
-    const u = Number(el.getAttribute("data-until"));
+    const raw = el.getAttribute("data-until");
+    const u = raw != null && raw !== "" ? Number(raw) : NaN;
     if (!Number.isFinite(u)) continue;
     el.textContent = formatHudTime(u);
   }
@@ -567,7 +569,7 @@ export function syncPremiumBattlePresentation(opts) {
       kind: L.kind,
       title: L.title || L.kind,
       status: shortStatusForLayer(L),
-      untilMs: L.untilMs | 0,
+      untilMs: Number(L.untilMs),
       theme,
     });
   }
@@ -588,14 +590,15 @@ export function syncPremiumBattlePresentation(opts) {
       for (let i = 0; i < chips.length; i++) {
         const c = chips[i];
         const g = glyphForHudTheme(c.theme);
-        const until = c.untilMs | 0;
+        const until = Number(c.untilMs);
+        const untilAttr = Number.isFinite(until) ? String(Math.round(until)) : "";
         parts.push(`<div class="event-hud-chip event-hud-chip--${escapeHtml(c.theme)}" role="status">
           <span class="event-hud-chip__glyph" aria-hidden="true">${g}</span>
           <div class="event-hud-chip__main">
             <span class="event-hud-chip__title">${escapeHtml(String(c.title))}</span>
             <span class="event-hud-chip__status">${escapeHtml(String(c.status || ""))}</span>
           </div>
-          <span class="event-hud-chip__time" data-until="${until}">${escapeHtml(formatHudTime(until))}</span>
+          <span class="event-hud-chip__time" data-until="${escapeHtml(untilAttr)}">${escapeHtml(formatHudTime(until))}</span>
         </div>`);
       }
       hudDock.innerHTML = parts.join("");
