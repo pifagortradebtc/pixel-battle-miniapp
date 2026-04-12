@@ -31,6 +31,8 @@ let lastHudSignature = "";
 
 let lastSeismicPreviewKey = "";
 let lastRoundEventStartKey = "";
+/** Последний roundEvent start (для HUD, если globalEvent с layers пришёл позже или пустой). */
+let lastRoundEventStartMsg = null;
 
 /** @type {{ title: string; subtitle: string; theme: string; holdMs?: number; sound?: string; kicker?: string }[]} */
 const cinematicQueue = [];
@@ -107,8 +109,6 @@ function glyphForHudTheme(theme) {
       return "⌁";
     case "alt-revenge":
       return "⚔";
-    case "round-countdown":
-      return "⏱";
     case "neutral":
       return "◆";
     default:
@@ -162,6 +162,49 @@ function sortLayersForHud(layers) {
     const sb = ib === -1 ? 99 : ib;
     if (sa !== sb) return sa - sb;
     return b.untilMs - a.untilMs;
+  });
+}
+
+/**
+ * Есть ли в payload сервера слой, соответствующий последнему roundEvent (чтобы не дублировать чип).
+ * @param {unknown} layers
+ * @param {{ eventType?: string; untilMs?: number } | null} re
+ */
+function battleLayersCoverRoundEvent(layers, re) {
+  if (!re || typeof re.untilMs !== "number" || !Number.isFinite(re.untilMs)) return false;
+  if (!Array.isArray(layers)) return false;
+  const um = re.untilMs;
+  const k = String(re.eventType || "");
+  const now = Date.now();
+  for (let i = 0; i < layers.length; i++) {
+    const L = layers[i];
+    if (!L || typeof L.untilMs !== "number" || !Number.isFinite(L.untilMs) || L.untilMs <= now) continue;
+    if (k && L.kind === k && Math.abs(L.untilMs - um) < 20000) return true;
+    if (Math.abs(L.untilMs - um) < 5000) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {object[]} chips
+ * @param {object | null | undefined} ge
+ */
+function appendRoundEventHudFallback(chips, ge) {
+  if (chips.length >= 6) return;
+  const re = lastRoundEventStartMsg;
+  if (!re || typeof re.untilMs !== "number" || re.untilMs <= Date.now()) return;
+  const rawLayers = ge?.battleEvents?.layers;
+  if (battleLayersCoverRoundEvent(rawLayers, re)) return;
+  const kind = String(re.eventType || "battle_event");
+  const fakeL = { kind, title: re.title, subtitle: re.subtitle, style: "" };
+  const theme = hudThemeForLayerKind(fakeL);
+  const st = shortStatusForLayer(fakeL);
+  chips.push({
+    kind,
+    title: String(re.title || "Событие"),
+    status: st || String(re.subtitle || "").slice(0, 120),
+    untilMs: re.untilMs,
+    theme,
   });
 }
 
@@ -380,6 +423,7 @@ export function initEventPresentation() {
 export function resetEventPresentationForRound() {
   lastSeismicPreviewKey = "";
   lastRoundEventStartKey = "";
+  lastRoundEventStartMsg = null;
   lastHudSignature = "";
   cinematicQueue.length = 0;
   if (cinematicRoot) {
@@ -461,10 +505,16 @@ function roundEventToCinematicSpec(eventType, title, subtitle) {
  * @param {{ phase?: string; eventId?: string; eventType?: string; title?: string; subtitle?: string }} msg
  */
 export function notifyRoundEventFromServer(msg) {
-  if (!msg || msg.phase !== "start" || !msg.eventId) return;
+  if (!msg) return;
+  if (msg.phase === "end") {
+    lastRoundEventStartMsg = null;
+    return;
+  }
+  if (msg.phase !== "start" || !msg.eventId) return;
   const key = String(msg.eventId);
   if (lastRoundEventStartKey === key) return;
   lastRoundEventStartKey = key;
+  lastRoundEventStartMsg = msg;
   const spec = roundEventToCinematicSpec(
     String(msg.eventType || ""),
     String(msg.title || ""),
@@ -614,6 +664,7 @@ export function syncPremiumBattlePresentation(opts) {
 
   if (!online || spectator || gameFinished) {
     stopHudTick();
+    lastRoundEventStartMsg = null;
     if (hudDock) {
       hudDock.hidden = true;
       hudDock.innerHTML = "";
@@ -625,6 +676,10 @@ export function syncPremiumBattlePresentation(opts) {
     }
     syncBodyAtmosphere(null, false);
     return false;
+  }
+
+  if (lastRoundEventStartMsg && typeof lastRoundEventStartMsg.untilMs === "number") {
+    if (lastRoundEventStartMsg.untilMs <= Date.now()) lastRoundEventStartMsg = null;
   }
 
   /** @type {object[]} */
@@ -668,25 +723,7 @@ export function syncPremiumBattlePresentation(opts) {
     });
   }
 
-  const reMs =
-    typeof roundEndsAtMs === "number" && Number.isFinite(roundEndsAtMs) && roundEndsAtMs > Date.now()
-      ? roundEndsAtMs
-      : 0;
-  if (reMs > 0) {
-    const hasRoundEndChip = chips.some((c) => {
-      const u = Number(c.untilMs);
-      return Number.isFinite(u) && Math.abs(u - reMs) < 25000;
-    });
-    if (!hasRoundEndChip) {
-      chips.push({
-        kind: "battle_countdown",
-        title: "КОНЕЦ РАУНДА",
-        status: "До окончания боя",
-        untilMs: reMs,
-        theme: "round-countdown",
-      });
-    }
-  }
+  appendRoundEventHudFallback(chips, ge);
 
   const sig = JSON.stringify(
     chips.map((c) => [c.kind, c.title, c.untilMs, c.theme])

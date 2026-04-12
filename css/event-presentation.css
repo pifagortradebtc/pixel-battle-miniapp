@@ -348,10 +348,10 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 
-/* ——— Док HUD: правый верх под тулбаром (таймеры активных событий) ——— */
+/* ——— Док HUD: справа под шапкой (высота из --toolbar-h, как у плашки say) ——— */
 .event-hud-dock {
   position: fixed;
-  top: calc(52px + env(safe-area-inset-top, 0px));
+  top: calc(env(safe-area-inset-top, 0px) + var(--toolbar-h, 34px) + 6px);
   left: auto;
   right: 8px;
   z-index: 520;
@@ -494,11 +494,6 @@
 .event-hud-chip--alt-revenge {
   border-color: rgba(255, 140, 90, 0.42);
   box-shadow: 0 0 22px rgba(255, 90, 60, 0.18);
-}
-
-.event-hud-chip--round-countdown {
-  border-color: rgba(180, 200, 255, 0.35);
-  box-shadow: 0 0 18px rgba(120, 160, 255, 0.12);
 }
 
 @keyframes hud-heartbeat {

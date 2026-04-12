@@ -47,6 +47,15 @@ const MAP_VIEW_OFFSET_LIM = 8_000_000;
 const DRAW_DETAIL_GRADIENT_MAX_CELLS = 7000;
 /** Ещё тяжелее — без анимированных рёбер между командами (второй полный проход по сетке). */
 const DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS = 11000;
+/** Подсветка зон событий на карте: ≈ на 40% тусклее (RGB) и прозрачнее (α). */
+const BATTLE_EVENT_OVERLAY_RGB_MUL = 0.6;
+const BATTLE_EVENT_OVERLAY_ALPHA_MUL = 0.6;
+
+function battleEventOverlayRgba(r, g, b, a) {
+  const aa = Math.min(1, a * BATTLE_EVENT_OVERLAY_ALPHA_MUL);
+  return `rgba(${Math.round(r * BATTLE_EVENT_OVERLAY_RGB_MUL)},${Math.round(g * BATTLE_EVENT_OVERLAY_RGB_MUL)},${Math.round(b * BATTLE_EVENT_OVERLAY_RGB_MUL)},${aa})`;
+}
+
 const COOLDOWN_MS = 0;
 /** Длительность баффов «личное/командное восстановление» — как на сервере (tournament-economy). */
 const RECOVERY_BUFF_DURATION_MS = 2 * 60 * 1000;
@@ -1717,8 +1726,7 @@ function formatHudScore(n) {
     const s = ax >= 10_000 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, "");
     return `${s}K`;
   }
-  const rounded = Math.round(num * 1000) / 1000;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+  return (Math.round(num * 10) / 10).toFixed(1).replace(/\.0$/, "");
 }
 
 function hideRoundEndedOverlay() {
@@ -4782,7 +4790,9 @@ function connectWs() {
       if (msg.phase === "start" && typeof window !== "undefined" && window.console?.debug) {
         console.debug("[roundEvent]", msg.phase, msg.eventId, msg.title);
       }
-      if (msg.phase === "start") notifyRoundEventFromServer(msg);
+      notifyRoundEventFromServer(msg);
+      syncEventBanner();
+      syncTeamBuffBanner();
       scheduleDraw({ full: true });
       return;
     }
@@ -6456,7 +6466,7 @@ function draw(time = performance.now(), drawOpts = {}) {
             const L = layers[li];
             const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
             if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
-              ctx.fillStyle = `rgba(255, 230, 30, ${0.88 + pulseEv * 0.1})`;
+              ctx.fillStyle = battleEventOverlayRgba(255, 230, 30, 0.88 + pulseEv * 0.1);
               ctx.fillRect(px, py, cw, ch);
             }
             const econKinds = [
@@ -6469,10 +6479,10 @@ function draw(time = performance.now(), drawOpts = {}) {
             if (econKinds.includes(L.kind)) {
               const zone = cellInEconomicLayer(L, gx, gy);
               if (zone === "boom") {
-                ctx.fillStyle = `rgba(70, 255, 140, ${0.58 + pulseEv * 0.18})`;
+                ctx.fillStyle = battleEventOverlayRgba(70, 255, 140, 0.58 + pulseEv * 0.18);
                 ctx.fillRect(px, py, cw, ch);
               } else if (zone === "rec") {
-                ctx.fillStyle = `rgba(120, 195, 255, ${0.55 + pulseEv * 0.16})`;
+                ctx.fillStyle = battleEventOverlayRgba(120, 195, 255, 0.55 + pulseEv * 0.16);
                 ctx.fillRect(px, py, cw, ch);
               }
             }
@@ -6480,10 +6490,10 @@ function draw(time = performance.now(), drawOpts = {}) {
           if (compLayer && compLayer.compression) {
             const m = tournamentCompressionMultiplierForCell(gx, gy, gridW, gridH, compLayer.compression);
             if (m < 0.92) {
-              ctx.fillStyle = `rgba(35, 50, 95, ${Math.min(0.58, (1 - m) * 0.75)})`;
+              ctx.fillStyle = battleEventOverlayRgba(35, 50, 95, Math.min(0.58, (1 - m) * 0.75));
               ctx.fillRect(px, py, cw, ch);
             } else if (m > 1.08) {
-              ctx.fillStyle = `rgba(255, 215, 85, ${Math.min(0.58, (m - 1) * 0.85)})`;
+              ctx.fillStyle = battleEventOverlayRgba(255, 215, 85, Math.min(0.58, (m - 1) * 0.85));
               ctx.fillRect(px, py, cw, ch);
             }
           }
@@ -6511,13 +6521,13 @@ function draw(time = performance.now(), drawOpts = {}) {
           const p = 0.92 + pulseEv * 0.08;
           const padOut = Math.max(5, cell * 0.65);
           ctx.save();
-          ctx.strokeStyle = `rgba(0, 0, 0, ${0.65 * blackOutlinePulse + 0.25})`;
+          ctx.strokeStyle = battleEventOverlayRgba(0, 0, 0, 0.65 * blackOutlinePulse + 0.25);
           ctx.lineWidth = Math.max(6, cell * 0.7);
           ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
-          ctx.strokeStyle = `rgba(255, 220, 40, ${0.98 * p})`;
+          ctx.strokeStyle = battleEventOverlayRgba(255, 220, 40, 0.98 * p);
           ctx.lineWidth = Math.max(4.5, cell * 0.5);
           ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
-          ctx.strokeStyle = `rgba(255, 255, 245, ${0.9 * p})`;
+          ctx.strokeStyle = battleEventOverlayRgba(255, 255, 245, 0.9 * p);
           ctx.lineWidth = Math.max(2.5, cell * 0.24);
           ctx.strokeRect(sx0 + cell * 0.1, sy0 + cell * 0.1, sw - cell * 0.2, sh - cell * 0.2);
           ctx.restore();
@@ -6535,13 +6545,13 @@ function draw(time = performance.now(), drawOpts = {}) {
             const sh = rr.h * cell;
             const padOut = Math.max(4, cell * 0.48);
             ctx.save();
-            ctx.strokeStyle = `rgba(0, 0, 0, ${0.52 * blackOutlinePulse + 0.22})`;
+            ctx.strokeStyle = battleEventOverlayRgba(0, 0, 0, 0.52 * blackOutlinePulse + 0.22);
             ctx.lineWidth = Math.max(5, cell * 0.52);
             ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
-            ctx.strokeStyle = boom ? "rgba(30, 255, 110, 0.95)" : "rgba(120, 200, 255, 0.95)";
+            ctx.strokeStyle = boom ? battleEventOverlayRgba(30, 255, 110, 0.95) : battleEventOverlayRgba(120, 200, 255, 0.95);
             ctx.lineWidth = Math.max(3.5, cell * 0.4);
             ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
-            ctx.strokeStyle = boom ? "rgba(200, 255, 220, 0.55)" : "rgba(220, 235, 255, 0.5)";
+            ctx.strokeStyle = boom ? battleEventOverlayRgba(200, 255, 220, 0.55) : battleEventOverlayRgba(220, 235, 255, 0.5);
             ctx.lineWidth = Math.max(2, cell * 0.18);
             ctx.strokeRect(sx0 + cell * 0.1, sy0 + cell * 0.1, sw - cell * 0.2, sh - cell * 0.2);
             ctx.restore();
@@ -6577,10 +6587,10 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.clip();
         const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
         grd.addColorStop(0, "rgba(255,255,255,0)");
-        grd.addColorStop(0.5, "rgba(255,248,80,0.92)");
+        grd.addColorStop(0.5, battleEventOverlayRgba(255, 248, 80, 0.92));
         grd.addColorStop(1, "rgba(255,255,255,0)");
         ctx.fillStyle = grd;
-        ctx.globalCompositeOperation = "lighter";
+        ctx.globalCompositeOperation = "source-over";
         ctx.fillRect(sx0, sy0, sw, sh);
         ctx.restore();
       }
@@ -6589,12 +6599,12 @@ function draw(time = performance.now(), drawOpts = {}) {
         const cy = offsetY + (gridH * 0.5) * cell;
         const maxR = Math.min(w, h) * 0.58;
         ctx.save();
-        ctx.globalCompositeOperation = "lighter";
+        ctx.globalCompositeOperation = "source-over";
         for (let ring = 0; ring < 4; ring++) {
           const phase = (time * 0.0003 + ring * 0.26) % 1;
           const rad = maxR * (0.16 + phase * 0.82);
           const a = 0.09 + 0.2 * (1 - phase);
-          ctx.strokeStyle = `rgba(255,185,95,${a})`;
+          ctx.strokeStyle = battleEventOverlayRgba(255, 185, 95, a);
           ctx.lineWidth = 3 + ring * 0.45;
           ctx.beginPath();
           ctx.arc(cx, cy, rad, 0, Math.PI * 2);
@@ -6617,9 +6627,9 @@ function draw(time = performance.now(), drawOpts = {}) {
                 const cw = Math.ceil(cell);
                 const ch = Math.ceil(cell);
                 const pulseS = 0.5 + 0.5 * Math.sin(time * 0.006);
-                ctx.fillStyle = `rgba(255, 55, 25, ${0.32 + pulseS * 0.18})`;
+                ctx.fillStyle = battleEventOverlayRgba(255, 55, 25, 0.32 + pulseS * 0.18);
                 ctx.fillRect(px, py, cw, ch);
-                ctx.strokeStyle = `rgba(255, 160, 90, ${0.82})`;
+                ctx.strokeStyle = battleEventOverlayRgba(255, 160, 90, 0.82);
                 ctx.lineWidth = Math.max(1.5, cell * 0.14);
                 ctx.strokeRect(px + 0.5, py + 0.5, Math.max(1, cw - 1), Math.max(1, ch - 1));
               }

@@ -1957,7 +1957,17 @@ a.overlay__btn {
   animation: none;
 }
 
+/* Под шапкой (Магазин, База…): не перекрываем тулбар — top = safe-area + высота тулбара из JS */
 .event-banner--server-say {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: calc(var(--safe-top) + var(--toolbar-h, 34px) + 3px);
+  z-index: 22;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  box-sizing: border-box;
   color: #f8fafc;
   font-size: clamp(0.75rem, 2.8vw, 0.95rem);
   font-weight: 800;
