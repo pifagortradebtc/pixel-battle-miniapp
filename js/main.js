@@ -23,10 +23,13 @@ import {
 import {
   flagCellFromSpawn,
   FLAG_BASE_MAX_HP,
+  FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
+  FLAG_REGEN_IDLE_MS,
   FLAG_VISUAL_CELLS_ABOVE,
   computeEffectiveBaseHp,
 } from "../lib/flag-capture.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
+import { TERRITORY_ISOLATION_GRACE_MS } from "../lib/territory-isolation.js";
 
 let gridW = 360;
 let gridH = 360;
@@ -507,6 +510,9 @@ let lastTeamElimVfxAt = 0;
 let territoryIsolationCellMeta = new Map();
 /** Уже показали предупреждение для groupId кармана (не спамить при каждом sync). */
 const territoryIsolationWarnedGroupIds = new Set();
+/** Смещение времени сервера относительно клиента: serverNow − Date.now() в момент последнего sync изоляции. */
+let territoryIsolationSkewMs = 0;
+let territoryIsolationBannerIntervalId = null;
 
 const INVALID_PLACEMENT_HINTS = [
   "Ставьте пиксели только рядом с территорией команды (включая диагональ).",
@@ -866,7 +872,66 @@ function triggerDefeatScreenFlash() {
   setTimeout(() => defeatFlashEl.classList.remove("defeat-flash--on"), 900);
 }
 
+function clearTerritoryIsolationBannerInterval() {
+  if (territoryIsolationBannerIntervalId) {
+    clearInterval(territoryIsolationBannerIntervalId);
+    territoryIsolationBannerIntervalId = null;
+  }
+}
+
+/** Число с сервера (JSON иногда даёт строку). */
+function parseServerTimeMs(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && String(v).trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return NaN;
+}
+
+function updatePlacementFeedbackBannerText(text) {
+  if (placementFeedbackBannerEl && text) placementFeedbackBannerEl.textContent = text;
+  if (cooldownLabel && text) {
+    cooldownLabel.textContent = text;
+    cooldownLabel.title = text;
+  }
+}
+
+/** Минимальный остаток до обвала среди изолированных карманов моей команды (мс). */
+function getMyTeamIsolationMinMsLeft() {
+  let minMs = Infinity;
+  for (const [, meta] of territoryIsolationCellMeta) {
+    if ((meta.teamId | 0) !== (myTeamId | 0)) continue;
+    const exp = Number(meta.expiresAtMs);
+    if (!Number.isFinite(exp)) continue;
+    const ms = exp - Date.now() - territoryIsolationSkewMs;
+    if (ms < minMs) minMs = ms;
+  }
+  return Number.isFinite(minMs) && minMs !== Infinity ? minMs : NaN;
+}
+
+function buildIsolationCorridorWarningText() {
+  const minMs = getMyTeamIsolationMinMsLeft();
+  if (!Number.isFinite(minMs)) return null;
+  const secFull = Math.ceil(minMs / 1000);
+  const secPart = secFull < 1 ? "менее 1" : String(Math.max(0, secFull));
+  return `Территория отрезана от базы! Соедините коридор за ${secPart} с — иначе клетки станут нейтральными.`;
+}
+
+function startTerritoryIsolationBannerTicker() {
+  clearTerritoryIsolationBannerInterval();
+  territoryIsolationBannerIntervalId = setInterval(() => {
+    const t = buildIsolationCorridorWarningText();
+    if (!t) {
+      clearTerritoryIsolationBannerInterval();
+      return;
+    }
+    updatePlacementFeedbackBannerText(t);
+  }, 1000);
+}
+
 function hidePlacementFeedbackBanner() {
+  clearTerritoryIsolationBannerInterval();
   if (placementFeedbackHideTimer) {
     clearTimeout(placementFeedbackHideTimer);
     placementFeedbackHideTimer = null;
@@ -887,10 +952,15 @@ function hidePlacementFeedbackBanner() {
 /**
  * Явный фидбек по отклонённым действиям: полоска под статусом + тактильный отклик; не полагаемся только на Telegram alert.
  * @param {"warn"|"error"} severity
- * @param {{ telegramAlert?: boolean }} opts
+ * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, isolationTicker?: boolean }} opts
  */
 function showPlacementFeedback(text, severity, opts = {}) {
   const telegramAlert = opts.telegramAlert === true;
+  if (!opts.isolationTicker) clearTerritoryIsolationBannerInterval();
+  const hideMs =
+    typeof opts.bannerDurationMs === "number" && Number.isFinite(opts.bannerDurationMs) && opts.bannerDurationMs > 0
+      ? opts.bannerDurationMs
+      : 5600;
   if (placementFeedbackBannerEl && text) {
     placementFeedbackBannerEl.textContent = text;
     placementFeedbackBannerEl.hidden = false;
@@ -900,7 +970,7 @@ function showPlacementFeedback(text, severity, opts = {}) {
     placementFeedbackHideTimer = setTimeout(() => {
       placementFeedbackHideTimer = null;
       hidePlacementFeedbackBanner();
-    }, 5600);
+    }, hideMs);
   }
   if (cooldownLabel && text) {
     cooldownLabel.hidden = false;
@@ -921,6 +991,7 @@ function showPlacementFeedback(text, severity, opts = {}) {
   if (telegramAlert && typeof tg?.showAlert === "function") {
     tg.showAlert(text);
   }
+  if (opts.isolationTicker) startTerritoryIsolationBannerTicker();
 }
 
 function triggerMapShake(ms = 560) {
@@ -932,6 +1003,7 @@ function triggerMapShake(ms = 560) {
 }
 
 function clearClientTerritoryIsolation() {
+  clearTerritoryIsolationBannerInterval();
   territoryIsolationCellMeta.clear();
   territoryIsolationWarnedGroupIds.clear();
 }
@@ -952,8 +1024,9 @@ function applyClientTerritoryIsolationFromServer(payload) {
     return;
   }
   territoryIsolationCellMeta.clear();
-  const serverNow = typeof payload.serverNow === "number" ? payload.serverNow : Date.now();
-  const skew = serverNow - Date.now();
+  const clientAtReceive = Date.now();
+  const serverNow = parseServerTimeMs(payload.serverNow);
+  territoryIsolationSkewMs = Number.isFinite(serverNow) ? serverNow - clientAtReceive : 0;
   const groups = Array.isArray(payload.groups) ? payload.groups : [];
   const activeGroupIds = new Set();
   for (let gi = 0; gi < groups.length; gi++) {
@@ -961,7 +1034,12 @@ function applyClientTerritoryIsolationFromServer(payload) {
     const groupId = isolationGroupIdFromServerGroup(g);
     if (groupId) activeGroupIds.add(groupId);
     const tid = g.teamId | 0;
-    const exp = typeof g.expiresAtMs === "number" ? g.expiresAtMs : 0;
+    let exp = parseServerTimeMs(g.expiresAtMs);
+    if (!Number.isFinite(exp)) exp = parseServerTimeMs(g.deadlineMs);
+    if (!Number.isFinite(exp) && Number.isFinite(serverNow)) {
+      exp = serverNow + TERRITORY_ISOLATION_GRACE_MS;
+    }
+    if (!Number.isFinite(exp)) exp = clientAtReceive + TERRITORY_ISOLATION_GRACE_MS;
     const cells = Array.isArray(g.cells) ? g.cells : [];
     for (let ci = 0; ci < cells.length; ci++) {
       const c = cells[ci];
@@ -980,13 +1058,25 @@ function applyClientTerritoryIsolationFromServer(payload) {
     if ((tid | 0) !== (myTeamId | 0) || !groupId) continue;
     if (territoryIsolationWarnedGroupIds.has(groupId)) continue;
     territoryIsolationWarnedGroupIds.add(groupId);
-    const exp = typeof g.expiresAtMs === "number" ? g.expiresAtMs : 0;
-    const sec = Math.max(1, Math.ceil((exp - Date.now() - skew) / 1000));
-    showPlacementFeedback(
-      `Территория отрезана от базы! Соедините коридор за ${sec} с — иначе клетки станут нейтральными.`,
-      "warn",
-      { telegramAlert: false }
-    );
+    let exp = parseServerTimeMs(g.expiresAtMs);
+    if (!Number.isFinite(exp)) exp = parseServerTimeMs(g.deadlineMs);
+    let msLeft = NaN;
+    if (Number.isFinite(exp) && Number.isFinite(serverNow)) {
+      msLeft = exp - serverNow;
+    } else if (Number.isFinite(exp)) {
+      msLeft = exp - clientAtReceive;
+    } else {
+      msLeft = TERRITORY_ISOLATION_GRACE_MS;
+    }
+    const secFull = Math.ceil(msLeft / 1000);
+    const secPart = secFull < 1 ? "менее 1" : String(Math.max(0, secFull));
+    const line = `Территория отрезана от базы! Соедините коридор за ${secPart} с — иначе клетки станут нейтральными.`;
+    const hideBannerMs = Math.min(45_000, Math.max(10_000, msLeft + 2500));
+    showPlacementFeedback(line, "warn", {
+      telegramAlert: false,
+      isolationTicker: true,
+      bannerDurationMs: hideBannerMs,
+    });
     break;
   }
   scheduleDraw({ full: true });
@@ -2452,26 +2542,52 @@ function notifyReject(reason) {
 }
 
 function syncFlagCaptureStateFromMeta(flags) {
-  flagCaptureClientState = new Map();
+  /* Не очищаем карту до проверки: иначе при meta без flags вся карта «сбрасывается» в 20/20 для всех баз. */
   if (!Array.isArray(flags)) return;
+  const next = new Map();
   for (const f of flags) {
     const tid = Number(f.teamId) | 0;
     if (tid <= 0) continue;
-    const maxHp = typeof f.maxHp === "number" ? f.maxHp | 0 : FLAG_BASE_MAX_HP;
-    let hp =
-      typeof f.hp === "number"
-        ? f.hp | 0
-        : Math.max(0, maxHp - (f.progress | 0));
+    let maxHp = FLAG_BASE_MAX_HP;
+    if (typeof f.maxHp === "number" && Number.isFinite(f.maxHp)) maxHp = f.maxHp | 0;
+    else if (f.maxHp != null && String(f.maxHp).trim() !== "") {
+      const mx = Number(f.maxHp);
+      if (Number.isFinite(mx) && mx > 0) maxHp = mx | 0;
+    }
+    let hp = NaN;
+    if (typeof f.hp === "number" && Number.isFinite(f.hp)) hp = f.hp | 0;
+    else if (f.hp != null && String(f.hp).trim() !== "") {
+      const n = Number(f.hp);
+      if (Number.isFinite(n)) hp = n | 0;
+    }
+    if (!Number.isFinite(hp)) hp = Math.max(0, maxHp - (f.progress | 0));
     if (hp >= maxHp) continue;
-    const lh =
-      typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt) ? f.lastHitAt | 0 : 0;
-    flagCaptureClientState.set(tid, {
+    const prev = flagCaptureClientState.get(tid);
+    let lh = 0;
+    if (typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt)) lh = f.lastHitAt | 0;
+    else if (f.lastHitAt != null && String(f.lastHitAt).trim() !== "") {
+      const n = Number(f.lastHitAt);
+      if (Number.isFinite(n)) lh = n | 0;
+    }
+    if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+      if (
+        prev &&
+        Number.isFinite(prev.lastHitAt) &&
+        prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
+      ) {
+        lh = prev.lastHitAt | 0;
+      } else {
+        lh = Date.now() - FLAG_REGEN_IDLE_MS;
+      }
+    }
+    next.set(tid, {
       hp,
       maxHp,
       lastHitAt: lh,
-      attackerTeamId: f.attackerTeamId | 0,
+      attackerTeamId: Number(f.attackerTeamId) | 0,
     });
   }
+  flagCaptureClientState = next;
 }
 
 function showFlagAlertBanner(text, durationMs = ALERT_AUTO_HIDE_MS) {
@@ -4174,10 +4290,29 @@ function connectWs() {
             : Math.max(0, maxHp - (msg.progress | 0));
         if (hp >= maxHp) flagCaptureClientState.delete(did);
         else {
+          const prev = flagCaptureClientState.get(did);
+          let lh = NaN;
+          if (typeof msg.lastHitAt === "number" && Number.isFinite(msg.lastHitAt)) lh = msg.lastHitAt | 0;
+          else if (msg.lastHitAt != null && String(msg.lastHitAt).trim() !== "") {
+            const n = Number(msg.lastHitAt);
+            if (Number.isFinite(n)) lh = n | 0;
+          }
+          if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+            if (
+              msg.regen &&
+              prev &&
+              Number.isFinite(prev.lastHitAt) &&
+              prev.lastHitAt >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
+            ) {
+              lh = prev.lastHitAt | 0;
+            } else {
+              lh = Date.now();
+            }
+          }
           flagCaptureClientState.set(did, {
             hp,
             maxHp,
-            lastHitAt: typeof msg.lastHitAt === "number" ? msg.lastHitAt | 0 : Date.now(),
+            lastHitAt: lh,
             attackerTeamId: msg.attackerTeamId | 0,
           });
           if (!msg.regen && teamsMeta && boardVfx) {
@@ -4328,9 +4463,9 @@ function connectWs() {
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
       invalidateTeamColorByIdCache();
-      const aliveIds = new Set((teamsMeta || []).map((x) => x.id));
+      const aliveIds = new Set((teamsMeta || []).map((x) => Number(x.id) | 0));
       for (const id of [...flagCaptureClientState.keys()]) {
-        if (!aliveIds.has(id)) flagCaptureClientState.delete(id);
+        if (!aliveIds.has(id | 0)) flagCaptureClientState.delete(id);
       }
       rebuildTeamList();
       updateTeamBadge();
@@ -5706,7 +5841,8 @@ function draw(time = performance.now(), drawOpts = {}) {
       const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
       const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
       if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) continue;
-      const raw = flagCaptureClientState.get(t.id);
+      const tidFlag = Number(t.id) | 0;
+      const raw = flagCaptureClientState.get(tidFlag);
       const stForHp =
         raw && typeof raw.hp === "number"
           ? { hp: raw.hp | 0, lastHitAt: raw.lastHitAt | 0 }
@@ -5724,7 +5860,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       const dangerHpZero = displayHp <= 0 && stForHp != null;
       const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + dmgTaken * 0.15);
       const pulseRed =
-        dangerCrit && shNowF < myFlagCriticalUntil && t.id === myTeamId
+        dangerCrit && shNowF < myFlagCriticalUntil && tidFlag === (myTeamId | 0)
           ? 0.35 + 0.35 * Math.sin(time * 0.055)
           : dangerMid
             ? 0.12 + 0.12 * Math.sin(time * 0.035)
@@ -5765,7 +5901,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.restore();
       /* Не заливаем якорь базы цветом атакующего: клетка остаётся цветом защитника в данных и на канве;
        * краткий «удар» атакующим цветом даёт только boardVfx.flagBaseHitImpact (сервер → flagCaptureProgress). */
-      if (myTeamId != null && t.id === myTeamId && shNowF < myFlagUnderAttackUntil && dmgTaken > 0) {
+      if (myTeamId != null && tidFlag === (myTeamId | 0) && shNowF < myFlagUnderAttackUntil && dmgTaken > 0) {
         const flash = 0.18 + 0.2 * Math.sin(time * 0.028);
         ctx.fillStyle = `rgba(255, 35, 60, ${flash})`;
         ctx.fillRect(px, py, cw, ch);

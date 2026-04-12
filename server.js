@@ -2236,6 +2236,12 @@ function buildFlagsSnapshot() {
     if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
     const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
     const st = flagCaptureByDefender.get(Number(t.id) | 0);
+    if (st) {
+      const lh = Number(st.lastHitAt) | 0;
+      if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+        st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
+      }
+    }
     const eff = computeEffectiveBaseHp(st, now);
     const hp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
     const attackerTeamId = (st?.attackerTeamId | 0) || 0;
@@ -2258,6 +2264,12 @@ function tickFlagBaseRegen(now) {
   if (gameFinished || roundEnding) return;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
+    if (!st) continue;
+    /* Без валидного lastHitAt computeEffectiveBaseHp не даёт рост eff — регена нет (см. FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS). */
+    const lh0 = Number(st.lastHitAt) | 0;
+    if (!Number.isFinite(lh0) || lh0 < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+      st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
+    }
     const eff = computeEffectiveBaseHp(st, now);
     if (eff >= FLAG_BASE_MAX_HP - 1e-9) {
       flagCaptureByDefender.delete(d);

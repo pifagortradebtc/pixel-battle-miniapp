@@ -8,7 +8,11 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
+import {
+  isWorldMapWaterPixel,
+  fillEnclosedWaterAsLand,
+  softenPastelOceanLandRgb,
+} from "../lib/world-map-water.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, "..");
@@ -70,6 +74,17 @@ function main() {
     cells[i] = v;
     if (v !== 0) land++;
     if (oldCells[i] !== v) changed++;
+  }
+
+  const enclosedFilled = fillEnclosedWaterAsLand(cells, BASE, BASE);
+  if (enclosedFilled > 0) {
+    land += enclosedFilled;
+    console.log("запертая вода → суша:", enclosedFilled, "клеток");
+  }
+
+  const rgbSoft = softenPastelOceanLandRgb(cells, rgb, BASE, BASE, 3);
+  if (rgbSoft > 0) {
+    console.log("пастельная «вода» на суше → смягчение RGB:", rgbSoft, "записей");
   }
 
   const countryNames = Array.isArray(j.countryNames) ? j.countryNames : ["Вода", "Река", "Суша"];
