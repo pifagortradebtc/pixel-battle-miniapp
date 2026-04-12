@@ -14,6 +14,7 @@ import {
   BASE_ACTION_COOLDOWN_SEC,
   PRICES_QUANT,
   RECOVERY_BUFF_DURATION_MS,
+  REFERRAL_JOIN_INVITER_QUANT,
   getCurrentCooldownMs,
   getEffectiveRecoverySec,
   quantToUsdt,
@@ -631,6 +632,17 @@ async function rememberPlayerProfile(ws, msg) {
         if (!eu.invitedByPlayerKey) {
           eu.invitedByPlayerKey = refPk;
           await walletStore.save();
+          const refPayId = `referral_join_${pkInvite}`;
+          const refAmt = quantToUsdt(REFERRAL_JOIN_INVITER_QUANT);
+          const dep = await walletStore.finalizeDeposit(refPayId, refPk, refAmt, {});
+          if (dep.ok && wss) {
+            for (const c of wss.clients) {
+              if (c.readyState !== 1) continue;
+              if (sanitizePlayerKey(c.playerKey) !== refPk) continue;
+              safeSend(c, { type: "referralJoinReward", quant: REFERRAL_JOIN_INVITER_QUANT });
+              safeSend(c, await buildWalletPayload(c));
+            }
+          }
         }
       }
     }

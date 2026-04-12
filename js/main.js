@@ -19,6 +19,7 @@ import {
   getCurrentCooldownMs,
   getEffectiveRecoverySec,
   PRICES_QUANT,
+  REFERRAL_JOIN_INVITER_QUANT,
 } from "../lib/tournament-economy.js";
 import {
   flagCellFromSpawn,
@@ -235,6 +236,7 @@ const btnTeamOverlayBack = document.getElementById("btn-team-overlay-back");
 const teamListEl = document.getElementById("team-list");
 const teamBadgeEmoji = document.getElementById("team-badge-emoji");
 const teamBadgeColorEl = document.getElementById("team-badge-color");
+const btnReferral = document.getElementById("btn-referral");
 const teamSettingsOverlay = document.getElementById("team-settings-overlay");
 const teamSettingsName = document.getElementById("team-settings-name");
 const teamSettingsEmojiInput = document.getElementById("team-settings-emoji");
@@ -1019,7 +1021,8 @@ function hidePlacementFeedbackBanner() {
     placementFeedbackBannerEl.hidden = true;
     placementFeedbackBannerEl.classList.remove(
       "event-banner--feedback-warn",
-      "event-banner--feedback-error"
+      "event-banner--feedback-error",
+      "event-banner--feedback-success"
     );
   }
   if (cooldownLabel) {
@@ -1029,8 +1032,8 @@ function hidePlacementFeedbackBanner() {
 }
 
 /**
- * Явный фидбек по отклонённым действиям: полоска под статусом + тактильный отклик; не полагаемся только на Telegram alert.
- * @param {"warn"|"error"} severity
+ * Явный фидбек: полоска под статусом + тактильный отклик; не полагаемся только на Telegram alert.
+ * @param {"warn"|"error"|"success"} severity
  * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, skipCooldownChrome?: boolean }} opts
  */
 function showPlacementFeedback(text, severity, opts = {}) {
@@ -1045,6 +1048,7 @@ function showPlacementFeedback(text, severity, opts = {}) {
     placementFeedbackBannerEl.hidden = false;
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-warn", severity === "warn");
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-error", severity === "error");
+    placementFeedbackBannerEl.classList.toggle("event-banner--feedback-success", severity === "success");
     if (placementFeedbackHideTimer) clearTimeout(placementFeedbackHideTimer);
     placementFeedbackHideTimer = setTimeout(() => {
       placementFeedbackHideTimer = null;
@@ -1061,6 +1065,8 @@ function showPlacementFeedback(text, severity, opts = {}) {
   try {
     if (severity === "error" && tg?.HapticFeedback?.notificationOccurred) {
       tg.HapticFeedback.notificationOccurred("error");
+    } else if (severity === "success" && tg?.HapticFeedback?.notificationOccurred) {
+      tg.HapticFeedback.notificationOccurred("success");
     } else if (tg?.HapticFeedback?.notificationOccurred) {
       tg.HapticFeedback.notificationOccurred("warning");
     }
@@ -1721,6 +1727,10 @@ function setFooterMode() {
     teamBadgeColorEl.hidden = !showSwatch;
   }
   if (online && joined) updateTeamBadge();
+  if (btnReferral) {
+    btnReferral.hidden =
+      showTeamPaletteOnly || !online || !joined || spectatorMode || !!gameFinishedMeta;
+  }
   if (btnToolbarBase) {
     btnToolbarBase.hidden = !online || !joined || spectatorMode;
   }
@@ -1985,8 +1995,7 @@ function sendLeaveTeamToRecoverFromStaleServer() {
 }
 
 /**
- * Реферал: ?team= / ?ref=; опционально ?refu= (Telegram id пригласившего).
- * В Telegram: startapp=team_5 или team_5_r_123456 (id пригласившего).
+ * Реферал: ?team= / ?ref=; ?refu= и startapp=…_r_<tgId> — привязка пригласившего (бонус +10 кв. ему при первом заходе новичка).
  */
 function parseStartParamRef() {
   const q = new URLSearchParams(location.search);
@@ -2039,7 +2048,7 @@ function stripTeamFromUrl() {
 
 function buildWebReferralUrl() {
   if (myTeamId == null) return "";
-  const nu = new URL(location.href);
+  const nu = new URL(`${location.origin}${location.pathname || "/"}`);
   nu.searchParams.set("team", String(myTeamId));
   nu.searchParams.delete("ref");
   const tgUser = getTelegramUserForServer();
@@ -2086,10 +2095,9 @@ async function copyReferralLink() {
 }
 
 function setupReferralButton() {
-  const b = document.getElementById("btn-referral");
-  if (!b) return;
-  b.addEventListener("click", () => {
-    copyReferralLink();
+  if (!btnReferral) return;
+  btnReferral.addEventListener("click", () => {
+    showReferralSplash();
   });
 }
 
@@ -4195,6 +4203,17 @@ function connectWs() {
     }
     if (!msg || typeof msg !== "object") return;
 
+    if (msg.type === "referralJoinReward") {
+      const q = Number(msg.quant);
+      const n =
+        Number.isFinite(q) && q > 0 ? Math.floor(q) : REFERRAL_JOIN_INVITER_QUANT;
+      showPlacementFeedback(`+${n} квантов: игрок перешёл по вашей ссылке.`, "success", {
+        bannerDurationMs: 8000,
+        skipCooldownChrome: true,
+      });
+      return;
+    }
+
     if (msg.type === "gameEnded") {
       endSessionRestore();
       clearClientTerritoryIsolation();
@@ -5972,14 +5991,8 @@ function draw(time = performance.now(), drawOpts = {}) {
             const L = layers[li];
             const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
             if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
-              ctx.fillStyle = `rgba(255, 198, 70, ${0.12 + pulseEv * 0.1})`;
+              ctx.fillStyle = `rgba(255, 210, 45, ${0.4 + pulseEv * 0.14})`;
               ctx.fillRect(px, py, cw, ch);
-              ctx.strokeStyle = `rgba(255, 210, 120, ${0.2 + pulseEv * 0.1})`;
-              ctx.lineWidth = Math.max(1, cell * 0.14);
-              ctx.strokeRect(px - 0.5, py - 0.5, cw + 1, ch + 1);
-              ctx.strokeStyle = `rgba(255, 245, 200, ${0.42 + pulseEv * 0.22})`;
-              ctx.lineWidth = Math.max(1, cell * 0.07);
-              ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
             }
             const econKinds = [
               "trade_boom",
@@ -5991,31 +6004,73 @@ function draw(time = performance.now(), drawOpts = {}) {
             if (econKinds.includes(L.kind)) {
               const zone = cellInEconomicLayer(L, gx, gy);
               if (zone === "boom") {
-                ctx.fillStyle = `rgba(70, 220, 130, ${0.09 + pulseEv * 0.06})`;
+                ctx.fillStyle = `rgba(55, 255, 130, ${0.32 + pulseEv * 0.12})`;
                 ctx.fillRect(px, py, cw, ch);
-                if (((gx + gy * 3 + ((time / 140) | 0)) & 7) === 0) {
-                  ctx.fillStyle = `rgba(200, 255, 220, ${0.1 + pulseEv * 0.07})`;
-                  ctx.fillRect(px + cw * 0.42, py, Math.max(1, cw * 0.16), ch * 0.42);
-                }
               } else if (zone === "rec") {
-                ctx.fillStyle = `rgba(100, 140, 200, ${0.12 + pulseEv * 0.06})`;
+                ctx.fillStyle = `rgba(110, 175, 255, ${0.34 + pulseEv * 0.1})`;
                 ctx.fillRect(px, py, cw, ch);
-                if (((gx * 3 + gy + ((time / 160) | 0)) & 7) === 1) {
-                  ctx.fillStyle = `rgba(130, 150, 200, ${0.14})`;
-                  ctx.fillRect(px + cw * 0.1, py + ch * 0.62, cw * 0.8, Math.max(1, ch * 0.1));
-                }
               }
             }
           }
           if (compLayer && compLayer.compression) {
             const m = tournamentCompressionMultiplierForCell(gx, gy, gridW, gridH, compLayer.compression);
             if (m < 0.92) {
-              ctx.fillStyle = `rgba(20, 35, 65, ${Math.min(0.4, (1 - m) * 0.5)})`;
+              ctx.fillStyle = `rgba(35, 50, 95, ${Math.min(0.58, (1 - m) * 0.75)})`;
               ctx.fillRect(px, py, cw, ch);
             } else if (m > 1.08) {
-              ctx.fillStyle = `rgba(255, 185, 95, ${Math.min(0.24, (m - 1) * 0.38)})`;
+              ctx.fillStyle = `rgba(255, 205, 70, ${Math.min(0.48, (m - 1) * 0.72)})`;
               ctx.fillRect(px, py, cw, ch);
             }
+          }
+        }
+      }
+    }
+    if (layers && layers.length) {
+      const goldKindsOutline = ["gold_zone", "target_zone", "duel_zone"];
+      const econKindsOutline = [
+        "trade_boom",
+        "recession",
+        "economic_shift",
+        "economic_rotation",
+        "resource_surge",
+      ];
+      for (let oli = 0; oli < layers.length; oli++) {
+        const L = layers[oli];
+        if (goldKindsOutline.includes(L.kind) && L.rect) {
+          const r = L.rect;
+          const sx0 = offsetX + r.x0 * cell;
+          const sy0 = offsetY + r.y0 * cell;
+          const sw = r.w * cell;
+          const sh = r.h * cell;
+          const p = 0.78 + pulseEv * 0.2;
+          ctx.save();
+          ctx.strokeStyle = `rgba(255, 200, 30, ${0.95 * p})`;
+          ctx.lineWidth = Math.max(3.5, cell * 0.42);
+          ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
+          ctx.strokeStyle = `rgba(255, 252, 220, ${0.72 * p})`;
+          ctx.lineWidth = Math.max(2, cell * 0.2);
+          ctx.strokeRect(sx0 + cell * 0.12, sy0 + cell * 0.12, sw - cell * 0.24, sh - cell * 0.24);
+          ctx.restore();
+        }
+        if (econKindsOutline.includes(L.kind)) {
+          const rectList =
+            Array.isArray(L.rects) && L.rects.length > 0 ? L.rects : L.rect ? [L.rect] : [];
+          for (let ri = 0; ri < rectList.length; ri++) {
+            const rr = rectList[ri];
+            if (!rr || !(rr.w > 0) || !(rr.h > 0)) continue;
+            const boom = Number(rr.mult) > 1;
+            const sx0 = offsetX + rr.x0 * cell;
+            const sy0 = offsetY + rr.y0 * cell;
+            const sw = rr.w * cell;
+            const sh = rr.h * cell;
+            ctx.save();
+            ctx.strokeStyle = boom ? "rgba(30, 255, 110, 0.95)" : "rgba(120, 200, 255, 0.95)";
+            ctx.lineWidth = Math.max(3.5, cell * 0.4);
+            ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
+            ctx.strokeStyle = boom ? "rgba(200, 255, 220, 0.55)" : "rgba(220, 235, 255, 0.5)";
+            ctx.lineWidth = Math.max(2, cell * 0.18);
+            ctx.strokeRect(sx0 + cell * 0.1, sy0 + cell * 0.1, sw - cell * 0.2, sh - cell * 0.2);
+            ctx.restore();
           }
         }
       }
@@ -6048,7 +6103,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.clip();
         const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
         grd.addColorStop(0, "rgba(255,255,255,0)");
-        grd.addColorStop(0.5, "rgba(255,235,170,0.2)");
+        grd.addColorStop(0.5, "rgba(255,235,170,0.48)");
         grd.addColorStop(1, "rgba(255,255,255,0)");
         ctx.fillStyle = grd;
         ctx.globalCompositeOperation = "lighter";
@@ -6061,12 +6116,12 @@ function draw(time = performance.now(), drawOpts = {}) {
         const maxR = Math.min(w, h) * 0.58;
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
-        for (let ring = 0; ring < 3; ring++) {
-          const phase = (time * 0.00032 + ring * 0.34) % 1;
-          const rad = maxR * (0.22 + phase * 0.75);
-          const a = 0.055 * (1 - phase);
-          ctx.strokeStyle = `rgba(255,150,100,${a})`;
-          ctx.lineWidth = 2;
+        for (let ring = 0; ring < 4; ring++) {
+          const phase = (time * 0.0003 + ring * 0.26) % 1;
+          const rad = maxR * (0.16 + phase * 0.82);
+          const a = 0.09 + 0.2 * (1 - phase);
+          ctx.strokeStyle = `rgba(255,185,95,${a})`;
+          ctx.lineWidth = 3 + ring * 0.45;
           ctx.beginPath();
           ctx.arc(cx, cy, rad, 0, Math.PI * 2);
           ctx.stroke();
@@ -6088,8 +6143,11 @@ function draw(time = performance.now(), drawOpts = {}) {
                 const cw = Math.ceil(cell);
                 const ch = Math.ceil(cell);
                 const pulseS = 0.5 + 0.5 * Math.sin(time * 0.006);
-                ctx.fillStyle = `rgba(255, 85, 45, ${0.13 + pulseS * 0.11})`;
+                ctx.fillStyle = `rgba(255, 55, 25, ${0.32 + pulseS * 0.18})`;
                 ctx.fillRect(px, py, cw, ch);
+                ctx.strokeStyle = `rgba(255, 160, 90, ${0.82})`;
+                ctx.lineWidth = Math.max(1.5, cell * 0.14);
+                ctx.strokeRect(px + 0.5, py + 0.5, Math.max(1, cw - 1), Math.max(1, ch - 1));
               }
             }
           }

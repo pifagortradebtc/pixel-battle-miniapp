@@ -1040,7 +1040,8 @@ body {
 .team-badge--palette-only .team-badge__emoji,
 .team-badge--palette-only .team-badge__color,
 .team-badge--palette-only .team-badge__name,
-.team-badge--palette-only .team-badge__count {
+.team-badge--palette-only .team-badge__count,
+.team-badge--palette-only .team-badge__invite {
   display: none !important;
 }
 
@@ -1693,6 +1694,13 @@ body {
   background: linear-gradient(90deg, rgba(99, 16, 16, 0.97), rgba(185, 28, 28, 0.95), rgba(99, 16, 16, 0.97));
   border-bottom-color: rgba(252, 165, 165, 0.65);
   animation: feedback-banner-pulse 0.65s ease-in-out infinite;
+}
+
+.event-banner--feedback-success {
+  color: #ecfdf5;
+  background: linear-gradient(90deg, rgba(6, 78, 59, 0.96), rgba(5, 122, 85, 0.94), rgba(6, 78, 59, 0.96));
+  border-bottom-color: rgba(110, 231, 183, 0.55);
+  animation: feedback-banner-pulse 0.75s ease-in-out infinite;
 }
 
 @keyframes feedback-banner-pulse {

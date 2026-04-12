@@ -133,7 +133,11 @@
   <div id="create-team-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Новая команда</h2>
-      <p class="overlay__hint">Название, смайлик и цвет — все участники рисуют этим цветом. Цвет можно выбрать только здесь; после создания он не меняется. Далее — реферальная ссылка.</p>
+      <p class="overlay__hint">
+        Название, смайлик и цвет — все участники рисуют этим цветом. Цвет только при создании. После создания вы получите
+        реферальную ссылку: за каждого нового игрока из Telegram по ней — <strong>+10 квантов</strong> вам (один раз на
+        человека).
+      </p>
       <label class="field">
         <span class="field__label">Название</span>
         <input type="text" id="create-team-name" class="field__input" maxlength="40" autocomplete="off" />
@@ -184,7 +188,10 @@
   <div id="referral-splash-overlay" class="overlay" hidden>
     <div class="overlay__card overlay__card--settings">
       <h2 class="overlay__title">Команда создана</h2>
-      <p class="overlay__hint">Отправьте ссылку друзьям — они сразу окажутся в вашей команде.</p>
+      <p class="overlay__hint">
+        Отправьте ссылку друзьям — они сразу окажутся в вашей команде. Когда человек первый раз зайдёт в игру из Telegram по
+        вашей ссылке, вы получите <strong>+10 квантов</strong> (один раз на каждого приглашённого).
+      </p>
       <label class="field">
         <span class="field__label">Реферальная ссылка</span>
         <textarea id="referral-splash-text" class="field__input field__input--textarea" readonly rows="4" spellcheck="false"></textarea>
@@ -674,6 +681,14 @@
               ></button>
               <span id="team-badge-name" class="team-badge__name"></span>
               <span id="team-badge-count" class="team-badge__count"></span>
+              <button
+                type="button"
+                id="btn-referral"
+                class="team-badge__invite"
+                title="Показать и скопировать ссылку-приглашение в команду"
+              >
+                Пригласить
+              </button>
             </div>
           </div>
           <aside
