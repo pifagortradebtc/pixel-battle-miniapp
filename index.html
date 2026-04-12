@@ -85,7 +85,7 @@
   </div>
 
   <!-- Порядок оверлеев: снизу вверх (последний в DOM — поверх остальных). -->
-  <div id="welcome-overlay" class="overlay" hidden>
+  <div id="welcome-overlay" class="overlay overlay--game-onboarding" hidden>
     <div class="overlay__card overlay__card--settings welcome-card">
       <div class="welcome-panel" role="dialog" aria-labelledby="welcome-title" aria-modal="true">
         <button
@@ -98,6 +98,7 @@
           ×
         </button>
         <h2 id="welcome-title" class="welcome-panel__title">Пиксельная битва</h2>
+        <p class="welcome-panel__subtitle">Соревновательный захват территорий</p>
         <div class="tg-promo-bubble" role="status">
           Создай команду, захвати больше территорий, попади в финал и получи 5000 usd.
         </div>
@@ -119,9 +120,10 @@
     </div>
   </div>
 
-  <div id="team-overlay" class="overlay" hidden>
-    <div class="overlay__card">
-      <h2 class="overlay__title">Команда</h2>
+  <div id="team-overlay" class="overlay overlay--game-onboarding" hidden>
+    <div class="overlay__card overlay__card--game-roster">
+      <h2 class="overlay__title game-form__title">Команда</h2>
+      <p class="game-form__subtitle game-form__subtitle--tight">Создайте отряд или вступите по списку</p>
       <p class="overlay__hint">Пока никто не создал команду, список пуст. Создайте свою или дождитесь других. Вступите в команду из списка (лимит участников у каждой команды). По ссылке с номером команды друзья сразу попадут к вам.</p>
       <button type="button" id="btn-open-create-team" class="team-create-btn">Создать команду</button>
       <button type="button" id="btn-team-overlay-back" class="overlay__btn overlay__btn--secondary team-back-btn">Назад</button>
@@ -130,24 +132,27 @@
     </div>
   </div>
 
-  <div id="create-team-overlay" class="overlay" hidden>
-    <div class="overlay__card overlay__card--settings">
-      <h2 class="overlay__title">Новая команда</h2>
-      <p class="overlay__hint">
+  <div id="create-team-overlay" class="overlay overlay--game-onboarding" hidden>
+    <div class="overlay__card overlay__card--settings overlay__card--game-form">
+      <header class="game-form__header">
+        <h2 class="overlay__title game-form__title">Новая команда</h2>
+        <p class="game-form__subtitle">Собери отряд: имя, значок и цвет на карте</p>
+      </header>
+      <p class="overlay__hint game-form__hint">
         Название, смайлик и цвет — все участники рисуют этим цветом. Цвет только при создании. После создания вы получите
         реферальную ссылку: за каждого нового игрока из Telegram по ней — <strong>+10 квантов</strong> вам (один раз на
         человека).
       </p>
-      <label class="field">
-        <span class="field__label">Название</span>
+      <label class="field game-form__field">
+        <span class="field__label game-form__section-label">Название</span>
         <input type="text" id="create-team-name" class="field__input" maxlength="40" autocomplete="off" />
       </label>
-      <p class="field__label">Цвет команды (30 вариантов, потом не меняется)</p>
+      <p class="field__label game-form__section-label">Цвет команды <span class="game-form__section-meta">30 вариантов · потом не меняется</span></p>
       <div id="create-team-color-palette" class="palette palette--create-team" role="listbox" aria-label="Цвет команды"></div>
-      <p class="field__label">Быстрый выбор смайлика</p>
-      <div id="create-team-emoji-presets" class="emoji-presets" role="list"></div>
-      <label class="field">
-        <span class="field__label">Свой эмодзи</span>
+      <p class="field__label game-form__section-label">Быстрый выбор смайлика</p>
+      <div id="create-team-emoji-presets" class="emoji-presets emoji-presets--game" role="list"></div>
+      <label class="field game-form__field">
+        <span class="field__label game-form__section-label">Свой эмодзи</span>
         <input type="text" id="create-team-emoji" class="field__input" maxlength="8" autocomplete="off" placeholder="например 🦁" />
       </label>
       <div class="overlay__actions">

@@ -2495,11 +2495,16 @@ function scheduleTeamDefeatOverlay(canReenter) {
   }, TEAM_DEFEAT_UI_DELAY_MS);
 }
 
+function getEmojiPresetButtonValue(btn) {
+  const g = btn.querySelector(".emoji-presets__glyph");
+  return (g?.textContent ?? btn.textContent ?? "").trim();
+}
+
 function syncCreateEmojiPresetHighlight() {
   if (!createTeamEmojiPresets || !createTeamEmojiInput) return;
   const cur = createTeamEmojiInput.value.trim();
   createTeamEmojiPresets.querySelectorAll(".emoji-presets__btn").forEach((btn) => {
-    btn.setAttribute("aria-pressed", btn.textContent === cur ? "true" : "false");
+    btn.setAttribute("aria-pressed", getEmojiPresetButtonValue(btn) === cur ? "true" : "false");
   });
 }
 
@@ -2510,8 +2515,13 @@ function buildCreateTeamEmojiPresets() {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "emoji-presets__btn";
-    b.textContent = e;
     b.setAttribute("aria-pressed", "false");
+    b.setAttribute("aria-label", `Смайлик ${e}`);
+    const glyph = document.createElement("span");
+    glyph.className = "emoji-presets__glyph";
+    glyph.textContent = e;
+    glyph.setAttribute("aria-hidden", "true");
+    b.appendChild(glyph);
     b.addEventListener("click", () => {
       if (createTeamEmojiInput) createTeamEmojiInput.value = e;
       syncCreateEmojiPresetHighlight();
@@ -2531,7 +2541,7 @@ function buildCreateTeamColorPalette() {
     if (hex.toUpperCase() === "#FFFFFF" || hex.toUpperCase() === "#EEFF41") {
       b.classList.add("palette__swatch--needs-ring");
     }
-    b.style.backgroundColor = hex;
+    b.style.setProperty("--swatch", hex);
     b.setAttribute("role", "option");
     b.setAttribute("aria-selected", i === createTeamColorIdx ? "true" : "false");
     b.dataset.index = String(i);
@@ -2752,7 +2762,7 @@ function syncEmojiPresetHighlight() {
   if (!teamSettingsEmojiPresets || !teamSettingsEmojiInput) return;
   const cur = teamSettingsEmojiInput.value.trim();
   teamSettingsEmojiPresets.querySelectorAll(".emoji-presets__btn").forEach((btn) => {
-    btn.setAttribute("aria-pressed", btn.textContent === cur ? "true" : "false");
+    btn.setAttribute("aria-pressed", getEmojiPresetButtonValue(btn) === cur ? "true" : "false");
   });
 }
 
@@ -2763,8 +2773,13 @@ function buildEmojiPresets() {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "emoji-presets__btn";
-    b.textContent = e;
     b.setAttribute("aria-pressed", "false");
+    b.setAttribute("aria-label", `Смайлик ${e}`);
+    const glyph = document.createElement("span");
+    glyph.className = "emoji-presets__glyph";
+    glyph.textContent = e;
+    glyph.setAttribute("aria-hidden", "true");
+    b.appendChild(glyph);
     b.addEventListener("click", () => {
       teamSettingsEmojiInput.value = e;
       syncEmojiPresetHighlight();

@@ -1059,6 +1059,334 @@ body {
   max-width: 420px;
 }
 
+/* —— Онбординг: премиум game UI (welcome / команда / новая команда) —— */
+@keyframes game-onboarding-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.overlay--game-onboarding {
+  background:
+    radial-gradient(ellipse 85% 55% at 50% 18%, rgba(99, 102, 241, 0.22), transparent 58%),
+    radial-gradient(ellipse 60% 45% at 85% 75%, rgba(34, 211, 238, 0.12), transparent 52%),
+    radial-gradient(ellipse 50% 40% at 12% 70%, rgba(236, 72, 153, 0.08), transparent 50%),
+    rgba(3, 7, 14, 0.9);
+}
+
+.overlay--game-onboarding > .overlay__card {
+  border-radius: 16px;
+  background: linear-gradient(168deg, rgba(26, 36, 54, 0.97) 0%, rgba(11, 16, 28, 0.99) 48%, rgba(8, 12, 22, 1) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 28px 72px rgba(0, 0, 0, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  animation: game-onboarding-card-in 0.48s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.overlay__card--game-form {
+  max-width: 440px;
+  padding: 20px 18px 18px;
+}
+
+.overlay__card--game-roster {
+  padding: 20px 18px 18px;
+}
+
+.game-form__header {
+  margin: 0 0 12px;
+  text-align: center;
+}
+
+.game-form__title,
+.welcome-panel__title {
+  font-size: 1.22rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+  text-shadow:
+    0 0 20px color-mix(in srgb, var(--tg-button) 35%, transparent),
+    0 2px 12px rgba(0, 0, 0, 0.45);
+}
+
+.overlay--game-onboarding .overlay__title {
+  margin-bottom: 4px;
+}
+
+.game-form__subtitle {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: color-mix(in srgb, var(--tg-hint) 92%, transparent);
+  letter-spacing: 0.02em;
+}
+
+.game-form__subtitle--tight {
+  margin: 0 0 12px;
+  text-align: center;
+}
+
+.welcome-panel__subtitle {
+  margin: -4px 0 0;
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  color: color-mix(in srgb, var(--tg-hint) 88%, transparent);
+}
+
+.game-form__hint {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.game-form__section-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin-top: 14px;
+  margin-bottom: 8px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--tg-text) 78%, var(--tg-hint));
+}
+
+.game-form__section-meta {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  font-size: 0.62rem;
+  color: var(--tg-hint);
+}
+
+.overlay--game-onboarding .game-form__field {
+  margin-bottom: 4px;
+}
+
+.overlay--game-onboarding .field__input {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.42) 0%, rgba(0, 0, 0, 0.32) 100%);
+  box-shadow:
+    inset 0 2px 10px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  font-size: 1rem;
+  transition:
+    border-color 0.22s ease,
+    box-shadow 0.22s ease;
+}
+
+.overlay--game-onboarding .field__input::placeholder {
+  color: color-mix(in srgb, var(--tg-hint) 75%, transparent);
+}
+
+.overlay--game-onboarding .field__input:focus {
+  outline: none;
+  border-color: rgba(56, 189, 248, 0.65);
+  box-shadow:
+    inset 0 2px 10px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 0 0 2px rgba(34, 211, 238, 0.22),
+    0 0 28px rgba(34, 211, 238, 0.12);
+}
+
+/* Палитра «идентичность команды» */
+.overlay--game-onboarding .palette--create-team {
+  gap: 8px;
+  row-gap: 10px;
+  padding: 4px 2px 8px;
+  justify-content: flex-start;
+}
+
+.overlay--game-onboarding .palette--create-team .palette__swatch {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--swatch, #888) 82%, #fff 18%) 0%,
+    var(--swatch, #888) 42%,
+    color-mix(in srgb, var(--swatch, #888) 55%, #000 45%) 100%
+  );
+  box-shadow:
+    inset 0 2px 6px rgba(255, 255, 255, 0.22),
+    inset 0 -3px 10px rgba(0, 0, 0, 0.42),
+    0 3px 10px rgba(0, 0, 0, 0.4);
+  transition:
+    transform 0.3s cubic-bezier(0.34, 1.45, 0.64, 1),
+    box-shadow 0.25s ease,
+    filter 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.overlay--game-onboarding .palette--create-team .palette__swatch:hover {
+  transform: scale(1.08);
+  filter: brightness(1.12) saturate(1.08);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.overlay--game-onboarding .palette--create-team .palette__swatch:active {
+  transform: scale(0.96);
+  filter: brightness(0.95);
+}
+
+.overlay--game-onboarding .palette--create-team .palette__swatch[aria-selected="true"] {
+  transform: scale(1.09);
+  z-index: 2;
+  border-color: rgba(255, 255, 255, 0.55);
+  box-shadow:
+    inset 0 2px 6px rgba(255, 255, 255, 0.28),
+    inset 0 -3px 10px rgba(0, 0, 0, 0.4),
+    0 0 0 2px rgba(255, 255, 255, 0.92),
+    0 0 22px color-mix(in srgb, var(--swatch, #38bdf8) 55%, transparent),
+    0 0 44px color-mix(in srgb, var(--swatch, #38bdf8) 28%, transparent);
+}
+
+.overlay--game-onboarding .palette--create-team .palette__swatch.palette__swatch--needs-ring {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.45),
+    inset 0 2px 5px rgba(255, 255, 255, 0.35),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.35),
+    0 3px 10px rgba(0, 0, 0, 0.4);
+}
+
+.overlay--game-onboarding
+  .palette--create-team
+  .palette__swatch.palette__swatch--needs-ring[aria-selected="true"] {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.45),
+    inset 0 2px 5px rgba(255, 255, 255, 0.35),
+    0 0 0 2px rgba(255, 255, 255, 0.92),
+    0 0 22px color-mix(in srgb, var(--swatch, #fbbf24) 50%, transparent),
+    0 0 40px color-mix(in srgb, var(--swatch, #fbbf24) 22%, transparent);
+}
+
+.overlay--game-onboarding .overlay__actions {
+  margin-top: 20px;
+  padding-top: 4px;
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn {
+  padding: 11px 20px;
+  border-radius: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition:
+    transform 0.18s cubic-bezier(0.34, 1.45, 0.64, 1),
+    box-shadow 0.2s ease,
+    filter 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn:not(.overlay__btn--secondary) {
+  border: 1px solid rgba(129, 140, 248, 0.55);
+  background: linear-gradient(155deg, #7c3aed 0%, #5b21b6 45%, #4c1d95 100%);
+  color: #fafafa;
+  box-shadow:
+    0 0 24px rgba(124, 58, 237, 0.35),
+    0 4px 0 rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn:not(.overlay__btn--secondary):hover {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+  box-shadow:
+    0 0 32px rgba(124, 58, 237, 0.45),
+    0 6px 0 rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn:not(.overlay__btn--secondary):active {
+  transform: translateY(1px) scale(0.97);
+  filter: brightness(0.96);
+  box-shadow:
+    0 0 18px rgba(124, 58, 237, 0.28),
+    0 2px 0 rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn--secondary {
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: linear-gradient(180deg, rgba(40, 48, 64, 0.95), rgba(22, 28, 40, 0.98));
+  color: color-mix(in srgb, var(--tg-text) 92%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn--secondary:hover {
+  transform: translateY(-1px);
+  border-color: rgba(186, 198, 214, 0.4);
+  filter: brightness(1.06);
+}
+
+.overlay--game-onboarding .overlay__actions .overlay__btn--secondary:active {
+  transform: scale(0.98);
+}
+
+.overlay--game-onboarding .team-create-btn {
+  border: 1px dashed rgba(129, 140, 248, 0.55);
+  background: linear-gradient(180deg, rgba(79, 70, 229, 0.2), rgba(30, 27, 75, 0.35));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  font-weight: 700;
+  transition: transform 0.18s ease, filter 0.18s ease, box-shadow 0.2s ease;
+}
+
+.overlay--game-onboarding .team-create-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+}
+
+.overlay--game-onboarding .team-create-btn:active {
+  transform: scale(0.99);
+}
+
+.overlay--game-onboarding .team-list__btn {
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: linear-gradient(180deg, rgba(30, 38, 52, 0.92), rgba(15, 20, 32, 0.96));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.2s ease;
+}
+
+.overlay--game-onboarding .team-list__btn:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.35);
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.08);
+}
+
+.overlay--game-onboarding .team-list__btn:active:not(:disabled) {
+  transform: scale(0.992);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay--game-onboarding > .overlay__card {
+    animation: none !important;
+  }
+
+  .overlay--game-onboarding .palette--create-team .palette__swatch,
+  .emoji-presets__btn,
+  .overlay--game-onboarding .overlay__actions .overlay__btn,
+  .welcome-team-btn {
+    transition: none !important;
+  }
+}
+
 /* —— Welcome: выбор команды + промо —— */
 .welcome-card.welcome-card {
   padding: 16px 14px;
@@ -1106,12 +1434,8 @@ body {
 .welcome-panel__title {
   margin: 0;
   padding-right: 28px;
-  font-size: 1.05rem;
-  font-weight: 800;
-  letter-spacing: 0.04em;
   text-align: center;
   color: var(--tg-text);
-  text-shadow: 0 0 12px color-mix(in srgb, var(--tg-button) 45%, transparent);
 }
 
 .welcome-panel__lead {
@@ -1157,32 +1481,46 @@ body {
   width: 100%;
   padding: 14px 16px;
   border: none;
-  border-radius: 12px;
+  border-radius: 14px;
   font-family: inherit;
   font-size: 0.95rem;
   font-weight: 700;
   cursor: pointer;
   text-align: left;
   color: #fff;
-  transition: transform 0.12s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  transition:
+    transform 0.2s cubic-bezier(0.34, 1.45, 0.64, 1),
+    box-shadow 0.22s ease,
+    filter 0.2s ease;
   box-shadow: 0 2px 0 rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
+.welcome-team-btn:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.07) saturate(1.05);
+}
+
 .welcome-team-btn:active {
-  transform: scale(0.99);
-  filter: brightness(0.95);
+  transform: translateY(1px) scale(0.97);
+  filter: brightness(0.94);
 }
 
 .welcome-team-btn--create {
-  background: linear-gradient(145deg, #6366f1 0%, #4f46e5 55%, #3730a3 100%);
-  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.45), 0 2px 0 rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  background: linear-gradient(145deg, #818cf8 0%, #6366f1 40%, #4f46e5 72%, #312e81 100%);
+  box-shadow:
+    0 0 0 1px rgba(99, 102, 241, 0.5),
+    0 0 28px rgba(99, 102, 241, 0.35),
+    0 3px 0 rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 
 .welcome-team-btn--join {
-  background: linear-gradient(145deg, #0d9488 0%, #0f766e 50%, #115e59 100%);
-  box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.4), 0 2px 0 rgba(0, 0, 0, 0.35),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  background: linear-gradient(145deg, #2dd4bf 0%, #14b8a6 42%, #0f766e 100%);
+  box-shadow:
+    0 0 0 1px rgba(45, 212, 191, 0.45),
+    0 0 24px rgba(20, 184, 166, 0.28),
+    0 3px 0 rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .welcome-team-btn__icon {
@@ -1205,6 +1543,14 @@ body {
   font-size: 0.88rem;
   line-height: 1.45;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.overlay--game-onboarding .tg-promo-bubble {
+  background: linear-gradient(165deg, rgba(30, 44, 62, 0.95), rgba(18, 28, 42, 0.98));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 8px 28px rgba(0, 0, 0, 0.35);
 }
 
 .tg-miniapp-start {
@@ -1305,25 +1651,63 @@ body {
 .emoji-presets {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   margin-bottom: 12px;
 }
 
 .emoji-presets__btn {
-  width: 42px;
-  height: 42px;
-  font-size: 1.35rem;
-  line-height: 1;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--tg-hint) 35%, transparent);
-  background: color-mix(in srgb, var(--tg-bg) 94%, #fff);
-  cursor: pointer;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
   padding: 0;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.1) 0%, rgba(0, 0, 0, 0.38) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 4px 14px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition:
+    transform 0.26s cubic-bezier(0.34, 1.55, 0.64, 1),
+    box-shadow 0.22s ease,
+    filter 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.emoji-presets__glyph {
+  display: block;
+  font-size: 1.38rem;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.55));
+  pointer-events: none;
+}
+
+.emoji-presets__btn:hover {
+  transform: scale(1.1);
+  filter: brightness(1.12);
+  border-color: rgba(186, 198, 214, 0.35);
+}
+
+.emoji-presets__btn:active {
+  transform: scale(0.93);
+  filter: brightness(0.95);
 }
 
 .emoji-presets__btn[aria-pressed="true"] {
-  border-color: var(--tg-button);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--tg-button) 45%, transparent);
+  border-color: rgba(56, 189, 248, 0.75);
+  transform: scale(1.06);
+  box-shadow:
+    0 0 0 2px rgba(34, 211, 238, 0.35),
+    0 0 26px rgba(34, 211, 238, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.emoji-presets--game {
+  gap: 8px 10px;
+  margin-bottom: 14px;
 }
 
 .overlay__actions {
