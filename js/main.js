@@ -346,6 +346,155 @@ let myTerritoryDangerUntil = 0;
 let myTerritoryLastCellUntil = 0;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let territoryBannerHideTimer = null;
+/** Автоскрытие алертов «база / последняя клетка» (мс). */
+const ALERT_AUTO_HIDE_MS = 2000;
+const ALERT_SWIPE_MIN_PX = 44;
+const ALERT_FLY_OUT_PX = 180;
+
+/** @type {{ territory: { cleanup: (() => void) | null }; flag: { cleanup: (() => void) | null } }} */
+const swipeDismissSlots = {
+  territory: { cleanup: null },
+  flag: { cleanup: null },
+};
+
+function detachSwipeDismissSlot(slot) {
+  const o = swipeDismissSlots[slot];
+  if (o.cleanup) {
+    o.cleanup();
+    o.cleanup = null;
+  }
+}
+
+function resetDismissibleBannerNode(el) {
+  if (!el) return;
+  el.classList.remove("is-alert-fly-out");
+  el.style.removeProperty("transform");
+  el.style.removeProperty("opacity");
+  el.style.removeProperty("transition");
+}
+
+function hideTerritoryDramaBannerNow() {
+  if (!territoryDramaBannerEl) return;
+  if (territoryBannerHideTimer) {
+    clearTimeout(territoryBannerHideTimer);
+    territoryBannerHideTimer = null;
+  }
+  detachSwipeDismissSlot("territory");
+  resetDismissibleBannerNode(territoryDramaBannerEl);
+  territoryDramaBannerEl.hidden = true;
+  territoryDramaBannerEl.classList.remove("event-banner--critical");
+}
+
+function hideFlagAlertBannerNow() {
+  const el = document.getElementById("flag-alert-banner");
+  if (!el) return;
+  if (showFlagAlertBanner._hideTimer) {
+    clearTimeout(showFlagAlertBanner._hideTimer);
+    showFlagAlertBanner._hideTimer = null;
+  }
+  detachSwipeDismissSlot("flag");
+  resetDismissibleBannerNode(el);
+  el.hidden = true;
+}
+
+function flyOutDismissibleBanner(el, dirX, dirY, hideNow) {
+  const mult = 2.4;
+  const tx = dirX * ALERT_FLY_OUT_PX * mult;
+  const ty = dirY * ALERT_FLY_OUT_PX * mult;
+  el.classList.add("is-alert-fly-out");
+  el.style.transition = "transform 0.32s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.32s ease-out";
+  requestAnimationFrame(() => {
+    el.style.transform = `translate(${tx}px, ${ty}px)`;
+    el.style.opacity = "0";
+  });
+  window.setTimeout(hideNow, 340);
+}
+
+/**
+ * Смахивание влево / вправо / вверх (вниз игнорируем).
+ * @param {"territory" | "flag"} slot
+ */
+function attachSwipeDismissSlot(slot, el, hideNow) {
+  detachSwipeDismissSlot(slot);
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  let capturedId = /** @type {number | null} */ (null);
+
+  const onDown = (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    tracking = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    capturedId = e.pointerId;
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const onUp = (e) => {
+    if (!tracking) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const adx = Math.abs(dx);
+    const ady = Math.abs(dy);
+    tracking = false;
+    if (capturedId != null) {
+      try {
+        el.releasePointerCapture(capturedId);
+      } catch {
+        /* ignore */
+      }
+      capturedId = null;
+    }
+    if (Math.max(adx, ady) < ALERT_SWIPE_MIN_PX) return;
+    let ux = 0;
+    let uy = 0;
+    if (adx >= ady) {
+      ux = dx > 0 ? 1 : -1;
+    } else if (dy < 0) {
+      uy = -1;
+    } else {
+      return;
+    }
+    if (slot === "territory" && territoryBannerHideTimer) {
+      clearTimeout(territoryBannerHideTimer);
+      territoryBannerHideTimer = null;
+    }
+    if (slot === "flag" && showFlagAlertBanner._hideTimer) {
+      clearTimeout(showFlagAlertBanner._hideTimer);
+      showFlagAlertBanner._hideTimer = null;
+    }
+    flyOutDismissibleBanner(el, ux, uy, hideNow);
+  };
+
+  const onCancel = () => {
+    if (capturedId != null) {
+      try {
+        el.releasePointerCapture(capturedId);
+      } catch {
+        /* ignore */
+      }
+      capturedId = null;
+    }
+    tracking = false;
+  };
+
+  el.addEventListener("pointerdown", onDown);
+  el.addEventListener("pointerup", onUp);
+  el.addEventListener("pointercancel", onCancel);
+
+  swipeDismissSlots[slot].cleanup = () => {
+    el.removeEventListener("pointerdown", onDown);
+    el.removeEventListener("pointerup", onUp);
+    el.removeEventListener("pointercancel", onCancel);
+    tracking = false;
+    capturedId = null;
+  };
+}
+
 /** Скрытие баннера отклонённого действия (всегда видимый фидбек, не только Telegram). */
 /** @type {ReturnType<typeof setTimeout> | null} */
 let placementFeedbackHideTimer = null;
@@ -526,13 +675,15 @@ let lastRoundIndexForPresentation = -1;
 let maxPerTeam = 200;
 /** Сервер: false — только просмотр, без пикселей и команд */
 let spectatorMode = false;
-/** Время окончания текущего раунда (мс, Date.now()); null — ожидание старта 1-го раунда по «go» */
+/** Время окончания текущего раунда (мс, Date.now()); null — лобби до «go» или нет таймера конца */
 let roundEndsAtMs = null;
-/** Когда включаются пиксели (конец 2-мин разминки); null — нет отдельной фазы */
+/** Когда начинается фаза боя после разминки; null — нет отсчёта (лобби до «go» и т.п.) */
 let playStartsAtMs = null;
 /** Сервер: tournamentTimeScale > 1 — ускоренный турнирный таймлайн (бот speed). */
 let tournamentTimeScaleClient = 1;
 let roundIndexMeta = 0;
+/** Сервер: до команды «go» можно свободно играть на карте (meta.lobbyBeforeGo). */
+let lobbyBeforeGoMeta = false;
 /** С сервера: игра полностью завершена (финал) */
 let gameFinishedMeta = false;
 /** После leaveTeam открыть список команд (кнопка «Вступить», уже не в команде) */
@@ -616,19 +767,23 @@ function isClientLandCell(x, y) {
 function clientPixelTeamIdAt(x, y) {
   const v = pixels.get(`${x},${y}`);
   if (v === undefined) return null;
-  return typeof v === "number" ? v : v.teamId;
+  const id = typeof v === "number" ? v : v.teamId;
+  if (id == null || id === "") return null;
+  return Number(id) | 0;
 }
 
 /** 8-соседство: есть ли рядом пиксель той же команды (как на сервере). */
 function cellTouchesTeamTerritoryClient(x, y, teamId) {
   if (teamId == null) return false;
+  const tid = teamId | 0;
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0) continue;
       const nx = x + dx;
       const ny = y + dy;
       if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
-      if (clientPixelTeamIdAt(nx, ny) === teamId) return true;
+      const o = clientPixelTeamIdAt(nx, ny);
+      if (o != null && o === tid) return true;
     }
   }
   return false;
@@ -837,26 +992,29 @@ function applyClientTerritoryIsolationFromServer(payload) {
   scheduleDraw({ full: true });
 }
 
-function showTerritoryDramaBanner(text, durationMs = 3200, critical = false) {
+function showTerritoryDramaBanner(text, durationMs = ALERT_AUTO_HIDE_MS, critical = false) {
   if (!territoryDramaBannerEl) return;
   const title = critical ? "LAST CELL" : "LAST 6 CELLS";
   const sub = String(text || "");
-  fillPremiumAlertPanel(
-    territoryDramaBannerEl,
-    escapeHtml(title),
-    escapeHtml(sub),
-    critical ? "territory-crit" : "territory-warn"
-  );
-  territoryDramaBannerEl.hidden = false;
-  territoryDramaBannerEl.classList.toggle("event-banner--critical", critical);
   if (territoryBannerHideTimer) {
     clearTimeout(territoryBannerHideTimer);
     territoryBannerHideTimer = null;
   }
+  detachSwipeDismissSlot("territory");
+  resetDismissibleBannerNode(territoryDramaBannerEl);
+  fillPremiumAlertPanel(
+    territoryDramaBannerEl,
+    escapeHtml(title),
+    escapeHtml(sub),
+    critical ? "territory-crit" : "territory-warn",
+    "event-banner event-banner--swipe-dismiss"
+  );
+  territoryDramaBannerEl.hidden = false;
+  territoryDramaBannerEl.classList.toggle("event-banner--critical", critical);
+  attachSwipeDismissSlot("territory", territoryDramaBannerEl, hideTerritoryDramaBannerNow);
   territoryBannerHideTimer = setTimeout(() => {
-    territoryDramaBannerEl.hidden = true;
-    territoryDramaBannerEl.classList.remove("event-banner--critical");
     territoryBannerHideTimer = null;
+    hideTerritoryDramaBannerNow();
   }, durationMs);
 }
 
@@ -1287,7 +1445,9 @@ function updateRoundTimer() {
     }
     if (roundEndsAtMs == null && roundIndexMeta === 0) {
       roundTimerEl.hidden = false;
-      roundTimerEl.textContent = "Ожидание старта\n«go» в боте";
+      roundTimerEl.textContent = lobbyBeforeGoMeta
+        ? "Свободная игра\nдо «go» в боте"
+        : "Ожидание старта\n«go» в боте";
       syncTournamentWarmupOverlay();
       return;
     }
@@ -2174,6 +2334,7 @@ function onMeta(msg) {
     resetEventPresentationForRound();
   }
   roundIndexMeta = nextRi;
+  lobbyBeforeGoMeta = !!msg.lobbyBeforeGo;
   tournamentTimeScaleClient =
     typeof msg.tournamentTimeScale === "number" && msg.tournamentTimeScale >= 1
       ? msg.tournamentTimeScale | 0
@@ -2267,7 +2428,7 @@ function notifyReject(reason) {
     already_yours: "Эта клетка уже закрашена вашей командой.",
     team_eliminated: "Команда уничтожена — территории не осталось.",
     warmup: "Разминка: пиксели включатся, когда закончится отсчёт 2 минут.",
-    waiting_go: "Ожидайте команду «go» в боте: затем разминка 2 минуты, после неё бой начнётся с чистой карты (только базы команд).",
+    waiting_go: "Сервер ещё не готов к пикселям (обновите страницу или дождитесь «go»).",
     flag_rate: "Захват флага: слишком часто для вашей команды. Подождите мгновение.",
     enemy_base_not_adjacent:
       "Сначала расширьтесь к базе врага: ваши клетки должны быть рядом с клеткой флага (8 направлений).",
@@ -2308,7 +2469,7 @@ function syncFlagCaptureStateFromMeta(flags) {
   }
 }
 
-function showFlagAlertBanner(text) {
+function showFlagAlertBanner(text, durationMs = ALERT_AUTO_HIDE_MS) {
   const el = document.getElementById("flag-alert-banner");
   if (!el) return;
   const raw = String(text || "");
@@ -2328,13 +2489,19 @@ function showFlagAlertBanner(text) {
     else if (cur <= 5) variant = "flag-danger";
     else if (cur <= 10) variant = "flag-warn";
   }
-  fillPremiumAlertPanel(el, escapeHtml(title), escapeHtml(sub), variant);
-  el.hidden = false;
-  if (showFlagAlertBanner._hideTimer) clearTimeout(showFlagAlertBanner._hideTimer);
-  showFlagAlertBanner._hideTimer = setTimeout(() => {
-    el.hidden = true;
+  if (showFlagAlertBanner._hideTimer) {
+    clearTimeout(showFlagAlertBanner._hideTimer);
     showFlagAlertBanner._hideTimer = null;
-  }, 5200);
+  }
+  detachSwipeDismissSlot("flag");
+  resetDismissibleBannerNode(el);
+  fillPremiumAlertPanel(el, escapeHtml(title), escapeHtml(sub), variant, "event-banner event-banner--swipe-dismiss");
+  el.hidden = false;
+  attachSwipeDismissSlot("flag", el, hideFlagAlertBannerNow);
+  showFlagAlertBanner._hideTimer = setTimeout(() => {
+    showFlagAlertBanner._hideTimer = null;
+    hideFlagAlertBannerNow();
+  }, durationMs);
 }
 
 function notifyPurchaseError(reason) {
@@ -2352,7 +2519,7 @@ function notifyPurchaseError(reason) {
       "Захват возможен только у клеток, соседних с территорией вашей команды (вся зона должна «прикасаться» к базе).",
     team_eliminated: "Команда выбыла — эти покупки недоступны.",
     warmup: "Разминка: покупки и бусты после старта боя.",
-    waiting_go: "Сначала админ отправит «go» в боте — затем разминка и старт боя.",
+    waiting_go: "Покупка сейчас недоступна (обновите клиент или дождитесь старта раунда).",
   };
   const text = m[reason] || String(reason);
   const severe =
@@ -4100,7 +4267,7 @@ function connectWs() {
       const dn = teamsMeta?.find((x) => x.id === did)?.name || "защита";
       triggerMapShake(1200);
       enqueueBaseCapturedPresentation(String(an), String(dn));
-      showFlagAlertBanner(`BASE CAPTURED — база «${dn}» уничтожена`);
+      showFlagAlertBanner(`BASE CAPTURED — база «${dn}» уничтожена`, 5200);
       showPlacementFeedback(
         `BASE CAPTURED / БАЗА ЗАХВАЧЕНА. «${dn}» уничтожена — вся территория у «${an}».`,
         "error",
@@ -4118,6 +4285,15 @@ function connectWs() {
     if (msg.type === "flagHitAck") {
       const mx = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
       const h = typeof msg.hp === "number" ? msg.hp | 0 : mx;
+      const did = typeof msg.defenderTeamId === "number" ? msg.defenderTeamId | 0 : 0;
+      if (did > 0 && h < mx) {
+        flagCaptureClientState.set(did, {
+          hp: h,
+          maxHp: mx,
+          lastHitAt: Date.now(),
+          attackerTeamId: myTeamId | 0,
+        });
+      }
       const line =
         h <= 0
           ? "У базы 0 HP — следующий ваш удар захватит её полностью."
@@ -4631,7 +4807,7 @@ function connectWs() {
         "⚠ Команда сжимается — держите линию, иначе вылет!",
         "⚠ Последние клетки! Защищайте остаток карты!",
       ];
-      showTerritoryDramaBanner(lines[Math.floor(Math.random() * lines.length)], 4500, false);
+      showTerritoryDramaBanner(lines[Math.floor(Math.random() * lines.length)], ALERT_AUTO_HIDE_MS, false);
       try {
         window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("warning");
       } catch {
@@ -4645,7 +4821,7 @@ function connectWs() {
       const now = Date.now();
       myTerritoryLastCellUntil = now + 14000;
       myTerritoryDangerUntil = Math.max(myTerritoryDangerUntil, now + 14000);
-      showTerritoryDramaBanner("ПОСЛЕДНЯЯ КЛЕТКА! ПОТЕРЯЕТЕ ЕЁ — ВЫ ЛЕТИТЕ!", 6200, true);
+      showTerritoryDramaBanner("ПОСЛЕДНЯЯ КЛЕТКА! ПОТЕРЯЕТЕ ЕЁ — ВЫ ЛЕТИТЕ!", ALERT_AUTO_HIDE_MS, true);
       try {
         window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
       } catch {
@@ -5014,9 +5190,7 @@ function revertOptimisticPixel() {
 }
 
 function clientPixelOwnerTeamAt(gx, gy) {
-  const pix = pixels.get(`${gx},${gy}`);
-  if (pix == null) return null;
-  return typeof pix === "number" ? pix : pix.teamId ?? null;
+  return clientPixelTeamIdAt(gx, gy);
 }
 
 /**
@@ -5532,7 +5706,8 @@ function draw(time = performance.now(), drawOpts = {}) {
         raw && typeof raw.hp === "number"
           ? { hp: raw.hp | 0, lastHitAt: raw.lastHitAt | 0 }
           : null;
-      const displayHp = Math.min(maxH, Math.max(0, Math.floor(computeEffectiveBaseHp(stForHp, shNowF) + 1e-9)));
+      const effHpFloat = computeEffectiveBaseHp(stForHp, shNowF);
+      const displayHp = Math.min(maxH, Math.max(0, Math.floor(effHpFloat + 1e-9)));
       const dmgTaken = maxH - displayHp;
       const px = offsetX + fgx * cell;
       const py = offsetY + fgy * cell;
@@ -5603,7 +5778,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       const by = py + ch - barH - 2;
       ctx.fillStyle = "rgba(0,0,0,0.55)";
       ctx.fillRect(bx, by, barW, barH);
-      const hpFrac = displayHp / maxH;
+      const hpFrac = Math.min(1, Math.max(0, effHpFloat / maxH));
       ctx.fillStyle =
         displayHp <= 5 ? "#ff4444" : displayHp <= 10 ? "#ffaa33" : displayHp < maxH ? "#66dd88" : "rgba(100,220,130,0.85)";
       ctx.fillRect(bx, by, barW * hpFrac, barH);
@@ -5797,16 +5972,6 @@ function placePixel(gx, gy) {
     }
   }
 
-  if (
-    online &&
-    roundIndexMeta === 0 &&
-    roundEndsAtMs == null &&
-    !gameFinishedMeta
-  ) {
-    notifyReject("waiting_go");
-    return;
-  }
-
   const onEnemyFlag =
     Boolean(online && myTeamId != null && clientIsEnemyBaseFlagCellCoords(gx, gy));
 
@@ -5875,7 +6040,7 @@ function placePixel(gx, gy) {
     const pk = `${gx},${gy}`;
     const onEnemyFlag = clientIsEnemyBaseFlagCellCoords(gx, gy);
 
-    if (!onEnemyFlag && clientPixelTeamIdAt(gx, gy) === myTeamId) {
+    if (!onEnemyFlag && clientPixelTeamIdAt(gx, gy) === (myTeamId | 0)) {
       notifyReject("already_yours");
       lastPlaceAt = 0;
       return;

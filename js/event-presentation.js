@@ -465,10 +465,12 @@ export function enqueueBaseCapturedPresentation(attackerLabel, defenderLabel) {
  * @param {string} titleHtml escaped
  * @param {string} subHtml escaped
  * @param {'flag-warn'|'flag-danger'|'flag-crit'|'territory-warn'|'territory-crit'} variant
+ * @param {string} [extraClasses] доп. классы (например `event-banner event-banner--swipe-dismiss`)
  */
-export function fillPremiumAlertPanel(el, titleHtml, subHtml, variant) {
+export function fillPremiumAlertPanel(el, titleHtml, subHtml, variant, extraClasses = "") {
   if (!el) return;
-  el.className = `premium-alert premium-alert--${variant}`;
+  const x = extraClasses && String(extraClasses).trim() ? ` ${String(extraClasses).trim()}` : "";
+  el.className = `premium-alert premium-alert--${variant}${x}`;
   el.innerHTML = `<div class="premium-alert__frame"></div>
     <div class="premium-alert__icon" aria-hidden="true">⚠</div>
     <div class="premium-alert__body">

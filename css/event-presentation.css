@@ -614,6 +614,19 @@ body.pb-map-contrast-boost .board {
   overflow: hidden;
 }
 
+/* Алерты базы / последней клетки: ловим смахивание; стек .event-banner-stack — pointer-events: none */
+.premium-alert.event-banner--swipe-dismiss {
+  pointer-events: auto;
+  touch-action: pan-x pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  will-change: transform, opacity;
+}
+
+.premium-alert.event-banner--swipe-dismiss.is-alert-fly-out {
+  pointer-events: none;
+}
+
 .premium-alert__frame {
   position: absolute;
   inset: 0;

@@ -36,6 +36,7 @@ import {
 } from "./lib/tournament-time.js";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
 import {
+  ROUND_ZERO_POST_GO_WARMUP_MS,
   WARMUP_MS,
   battleDurationForRound,
   DUEL_INSTANT_WIN_SCORE_SHARE,
@@ -364,8 +365,10 @@ let playStartMs = Date.now();
  * Не ускоряет кулдауны, реген HP базы, лимиты ударов по флагу и прочий combat-время.
  */
 let tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
-/** Первый раунд: таймер не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO) */
+/** Первый раунд: таймер не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO). До «go» — свободная игра на карте. */
 let roundTimerStarted = true;
+/** Длительность паузы до боя в раунде 0 (мс). До «go» на таймлайн не влияет; после «go» = {@link ROUND_ZERO_POST_GO_WARMUP_MS} (или сохранённое). */
+let round0WarmupMs = WARMUP_MS;
 /** @type {Set<string>} токены победителей прошлого раунда — для claim при переподключении */
 let eligibleTokenSet = new Set();
 /**
@@ -1031,6 +1034,7 @@ function saveRoundState() {
         playStartMs,
         roundDurationMs,
         tournamentTimeScale: getTournamentTimeScale(),
+        round0WarmupMs,
         roundTimerStarted,
         eligibleTokens: [...eligibleTokenSet],
         eligiblePlayerKeys: [...eligiblePlayerKeys],
@@ -1066,6 +1070,12 @@ function loadRoundState() {
         tournamentTimeScale = clampTournamentTimeScale(j.tournamentTimeScale);
       } else {
         tournamentTimeScale = TOURNAMENT_TIME_SCALE_DEFAULT;
+      }
+      if (typeof j.round0WarmupMs === "number" && Number.isFinite(j.round0WarmupMs)) {
+        const w = Math.round(j.round0WarmupMs);
+        round0WarmupMs = w >= 5000 && w <= 600000 ? w : WARMUP_MS;
+      } else {
+        round0WarmupMs = WARMUP_MS;
       }
       if (typeof j.roundTimerStarted === "boolean") {
         roundTimerStarted = j.roundTimerStarted;
@@ -1119,6 +1129,7 @@ function loadRoundState() {
       battleEventsApplied = {};
       manualBattleSlotsByCmd.clear();
       roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
+      round0WarmupMs = WARMUP_MS;
       saveRoundState();
     }
   } catch (e) {
@@ -1134,6 +1145,7 @@ function loadRoundState() {
     battleEventsApplied = {};
     manualBattleSlotsByCmd.clear();
     roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
+    round0WarmupMs = WARMUP_MS;
   }
 }
 
@@ -1297,9 +1309,15 @@ function getTournamentTimeScale() {
   return tournamentTimeScale >= 1 ? tournamentTimeScale : TOURNAMENT_TIME_SCALE_DEFAULT;
 }
 
+function getWarmupDurationMs() {
+  if (roundIndex !== 0) return WARMUP_MS;
+  const w = round0WarmupMs | 0;
+  return w >= 5000 && w <= 600000 ? w : WARMUP_MS;
+}
+
 /** Реальный timestamp начала боя (пиксели): roundStart + разминка в игровых мс, сжатых по scale. */
 function getPlayStartMs() {
-  return roundStartMs + Math.round(WARMUP_MS / getTournamentTimeScale());
+  return roundStartMs + Math.round(getWarmupDurationMs() / getTournamentTimeScale());
 }
 
 /** Реальный timestamp конца фазы боя текущего раунда. */
@@ -1327,6 +1345,8 @@ function broadcastTournamentTimeScaleToClients() {
     type: "tournamentTimeScale",
     tournamentTimeScale: getTournamentTimeScale(),
     roundStartMs,
+    round0WarmupMs: getWarmupDurationMs(),
+    roundTimerStarted,
     roundEndsAt: roundEndsAtForMeta(),
     playStartsAt: getPlayStartMs(),
     warmupEndsAt: getPlayStartMs(),
@@ -1511,9 +1531,10 @@ let lastTerritoryIsolationSyncJson = "[]";
 /** @type {Map<number, { teamRecoveryUntil: number, teamRecoverySec: number }>} */
 const teamEffects = new Map();
 
+/** Всегда число (0 = пусто/битые данные), чтобы не ломать повторные удары по флагу из‑за string vs number в JSON/Redis. */
 function pixelTeam(val) {
-  if (val && typeof val === "object") return val.teamId;
-  return val;
+  if (val && typeof val === "object") return Number(val.teamId) | 0;
+  return Number(val) | 0;
 }
 
 function cellSetsEqual(a, b) {
@@ -2101,6 +2122,13 @@ function applyClusterGameReplication(msg) {
       if (typeof msg.roundStartMs === "number" && Number.isFinite(msg.roundStartMs)) {
         roundStartMs = msg.roundStartMs;
       }
+      if (typeof msg.round0WarmupMs === "number" && Number.isFinite(msg.round0WarmupMs)) {
+        const w = Math.round(msg.round0WarmupMs);
+        if (w >= 5000 && w <= 600000) round0WarmupMs = w;
+      }
+      if (typeof msg.roundTimerStarted === "boolean") {
+        roundTimerStarted = msg.roundTimerStarted;
+      }
       playStartMs = getPlayStartMs();
       schedulePlayStartBroadcast();
       return;
@@ -2144,7 +2172,7 @@ function cellTouchesTeamTerritory(x, y, teamId) {
       const ny = y + dy;
       if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
       const v = pixels.get(`${nx},${ny}`);
-      if (v != null && pixelTeam(v) === teamId) return true;
+      if (v != null && pixelTeam(v) === (teamId | 0)) return true;
     }
   }
   return false;
@@ -2245,45 +2273,54 @@ function tickFlagBaseRegen(now) {
  */
 function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   const defTeam = findDefenderTeamAtFlagCell(x, y);
-  if (!defTeam || defTeam.id === attackerTeamId) return null;
-  if (isTeamEliminated(attackerTeamId) || isTeamEliminated(defTeam.id)) return null;
+  if (!defTeam) return null;
+  const did = defTeam.id | 0;
+  const aid = attackerTeamId | 0;
+  if (did === 0 || did === aid) return null;
+  if (isTeamEliminated(aid) || isTeamEliminated(did)) return null;
   /* Без отдельных таймеров/фаз: удар по флагу возможен в том же запросе pixel, что и обычный ход
    * (разминка, кулдаун, соседство, вода и т.д. уже проверены выше по коду). */
-  if (!canPlaceForTeam(x, y, attackerTeamId)) return null;
+  if (!canPlaceForTeam(x, y, aid)) return null;
 
-  const existing = pixels.get(`${x},${y}`);
-  const owner = existing != null ? pixelTeam(existing) : 0;
-  if (owner !== defTeam.id) return null;
+  const key = `${x},${y}`;
+  const existing = pixels.get(key);
+  let owner = existing != null ? pixelTeam(existing) | 0 : 0;
+  /* Якорь базы — не обычная клетка: допускаем пустую клетку (сейсмика/изоляция) и числовое совпадение owner/def.id. */
+  if (owner !== 0 && owner !== did) return null;
+  if (owner === 0) {
+    pixels.set(key, { teamId: did, ownerPlayerKey: "", shieldedUntil: 0 });
+    broadcast({ type: "pixel", x, y, t: did, ownerPlayerKey: "", shieldedUntil: 0 });
+  }
 
-  if (!flagTeamHitLimiter.allow(`fc:${attackerTeamId}`, FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC, 1000)) {
+  if (!flagTeamHitLimiter.allow(`fc:${aid}`, FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC, 1000)) {
     return { rateLimited: true };
   }
 
-  let st = flagCaptureByDefender.get(defTeam.id);
+  let st = flagCaptureByDefender.get(did);
   const curHpFloat = computeEffectiveBaseHp(st, now);
   const curHp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(curHpFloat + 1e-9)));
 
   if (curHp <= 0) {
-    executeFlagCaptureSuccess(attackerTeamId | 0, defTeam.id);
-    return { captured: true, defenderTeamId: defTeam.id };
+    executeFlagCaptureSuccess(aid, did);
+    return { captured: true, defenderTeamId: did };
   }
 
   const newHp = curHp - 1;
   if (!st) {
-    st = { hp: newHp, lastHitAt: now, attackerTeamId: attackerTeamId | 0 };
-    flagCaptureByDefender.set(defTeam.id, st);
+    st = { hp: newHp, lastHitAt: now, attackerTeamId: aid };
+    flagCaptureByDefender.set(did, st);
   } else {
     st.hp = newHp;
     st.lastHitAt = now;
-    st.attackerTeamId = attackerTeamId | 0;
+    st.attackerTeamId = aid;
   }
   st._lastRegenBroadcastHp = newHp;
 
   if (curHp === FLAG_BASE_MAX_HP) {
     broadcast({
       type: "flagUnderAttack",
-      defenderTeamId: defTeam.id,
-      attackerTeamId: attackerTeamId | 0,
+      defenderTeamId: did,
+      attackerTeamId: aid,
       hp: newHp,
       maxHp: FLAG_BASE_MAX_HP,
     });
@@ -2291,8 +2328,8 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
 
   broadcast({
     type: "flagCaptureProgress",
-    defenderTeamId: defTeam.id,
-    attackerTeamId: attackerTeamId | 0,
+    defenderTeamId: did,
+    attackerTeamId: aid,
     hp: newHp,
     maxHp: FLAG_BASE_MAX_HP,
     lastHitAt: now,
@@ -2302,8 +2339,8 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     if (newHp === th) {
       broadcast({
         type: "flagDefendWarn",
-        defenderTeamId: defTeam.id,
-        attackerTeamId: attackerTeamId | 0,
+        defenderTeamId: did,
+        attackerTeamId: aid,
         hp: newHp,
         maxHp: FLAG_BASE_MAX_HP,
         level: th,
@@ -2312,7 +2349,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     }
   }
 
-  return { hit: true, defenderTeamId: defTeam.id, hp: newHp, maxHp: FLAG_BASE_MAX_HP };
+  return { hit: true, defenderTeamId: did, hp: newHp, maxHp: FLAG_BASE_MAX_HP };
 }
 
 /** Единственная точка смены владельца клетки флага и всей территории защитника (после добивающего удара). */
@@ -2503,7 +2540,7 @@ function teamSpawnMissingPixels(t) {
   for (let y = t.spawnY0; y < t.spawnY0 + TEAM_SPAWN_SIZE; y++) {
     for (let x = t.spawnX0; x < t.spawnX0 + TEAM_SPAWN_SIZE; x++) {
       const p = pixels.get(`${x},${y}`);
-      if (!p || pixelTeam(p) !== t.id) return true;
+      if (!p || pixelTeam(p) !== (t.id | 0)) return true;
     }
   }
   return false;
@@ -3006,12 +3043,7 @@ function blockWarmupPurchase(ws) {
   return true;
 }
 
-/** До команды «go» в боте (раунд 0) покупки недоступны; затем — обычная разминка. */
 function blockPrePlayPurchases(ws) {
-  if (roundIndex === 0 && !roundTimerStarted) {
-    safeSend(ws, { type: "purchaseError", reason: "waiting_go" });
-    return true;
-  }
   return blockWarmupPurchase(ws);
 }
 
@@ -3060,7 +3092,8 @@ async function sendConnectionMeta(ws) {
     roundEndsAt: roundEndsAtForMeta(),
     warmupEndsAt,
     playStartsAt: warmupEndsAt,
-    warmupMs: WARMUP_MS,
+    warmupMs: getWarmupDurationMs(),
+    lobbyBeforeGo: !!(WAIT_FOR_TELEGRAM_GO && roundIndex === 0 && !roundTimerStarted),
     eligible: !!ws.eligible,
     gameFinished: !!gameFinished,
     tournamentStage: tournamentStage(roundIndex, gameFinished),
@@ -3354,6 +3387,7 @@ async function runMaybeEndRound() {
     const endedRoundIndex = roundIndex;
     roundIndex++;
     roundTimerStarted = true;
+    round0WarmupMs = WARMUP_MS;
     roundStartMs = Date.now();
     roundDurationMs = battleDurationForRound(roundIndex);
     clearTiebreakSnapshots();
@@ -4041,11 +4075,6 @@ wss.on("connection", (ws, req) => {
       const x = msg.x | 0;
       const y = msg.y | 0;
       const teamId = ws.teamId;
-      if (roundIndex === 0 && !roundTimerStarted) {
-        safeSend(ws, { type: "invalidPlacement", teamId, reason: "waiting_go" });
-        safeSend(ws, { type: "pixelReject", reason: "waiting_go" });
-        return;
-      }
       if (isTeamEliminated(teamId)) {
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "team_eliminated" });
         safeSend(ws, { type: "pixelReject", reason: "team_eliminated" });
@@ -4074,7 +4103,7 @@ wss.on("connection", (ws, req) => {
 
       if (!enemyFlagDef) {
         const existingPx = pixels.get(key);
-        if (existingPx != null && pixelTeam(existingPx) === teamId) {
+        if (existingPx != null && pixelTeam(existingPx) === (teamId | 0)) {
           safeSend(ws, { type: "invalidPlacement", teamId, reason: "already_yours" });
           safeSend(ws, { type: "pixelReject", reason: "already_yours" });
           return;
@@ -4125,12 +4154,12 @@ wss.on("connection", (ws, req) => {
           scheduleStatsBroadcast();
         }
         safeSend(ws, await buildWalletPayload(ws));
-        if (fc.hit && typeof fc.defenderTeamId === "number" && typeof fc.hp === "number") {
+        if (fc.hit && typeof fc.hp === "number") {
           safeSend(ws, {
             type: "flagHitAck",
-            defenderTeamId: fc.defenderTeamId,
-            hp: fc.hp,
-            maxHp: fc.maxHp ?? FLAG_BASE_MAX_HP,
+            defenderTeamId: fc.defenderTeamId | 0,
+            hp: fc.hp | 0,
+            maxHp: (fc.maxHp ?? FLAG_BASE_MAX_HP) | 0,
           });
         }
         return;
@@ -4260,18 +4289,20 @@ async function startRoundOneTimer(durationHours) {
     ms = Math.min(Math.max(ms, 1000), 8760 * 60 * 60 * 1000);
   }
   roundDurationMs = ms;
+  round0WarmupMs = ROUND_ZERO_POST_GO_WARMUP_MS;
   roundTimerStarted = true;
   roundStartMs = Date.now();
   clearTiebreakSnapshots();
-  saveRoundState();
+  resetMassRoundBattlefieldAfterWarmup();
   schedulePlayStartBroadcast();
+  broadcastTournamentTimeScaleToClients();
   await Promise.all(
     [...wss.clients]
       .filter((c) => c.readyState === 1)
       .map((c) => sendConnectionMeta(c))
   );
   broadcastStatsImmediate();
-  return { ok: true, durationMs: ms, warmupMs: WARMUP_MS };
+  return { ok: true, durationMs: ms, warmupMs: ROUND_ZERO_POST_GO_WARMUP_MS };
 }
 
 async function telegramSendMessage(chatId, text, extra = {}) {
@@ -4529,12 +4560,13 @@ async function telegramPollLoop() {
         if (result.ok) {
           const h = (result.durationMs ?? roundDurationMs) / 3600000;
           const sc = getTournamentTimeScale();
-          const warmRealSec = Math.round(WARMUP_MS / sc / 1000);
+          const warmMs = result.warmupMs ?? ROUND_ZERO_POST_GO_WARMUP_MS;
+          const warmRealSec = Math.max(1, Math.round(warmMs / sc / 1000));
           const battleRealMin = Math.round(result.durationMs / sc / 60000);
           reply =
             sc > 1
-              ? `Раунд 1 (TEST ×${sc}): разминка ~${warmRealSec} с реальных, затем бой ~${battleRealMin} мин реальных (${h.toFixed(h < 1 ? 2 : 1)} игр. ч). По окончании разминки карта сбросится — только базы 6×6, без чужих захватов. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`
-              : `Раунд 1: разминка 2 мин, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. После разминки поле обнуляется (только базы команд). Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
+              ? `Раунд 1 (TEST ×${sc}): карта очищена; до боя ~${warmRealSec} с реальных, затем бой ~${battleRealMin} мин (${h.toFixed(h < 1 ? 2 : 1)} игр. ч). Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`
+              : `Раунд 1: карта очищена, ${warmRealSec} с до старта боя, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
         } else if (result.reason === "already_started") {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {
