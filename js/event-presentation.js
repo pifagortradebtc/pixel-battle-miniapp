@@ -30,6 +30,7 @@ let lastStripRoundEndMs = null;
 let lastHudSignature = "";
 
 let lastSeismicPreviewKey = "";
+let lastRoundEventStartKey = "";
 
 /** @type {{ title: string; subtitle: string; theme: string; holdMs?: number; sound?: string; kicker?: string }[]} */
 const cinematicQueue = [];
@@ -83,6 +84,11 @@ function glyphForHudTheme(theme) {
   switch (theme) {
     case "gold":
       return "✦";
+    case "boom":
+      return "▲";
+    case "economic":
+    case "economic-dual":
+      return "⇅";
     case "compression":
     case "center":
     case "final-phase":
@@ -362,6 +368,7 @@ export function initEventPresentation() {
 
 export function resetEventPresentationForRound() {
   lastSeismicPreviewKey = "";
+  lastRoundEventStartKey = "";
   lastHudSignature = "";
   cinematicQueue.length = 0;
   if (cinematicRoot) {
@@ -393,12 +400,64 @@ function startHudTick(updateFn) {
 }
 
 /**
+ * @param {string} eventType
+ * @param {string} title
+ * @param {string} subtitle
+ * @returns {{ title: string; subtitle: string; theme: string; sound: string; holdMs: number }}
+ */
+function roundEventToCinematicSpec(eventType, title, subtitle) {
+  const tit = `${title} ${subtitle}`;
+  const base = {
+    title: title || "Событие боя",
+    subtitle: subtitle || "",
+    theme: "default",
+    sound: "default",
+    holdMs: 2400,
+  };
+
+  switch (eventType) {
+    case "gold_zone":
+      return { ...base, theme: "gold", sound: "gold", holdMs: 2400 };
+    case "seismic":
+      return { ...base, theme: "seismic", sound: "seismic", holdMs: 2800 };
+    case "economic_mixed":
+      return { ...base, theme: "economic", sound: "economic", holdMs: 2600 };
+    case "economic_boom_only":
+      return { ...base, theme: "boom", sound: "boom", holdMs: 2400 };
+    case "map_compression":
+      return { ...base, theme: "compression", sound: "compression", holdMs: 2600 };
+    case "final_edge_compression":
+      return { ...base, theme: "final-phase", sound: "final-phase", holdMs: 2800 };
+    case "team_synergy":
+      return { ...base, theme: "synergy", sound: "default", holdMs: 2200 };
+    case "center_bonus":
+      return { ...base, theme: "center", sound: "center", holdMs: 2600 };
+    case "dramatic_pressure": {
+      if (/финальн(ые)?\s*10|10\s*минут|FINAL\s*10|10\s*MINUTES/i.test(tit)) {
+        return { ...base, theme: "final-ten", sound: "final-ten", holdMs: 3200 };
+      }
+      return { ...base, theme: "dramatic", sound: "dramatic", holdMs: 2800 };
+    }
+    default:
+      return base;
+  }
+}
+
+/**
  * WebSocket: roundEvent phase start.
  * @param {{ phase?: string; eventId?: string; eventType?: string; title?: string; subtitle?: string }} msg
  */
 export function notifyRoundEventFromServer(msg) {
   if (!msg || msg.phase !== "start" || !msg.eventId) return;
-  /* Полноэкранная заставка отключена: таймер в верхней плашке и боковом HUD; зоны на карте. */
+  const key = String(msg.eventId);
+  if (lastRoundEventStartKey === key) return;
+  lastRoundEventStartKey = key;
+  const spec = roundEventToCinematicSpec(
+    String(msg.eventType || ""),
+    String(msg.title || ""),
+    String(msg.subtitle || "")
+  );
+  enqueueBattleCinematic(spec);
 }
 
 /**
@@ -410,7 +469,58 @@ export function notifySeismicPreview(preview) {
   const key = `${preview.eventId || "se"}_${preview.impactAtMs | 0}`;
   if (lastSeismicPreviewKey === key) return;
   lastSeismicPreviewKey = key;
-  /* Без полноэкранки — верхний баннер, боковой HUD и подсветка зон задаются в main.js. */
+  enqueueBattleCinematic({
+    title: "Сейсмика: готовьтесь",
+    subtitle: "Территория обрушится — удар по карте",
+    theme: "seismic-incoming",
+    sound: "seismic-incoming",
+    holdMs: 2400,
+  });
+}
+
+/**
+ * Захват базы (полноэкранно + баннеры в main).
+ * @param {string} attackerLabel
+ * @param {string} defenderLabel
+ */
+export function enqueueBaseCapturedPresentation(attackerLabel, defenderLabel) {
+  enqueueBattleCinematic({
+    title: "База захвачена",
+    subtitle: `${String(defenderLabel)} → ${String(attackerLabel)}`,
+    theme: "base-captured",
+    sound: "base_captured",
+    holdMs: 3200,
+  });
+}
+
+/**
+ * Магазинный захват зоны на карте (broadcast purchaseVfx).
+ * @param {"zoneCapture"|"massCapture"|"zone12Capture"} kind
+ * @param {string} teamName
+ * @param {number} size сторона квадрата
+ */
+export function enqueueTerritoryCapturePresentation(kind, teamName, size) {
+  const name = String(teamName || "Команда").trim() || "Команда";
+  const s = size | 0;
+  let title = "Захват территории";
+  let subtitle = `Команда «${name}»`;
+  if (kind === "zoneCapture") {
+    title = `Захват зоны ${s}×${s}`;
+    subtitle = `«${name}» закрепляет блок ${s}×${s}`;
+  } else if (kind === "massCapture") {
+    title = `Массовый захват ${s}×${s}`;
+    subtitle = `«${name}» — удар по ${s}×${s}`;
+  } else if (kind === "zone12Capture") {
+    title = `Штурм ${s}×${s}`;
+    subtitle = `«${name}» забирает крупный сектор`;
+  }
+  enqueueBattleCinematic({
+    title,
+    subtitle,
+    theme: "gold",
+    sound: "gold",
+    holdMs: 2100,
+  });
 }
 
 /**

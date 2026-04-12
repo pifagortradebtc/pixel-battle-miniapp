@@ -11,6 +11,9 @@ import {
   notifyRoundEventFromServer,
   syncPremiumBattlePresentation,
   fillPremiumAlertPanel,
+  notifySeismicPreview,
+  enqueueBaseCapturedPresentation,
+  enqueueTerritoryCapturePresentation,
 } from "./event-presentation.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
@@ -3439,6 +3442,13 @@ function flushBoardVfxFrame() {
   }
 }
 
+function teamNameForPresentation(teamId) {
+  const id = teamId | 0;
+  const t = teamsMeta?.find((x) => (Number(x.id) | 0) === id);
+  const n = t?.name != null ? String(t.name).trim() : "";
+  return n || `Команда ${id}`;
+}
+
 function applyGlobalPurchaseVfx(msg) {
   const app = document.getElementById("app");
   const tr = getVfxTransform();
@@ -3475,34 +3485,55 @@ function applyGlobalPurchaseVfx(msg) {
     }
     return;
   }
-  if (kind === "zoneCapture" && boardVfx && hasGrid) {
+  if (kind === "zoneCapture" && hasGrid) {
     const sz =
       typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
         ? msg.size | 0
         : 4;
-    boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    flushBoardVfxFrame();
-    requestAnimationFrame(() => flushBoardVfxFrame());
+    enqueueTerritoryCapturePresentation(
+      "zoneCapture",
+      teamNameForPresentation(msg.teamId),
+      sz
+    );
+    if (boardVfx) {
+      boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
+      flushBoardVfxFrame();
+      requestAnimationFrame(() => flushBoardVfxFrame());
+    }
     return;
   }
-  if (kind === "massCapture" && boardVfx && hasGrid) {
+  if (kind === "massCapture" && hasGrid) {
     const sz =
       typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
         ? msg.size | 0
         : 6;
-    boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    flushBoardVfxFrame();
-    requestAnimationFrame(() => flushBoardVfxFrame());
+    enqueueTerritoryCapturePresentation(
+      "massCapture",
+      teamNameForPresentation(msg.teamId),
+      sz
+    );
+    if (boardVfx) {
+      boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
+      flushBoardVfxFrame();
+      requestAnimationFrame(() => flushBoardVfxFrame());
+    }
     return;
   }
-  if (kind === "zone12Capture" && boardVfx && hasGrid) {
+  if (kind === "zone12Capture" && hasGrid) {
     const sz =
       typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
         ? msg.size | 0
         : 12;
-    boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
-    flushBoardVfxFrame();
-    requestAnimationFrame(() => flushBoardVfxFrame());
+    enqueueTerritoryCapturePresentation(
+      "zone12Capture",
+      teamNameForPresentation(msg.teamId),
+      sz
+    );
+    if (boardVfx) {
+      boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
+      flushBoardVfxFrame();
+      requestAnimationFrame(() => flushBoardVfxFrame());
+    }
     return;
   }
   if (kind === "teamRecovery") {
@@ -4577,6 +4608,10 @@ function connectWs() {
         SEISMIC_WARNING_BANNER_MS
       );
       applySeismicTremorBodyOverride();
+      notifySeismicPreview({
+        eventId: seismicPreviewClient.eventId,
+        impactAtMs: seismicPreviewClient.impactAtMs,
+      });
       syncEventBanner();
       scheduleDraw({ full: true });
       return;
@@ -4805,6 +4840,7 @@ function connectWs() {
       }
       const an = teamsMeta?.find((x) => (Number(x.id) | 0) === aid)?.name || "атакующие";
       const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "защита";
+      enqueueBaseCapturedPresentation(String(an), String(dn));
       if (!wasMyDefeat) {
         triggerMapShake(1200);
         showFlagAlertBanner(`База захвачена — «${dn}» уничтожена`, 5200);
