@@ -10,7 +10,6 @@ import {
   resetEventPresentationForRound,
   notifyRoundEventFromServer,
   syncPremiumBattlePresentation,
-  enqueueBaseCapturedPresentation,
   fillPremiumAlertPanel,
 } from "./event-presentation.js";
 import {
@@ -3041,15 +3040,19 @@ function syncEventBanner() {
   const layersHint = ge?.battleEvents?.layers;
   const dramaticL =
     Array.isArray(layersHint) && layersHint.find((l) => l && l.kind === "dramatic_pressure");
+  const dStyleHint = dramaticL ? String(dramaticL.style || "") : "";
   const finalTitleForHint = dramaticL?.title
     ? String(dramaticL.title)
     : ge && ge.title
       ? String(ge.title)
       : "";
+  const subHint = dramaticL ? String(dramaticL.subtitle || "") : "";
   const finalHint =
     dramaticL &&
-    (/FINAL\s*10|FINAL\s*HOUR|10\s*MINUTES/i.test(finalTitleForHint) ||
-      /decides everything|every point/i.test(String(dramaticL.subtitle || "")))
+    (dStyleHint === "final_ten" ||
+      dStyleHint === "final_hour" ||
+      /финальн(ые)?\s*10|финальн(ый)?\s*час|10\s*минут/i.test(`${finalTitleForHint} ${subHint}`) ||
+      /FINAL\s*10|FINAL\s*HOUR|10\s*MINUTES/i.test(finalTitleForHint))
       ? computeLeaderboardGapHint()
       : "";
   const hideLegacyBattle = syncPremiumBattlePresentation({
@@ -3079,13 +3082,18 @@ function syncEventBanner() {
     return;
   }
 
-  const dramatic = ge?.battleEvents?.primary?.dramatic === true;
+  const prim = ge?.battleEvents?.primary;
+  const dramaticBanner =
+    prim &&
+    (prim.dramatic === true ||
+      prim.kind === "dramatic_pressure" ||
+      prim.style === "final_hour" ||
+      prim.style === "final_ten");
   if (ge && ge.active && ge.title && typeof ge.until === "number" && ge.until > Date.now()) {
     eventBannerEl.hidden = false;
-    eventBannerEl.className =
-      dramatic && /FINAL|HOUR|MINUTES|PHASE/i.test(String(ge.title))
-        ? "event-banner event-banner--battle event-banner--dramatic"
-        : "event-banner event-banner--battle";
+    eventBannerEl.className = dramaticBanner
+      ? "event-banner event-banner--battle event-banner--dramatic"
+      : "event-banner event-banner--battle";
     const sub = ge.subtitle ? String(ge.subtitle) : "";
     const timer = formatBattleCountdown(ge.until);
     eventBannerEl.innerHTML = `<strong>${escapeHtml(String(ge.title))}</strong><div class="event-banner__sub">${escapeHtml(sub)}</div><div class="event-banner__timer">${escapeHtml(timer)}</div>`;
@@ -3280,6 +3288,7 @@ function updateToolbarHud() {
   updateActiveBuffBars();
   updateQuickBuyBuffRings();
   syncToolbarHeightCssVar();
+  syncEventBanner();
 }
 
 /** Высота шапки для отступа лидерборда; всегда в пределах [34px … --toolbar-h-max], без раздувания на весь экран. */
@@ -4798,11 +4807,10 @@ function connectWs() {
       const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "защита";
       if (!wasMyDefeat) {
         triggerMapShake(1200);
-        enqueueBaseCapturedPresentation(String(an), String(dn));
-        showFlagAlertBanner(`BASE CAPTURED — база «${dn}» уничтожена`, 5200);
+        showFlagAlertBanner(`База захвачена — «${dn}» уничтожена`, 5200);
         /* Модальный showAlert в TG часто подвешивает WebView; баннеров достаточно. */
         showPlacementFeedback(
-          `BASE CAPTURED / БАЗА ЗАХВАЧЕНА. «${dn}» уничтожена — вся территория у «${an}».`,
+          `База захвачена. «${dn}» уничтожена — вся территория у «${an}».`,
           "error",
           { telegramAlert: false }
         );
@@ -6149,7 +6157,12 @@ function draw(time = performance.now(), drawOpts = {}) {
   /* События боя: золото / сжатие / экономика / предпросмотр сейсмики (сервер задаёт зоны). */
   if (!lite && online) {
     const ge = getClientGlobalEventSnapshot();
-    const layers = ge?.battleEvents?.layers;
+    const rawLayers = ge?.battleEvents?.layers;
+    const nowEv = Date.now();
+    const layers =
+      Array.isArray(rawLayers) && rawLayers.length
+        ? rawLayers.filter((L) => L && typeof L.untilMs === "number" && L.untilMs > nowEv)
+        : null;
     const compLayer = layers && layers.find((l) => l.kind === "map_compression");
     const pulseEv = 0.5 + 0.5 * Math.sin(time * 0.0022);
     function cellInEconomicLayer(L, gx, gy) {
@@ -6178,7 +6191,7 @@ function draw(time = performance.now(), drawOpts = {}) {
             const L = layers[li];
             const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
             if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
-              ctx.fillStyle = `rgba(255, 220, 60, ${0.55 + pulseEv * 0.22})`;
+              ctx.fillStyle = `rgba(255, 210, 40, ${0.72 + pulseEv * 0.2})`;
               ctx.fillRect(px, py, cw, ch);
             }
             const econKinds = [
@@ -6191,10 +6204,10 @@ function draw(time = performance.now(), drawOpts = {}) {
             if (econKinds.includes(L.kind)) {
               const zone = cellInEconomicLayer(L, gx, gy);
               if (zone === "boom") {
-                ctx.fillStyle = `rgba(70, 255, 140, ${0.42 + pulseEv * 0.18})`;
+                ctx.fillStyle = `rgba(70, 255, 140, ${0.58 + pulseEv * 0.18})`;
                 ctx.fillRect(px, py, cw, ch);
               } else if (zone === "rec") {
-                ctx.fillStyle = `rgba(120, 195, 255, ${0.44 + pulseEv * 0.14})`;
+                ctx.fillStyle = `rgba(120, 195, 255, ${0.55 + pulseEv * 0.16})`;
                 ctx.fillRect(px, py, cw, ch);
               }
             }
@@ -6299,7 +6312,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.clip();
         const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
         grd.addColorStop(0, "rgba(255,255,255,0)");
-        grd.addColorStop(0.5, "rgba(255,235,170,0.48)");
+        grd.addColorStop(0.5, "rgba(255,230,120,0.72)");
         grd.addColorStop(1, "rgba(255,255,255,0)");
         ctx.fillStyle = grd;
         ctx.globalCompositeOperation = "lighter";

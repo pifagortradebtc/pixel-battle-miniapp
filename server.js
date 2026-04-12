@@ -411,7 +411,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "speed") return true;
   if (fw === "restart" || fw === "рестарт") return true;
   if (fw === "paint") return true;
-  if (fw === "evt" || fw === "event") return true;
+  if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
   return MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw);
 }
@@ -755,7 +755,7 @@ function normalizeManualBattleCmdKey(raw) {
     .toLowerCase()
     .trim()
     .replace(/^\/+/, "");
-  if (s === "золото") return "gold";
+  if (s === "золото" || s === "голд") return "gold";
   return s;
 }
 
@@ -788,6 +788,8 @@ function broadcastManualBattleSyncAndStats() {
     type: "manualBattleSync",
     slots: Object.fromEntries(manualBattleSlotsByCmd),
   });
+  const nowSync = Date.now();
+  broadcast({ type: "globalEvent", globalEvent: getGlobalEventPayload(nowSync) });
   scheduleStatsBroadcast();
 }
 
@@ -4965,8 +4967,9 @@ async function telegramPollLoop() {
         }
 
         let manualBattleLine = null;
-        if (restartNorm.startsWith("evt ") || restartNorm.startsWith("event ")) {
-          manualBattleLine = restartNorm.replace(/^(evt|event)\s+/i, "").trim();
+        const manualEvtPrefix = /^(evt|event|события|событие)\s+/iu;
+        if (manualEvtPrefix.test(restartNorm)) {
+          manualBattleLine = restartNorm.replace(manualEvtPrefix, "").trim();
         } else {
           const fw = restartNorm.split(/\s+/)[0] || "";
           if (fw !== "off" && MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw)) manualBattleLine = restartNorm;

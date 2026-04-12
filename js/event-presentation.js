@@ -29,7 +29,6 @@ let lastStripRoundEndMs = null;
 /** @type {string} */
 let lastHudSignature = "";
 
-const playedRoundEventCinematic = new Set();
 let lastSeismicPreviewKey = "";
 
 /** @type {{ title: string; subtitle: string; theme: string; holdMs?: number; sound?: string; kicker?: string }[]} */
@@ -58,35 +57,17 @@ function formatHudTime(untilMs) {
 }
 
 /**
- * @param {string} eventType
- * @param {string} title
+ * @param {{ kind?: string; style?: string; title?: string; subtitle?: string }} L
  */
-function themeFromRoundEvent(eventType, title) {
-  const et = String(eventType || "");
-  const t = String(title || "").toUpperCase();
-  if (et === "gold_zone" || /GOLD|TARGET|DUEL.*ZONE/.test(t)) return "gold";
-  if (et === "economic_mixed" || et === "economic_boom_only" || /ECONOMIC|RESOURCE|SURGE|ROTATION/.test(t))
-    return /RECESSION|WEAKER|LESS/.test(t) ? "recession" : "economic";
-  if (et === "map_compression" || et === "center_bonus" || et === "final_edge_compression")
-    return /CENTER/.test(t) ? "center" : /FINAL\s*PHASE/.test(t) ? "final-phase" : "compression";
-  if (et === "dramatic_pressure") return /FINAL\s*10|10\s*MINUTES/.test(t) ? "final-ten" : "dramatic";
-  if (et === "team_synergy") return "synergy";
-  if (et === "seismic") return "seismic";
-  return "default";
-}
-
-/**
- * @param {string} kind
- * @param {string} [style]
- * @param {string} [title]
- */
-function hudThemeForLayerKind(kind, style, title) {
-  const k = String(kind || "");
-  const tit = String(title || "");
+function hudThemeForLayerKind(L) {
+  const k = String(L.kind || "");
+  const tit = `${String(L.title || "")} ${String(L.subtitle || "")}`;
+  const style = String(L.style || "");
   if (k === "gold_zone" || k === "target_zone" || k === "duel_zone") return "gold";
   if (k === "map_compression") {
-    if (/CENTER/i.test(tit)) return "center";
-    if (/FINAL\s*PHASE/i.test(tit)) return "final-phase";
+    if (/бонус центра|CENTER BONUS/i.test(tit)) return "center";
+    if (/финальн|FINAL\s*PHASE|перифери|outer territory/i.test(tit)) return "final-phase";
+    if (/CENTER/i.test(tit) && !/MAP|СЖАТИЕ|compression/i.test(String(L.title || ""))) return "center";
     return "compression";
   }
   if (k === "trade_boom" || k === "resource_surge") return "boom";
@@ -139,7 +120,12 @@ function shortStatusForLayer(L) {
   if (k === "recession") return "Регион дешевле";
   if (k === "economic_shift" || k === "economic_rotation") return "Разные множители";
   if (k === "team_synergy") return "Синергия онлайн";
-  if (k === "dramatic_pressure") return "Максимум напряжения";
+  if (k === "dramatic_pressure") {
+    const st = String(L.style || "");
+    if (st === "final_ten") return "Последние минуты боя";
+    if (st === "final_hour") return "Решающий отрезок";
+    return "Особый режим очков";
+  }
   return "";
 }
 
@@ -246,18 +232,18 @@ function playSting(kind) {
 
 function kickerFromThemeAndTitle(theme, title) {
   const tit = String(title || "").toUpperCase();
-  if (theme === "base-captured") return "GAME CHANGER";
-  if (theme === "final-ten") return "MATCH POINT";
-  if (theme === "seismic-incoming" || /INCOMING/.test(tit)) return "WARNING";
-  if (theme === "seismic") return "IMPACT";
-  if (theme === "gold") return "OBJECTIVE";
-  if (theme === "center") return "POWER ZONE";
-  if (theme === "final-phase") return "ENDGAME";
-  if (theme === "compression") return "ZONE SHIFT";
-  if (theme === "dramatic") return "CLUTCH";
-  if (theme === "economic" || theme === "boom" || theme === "recession") return "ECONOMY";
-  if (theme === "synergy") return "TEAM BUFF";
-  return "LIVE EVENT";
+  if (theme === "base-captured") return "ПЕРЕЛОМ";
+  if (theme === "final-ten") return "РЕШАЮЩИЙ МОМЕНТ";
+  if (theme === "seismic-incoming" || /INCOMING|ВХОДЯЩ/.test(tit)) return "ВНИМАНИЕ";
+  if (theme === "seismic") return "УДАР";
+  if (theme === "gold") return "ЦЕЛЬ";
+  if (theme === "center") return "СИЛОВАЯ ЗОНА";
+  if (theme === "final-phase") return "ФИНАЛ";
+  if (theme === "compression") return "СДВИГ ЗОН";
+  if (theme === "dramatic") return "КУЛЬМИНАЦИЯ";
+  if (theme === "economic" || theme === "boom" || theme === "recession") return "ЭКОНОМИКА";
+  if (theme === "synergy") return "КОМАНДНЫЙ БАФФ";
+  return "СОБЫТИЕ";
 }
 
 function triggerCinematicHaptic(theme) {
@@ -375,7 +361,6 @@ export function initEventPresentation() {
 }
 
 export function resetEventPresentationForRound() {
-  playedRoundEventCinematic.clear();
   lastSeismicPreviewKey = "";
   lastHudSignature = "";
   cinematicQueue.length = 0;
@@ -413,20 +398,7 @@ function startHudTick(updateFn) {
  */
 export function notifyRoundEventFromServer(msg) {
   if (!msg || msg.phase !== "start" || !msg.eventId) return;
-  if (playedRoundEventCinematic.has(msg.eventId)) return;
-  playedRoundEventCinematic.add(msg.eventId);
-  const title = msg.title || "EVENT";
-  const subtitle = msg.subtitle || "";
-  const theme = themeFromRoundEvent(msg.eventType || "", title);
-  const isFinalTen = /FINAL\s*10|10\s*MINUTES/i.test(title);
-  const isFinalHour = /FINAL\s*HOUR/i.test(title);
-  enqueueBattleCinematic({
-    title,
-    subtitle,
-    theme,
-    sound: theme === "default" ? "default" : theme,
-    holdMs: isFinalTen ? 3000 : isFinalHour ? 2800 : theme === "gold" || theme === "center" ? 2500 : 2350,
-  });
+  /* Полноэкранная заставка отключена: таймер в верхней плашке и боковом HUD; зоны на карте. */
 }
 
 /**
@@ -438,27 +410,7 @@ export function notifySeismicPreview(preview) {
   const key = `${preview.eventId || "se"}_${preview.impactAtMs | 0}`;
   if (lastSeismicPreviewKey === key) return;
   lastSeismicPreviewKey = key;
-  enqueueBattleCinematic({
-    title: "SEISMIC ACTIVITY INCOMING",
-    subtitle: "Territory will collapse — brace for impact",
-    theme: "seismic-incoming",
-    sound: "seismic-incoming",
-    holdMs: 2400,
-  });
-}
-
-/**
- * @param {string} attackerLabel
- * @param {string} defenderLabel
- */
-export function enqueueBaseCapturedPresentation(attackerLabel, defenderLabel) {
-  enqueueBattleCinematic({
-    title: "BASE CAPTURED",
-    subtitle: `${defenderLabel} → ${attackerLabel}`,
-    theme: "base-captured",
-    sound: "base_captured",
-    holdMs: 3200,
-  });
+  /* Без полноэкранки — верхний баннер, боковой HUD и подсветка зон задаются в main.js. */
 }
 
 /**
@@ -485,11 +437,16 @@ function syncBodyAtmosphere(ge, seismicPreviewActive) {
   if (!doc) return;
   doc.classList.toggle("pb-seismic-tremor", !!seismicPreviewActive);
 
-  const title = ge && ge.title ? String(ge.title).toUpperCase() : "";
-  const primary = ge?.battleEvents?.primary;
-  const dramatic = primary?.dramatic === true;
-  const finalTen = dramatic && /FINAL\s*10|10\s*MINUTES/.test(title);
-  const finalHour = dramatic && /FINAL\s*HOUR/.test(title);
+  const layers = ge?.battleEvents?.layers;
+  const dramaticL = Array.isArray(layers) ? layers.find((l) => l && l.kind === "dramatic_pressure") : null;
+  const dst = dramaticL ? String(dramaticL.style || "") : "";
+  const tit = dramaticL ? `${String(dramaticL.title || "")} ${String(dramaticL.subtitle || "")}` : "";
+  const finalTen =
+    dst === "final_ten" || /финальн(ые)?\s*10|10\s*минут/i.test(tit) || /FINAL\s*10|10\s*MINUTES/i.test(tit);
+  const finalHour =
+    dst === "final_hour" ||
+    (/финальн(ый)?\s*час/i.test(tit) && !finalTen) ||
+    (/FINAL\s*HOUR/i.test(tit) && !finalTen);
 
   doc.classList.toggle("pb-final-ten", finalTen);
   doc.classList.toggle("pb-final-hour", finalHour && !finalTen);
@@ -513,7 +470,7 @@ function updateHudTimersFromDom() {
 }
 
 /**
- * Синхронизация дока HUD и атмосферы. Возвращает, нужно ли скрыть старый #event-banner для боевых событий.
+ * Синхронизация дока HUD и атмосферы. Всегда оставляет верхний #event-banner видимым для таймера основного события.
  * @param {{
  *   ge: object | null | undefined;
  *   seismicPreview: { impactAtMs?: number; eventId?: string } | null;
@@ -523,7 +480,7 @@ function updateHudTimersFromDom() {
  *   roundEndsAtMs?: number | null;
  *   leaderboardHint?: string;
  * }} opts
- * @returns {boolean} hideLegacyBattleBanner
+ * @returns {boolean} hideLegacyBattleBanner (всегда false)
  */
 export function syncPremiumBattlePresentation(opts) {
   const { ge, seismicPreview, online, spectator, gameFinished, roundEndsAtMs, leaderboardHint } = opts;
@@ -564,7 +521,7 @@ export function syncPremiumBattlePresentation(opts) {
   const sorted = sortLayersForHud(Array.isArray(layers) ? layers : []);
   for (let i = 0; i < sorted.length && chips.length < 4; i++) {
     const L = sorted[i];
-    const theme = hudThemeForLayerKind(L.kind, L.style, L.title);
+    const theme = hudThemeForLayerKind(L);
     chips.push({
       kind: L.kind,
       title: L.title || L.kind,
@@ -614,26 +571,22 @@ export function syncPremiumBattlePresentation(opts) {
     ? layersForFinal.find((l) => l && l.kind === "dramatic_pressure")
     : null;
   const finalTitle = dramaticLayer?.title ? String(dramaticLayer.title) : ge && ge.title ? String(ge.title) : "";
-  const showFinalStrip =
-    ge &&
-    ge.active &&
-    dramaticLayer &&
-    (/FINAL\s*10|FINAL\s*HOUR|10\s*MINUTES/i.test(finalTitle) ||
-      /decides everything|every point/i.test(String(dramaticLayer.subtitle || "")));
+  const dStyle = dramaticLayer ? String(dramaticLayer.style || "") : "";
+  const showFinalStrip = ge && ge.active && dramaticLayer && dramaticLayer.kind === "dramatic_pressure";
 
   if (finalPressureEl) {
     if (showFinalStrip) {
       finalPressureEl.hidden = false;
       finalPressureEl.classList.toggle(
         "final-pressure-strip--ten",
-        /FINAL\s*10|10\s*MINUTES/i.test(finalTitle)
+        dStyle === "final_ten" || /финальн(ые)?\s*10|10\s*минут/i.test(finalTitle) || /FINAL\s*10/i.test(finalTitle)
       );
       const leftBattle = roundEndsAtMs != null ? formatHudTime(roundEndsAtMs) : "—";
       const gap =
         typeof leaderboardHint === "string" && leaderboardHint.trim()
           ? `<span class="final-pressure-strip__gap">${escapeHtml(leaderboardHint.trim())}</span>`
           : "";
-      finalPressureEl.innerHTML = `<span class="final-pressure-strip__label">${escapeHtml(finalTitle || "FINAL PHASE")}</span>
+      finalPressureEl.innerHTML = `<span class="final-pressure-strip__label">${escapeHtml(finalTitle || "Финальная фаза")}</span>
         <span class="final-pressure-strip__timer">${escapeHtml(leftBattle)}</span>${gap}`;
     } else {
       finalPressureEl.hidden = true;
@@ -641,8 +594,6 @@ export function syncPremiumBattlePresentation(opts) {
     }
   }
 
-  const hideLegacy =
-    chips.length > 0 ||
-    (seismicPreview && typeof seismicPreview.impactAtMs === "number" && seismicPreview.impactAtMs > Date.now());
-  return hideLegacy;
+  /* Верхний event-banner не скрываем: там остаётся таймер основного события; боковой HUD дублирует список активных слоёв. */
+  return false;
 }
