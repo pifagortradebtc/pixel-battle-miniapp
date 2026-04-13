@@ -74,6 +74,12 @@ let lastBaseHitWallMs = 0;
 let lastEpicStingWallMs = 0;
 let lowPrioritySfxCount = 0;
 
+/**
+ * Непрерывный процедурный фон: слои-синусы на musicBus + ambient (шум + гудение 48 Hz).
+ * Выкл. — без стриминговых треков музыкальная шина тихая; остаются только явные SFX/стинги.
+ */
+const ENABLE_PROCEDURAL_MUSIC_DRONE = false;
+
 /** Сэмплы событий из sfx/samples.json (при отсутствии файла — процедурный fallback). */
 /** @type {Map<string, AudioBuffer>} */
 const eventSfxBuffers = new Map();
@@ -259,11 +265,15 @@ function ensureMusicOscs() {
 
 function startMusicEngine() {
   if (!ctx || musicEngineStarted) return;
-  ensureMusicOscs();
   musicEngineStarted = true;
-  applyMusicLayerTargets(true);
-  scheduleBattlePulseLoop();
-  startAmbientHum();
+  if (ENABLE_PROCEDURAL_MUSIC_DRONE) {
+    ensureMusicOscs();
+    applyMusicLayerTargets(true);
+    scheduleBattlePulseLoop();
+    startAmbientHum();
+  } else {
+    silenceMusicLayers(true);
+  }
 }
 
 function scheduleBattlePulseLoop() {

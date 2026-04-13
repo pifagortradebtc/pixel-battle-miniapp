@@ -42,6 +42,7 @@ import {
   playTreasureFoundSfx,
   playBuffPersonalSfx,
   playBuffTeamSfx,
+  playTerritoryExpand,
 } from "./game-audio.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
@@ -4425,6 +4426,20 @@ function teamNameForPresentation(teamId) {
   return n || `Команда ${id}`;
 }
 
+/** SFX зоны 4×4 / 6×6 / 12×12 (сервер может прислать только kind). */
+function playTerritoryCaptureZoneSfx(kind, sz) {
+  const raw = sz | 0;
+  const side =
+    raw === 4 || raw === 6 || raw === 12
+      ? raw
+      : kind === "zone12Capture"
+        ? 12
+        : kind === "massCapture"
+          ? 6
+          : 4;
+  playTerritoryExpand(/** @type {4 | 6 | 12} */ (side));
+}
+
 function applyGlobalPurchaseVfx(msg) {
   const app = document.getElementById("app");
   const tr = getVfxTransform();
@@ -4491,6 +4506,7 @@ function applyGlobalPurchaseVfx(msg) {
           : kind === "massCapture"
             ? 6
             : 12;
+    playTerritoryCaptureZoneSfx(kind, sz);
     const gxi = gx | 0;
     const gyi = gy | 0;
     scheduleDraw({

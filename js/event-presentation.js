@@ -249,6 +249,7 @@ function triggerCinematicHaptic(theme) {
 
 function runCinematic(spec, done) {
   if (!cinematicRoot || !cinematicPanel || !cinematicTitleEl || !cinematicSubEl) {
+    if (spec.sound) playSting(spec.sound);
     done();
     return;
   }
