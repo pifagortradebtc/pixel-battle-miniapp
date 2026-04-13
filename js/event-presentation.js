@@ -207,8 +207,9 @@ function appendRoundEventHudFallback(chips, ge) {
   });
 }
 
-function playSting(kind) {
-  playPresentationSting(String(kind || "default"));
+/** @param {import("./audio-spatial.js").SpatialSpec | null | undefined} [spatial] */
+function playSting(kind, spatial) {
+  playPresentationSting(String(kind || "default"), spatial);
 }
 
 function kickerFromThemeAndTitle(theme, title) {
@@ -249,7 +250,7 @@ function triggerCinematicHaptic(theme) {
 
 function runCinematic(spec, done) {
   if (!cinematicRoot || !cinematicPanel || !cinematicTitleEl || !cinematicSubEl) {
-    if (spec.sound) playSting(spec.sound);
+    if (spec.sound) playSting(spec.sound, spec.spatial);
     done();
     return;
   }
@@ -296,7 +297,7 @@ function runCinematic(spec, done) {
     triggerCinematicHaptic(theme);
   });
 
-  if (spec.sound) playSting(spec.sound);
+  if (spec.sound) playSting(spec.sound, spec.spatial);
 
   setTimeout(() => {
     cinematicRoot.classList.remove("cinematic-event--visible");
@@ -324,7 +325,7 @@ function pumpCinematicQueue() {
 }
 
 /**
- * @param {{ title: string; subtitle?: string; theme?: string; holdMs?: number; sound?: string; kicker?: string }} spec
+ * @param {{ title: string; subtitle?: string; theme?: string; holdMs?: number; sound?: string; kicker?: string; spatial?: import("./audio-spatial.js").SpatialSpec }} spec
  */
 export function enqueueBattleCinematic(spec) {
   cinematicQueue.push({
@@ -334,6 +335,7 @@ export function enqueueBattleCinematic(spec) {
     holdMs: spec.holdMs,
     sound: spec.sound || spec.theme || "default",
     kicker: spec.kicker,
+    spatial: spec.spatial,
   });
   pumpCinematicQueue();
 }
@@ -490,8 +492,9 @@ export function enqueueBaseCapturedPresentation(attackerLabel, defenderLabel) {
  * @param {"zoneCapture"|"massCapture"|"zone12Capture"|"militaryBase"} kind
  * @param {string} teamName
  * @param {number} size сторона квадрата
+ * @param {import("./audio-spatial.js").SpatialSpec | null | undefined} [spatial] позиционирование стинга зоны
  */
-export function enqueueTerritoryCapturePresentation(kind, teamName, size) {
+export function enqueueTerritoryCapturePresentation(kind, teamName, size, spatial) {
   const name = String(teamName || "Команда").trim() || "Команда";
   const s = size | 0;
   let title = "Захват территории";
@@ -525,6 +528,9 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size) {
     theme: "gold",
     sound,
     holdMs,
+    spatial:
+      spatial ??
+      (kind === "militaryBase" ? { scope: /** @type {const} */ ("global"), weight: 1 } : undefined),
   });
 }
 

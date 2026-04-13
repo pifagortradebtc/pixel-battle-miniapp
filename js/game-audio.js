@@ -7,6 +7,15 @@
 
 import { streamingBgm } from "./streaming-bgm.js";
 import { resolvePublicAssetUrl } from "./asset-url.js";
+import {
+  registerSpatialAudioListener,
+  registerSpatialAmbientAnchor,
+  resolveSpatialMul,
+  resolvePresentationSpatial,
+  SPATIAL_MIN_AUDIBLE,
+} from "./audio-spatial.js";
+
+export { registerSpatialAudioListener, registerSpatialAmbientAnchor };
 
 const STORAGE_KEY = "pixelBattleAudioSettings";
 
@@ -624,13 +633,15 @@ async function preloadEventSfxBuffers() {
 
 /**
  * @param {string} key ключ из samples.json
- * @param {{ bus?: "sfx" | "alert" | "ui"; duckMs?: number; deepDuck?: boolean; gainMul?: number }} [opt]
+ * @param {{ bus?: "sfx" | "alert" | "ui"; duckMs?: number; deepDuck?: boolean; gainMul?: number; spatial?: import("./audio-spatial.js").SpatialSpec }} [opt]
  * @returns {boolean}
  */
 function playEventSample(key, opt = {}) {
   if (!ctx || settings.muted) return false;
   const buf = eventSfxBuffers.get(key);
   if (!buf) return false;
+  const sm = resolveSpatialMul(opt.spatial);
+  if (sm < SPATIAL_MIN_AUDIBLE) return false;
   const busName = opt.bus || "sfx";
   const bus = busName === "alert" ? alertBus : busName === "ui" ? uiBus : sfxBus;
   if (!bus) return false;
@@ -639,7 +650,7 @@ function playEventSample(key, opt = {}) {
   const now = ctx.currentTime;
   const ev = settings.master * settings.effects;
   const mul = opt.gainMul ?? 1;
-  let peak = ev * mul;
+  let peak = ev * mul * sm;
   if (busName === "sfx") peak *= 0.9;
   else if (busName === "ui") peak *= 0.4;
   else peak *= 1.05;
@@ -810,12 +821,17 @@ function playFilteredNoiseBurst(bus, now, durSec, peak, lowpassHz) {
 /**
  * Кинематографические стинги (event-presentation): только низы / сдержанные слои, без square/saw «аркады».
  * @param {string} kind
+ * @param {import("./audio-spatial.js").SpatialSpec | null | undefined} [spatialSpec]
  */
-export function playPresentationSting(kind) {
+export function playPresentationSting(kind, spatialSpec) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     startMusicEngine();
     const k = String(kind || "default");
+    const spatialResolved = resolvePresentationSpatial(k, spatialSpec);
+    const sm = resolveSpatialMul(spatialResolved);
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
+
     const sampleKey = presentationStingKindToSampleKey(k);
     if (sampleKey) {
       const epic = k === "nuke-bomb" || k === "base_captured" || k === "final-ten";
@@ -834,7 +850,7 @@ export function playPresentationSting(kind) {
         duckMs = 640;
         deepDuck = true;
       }
-      if (playEventSample(sampleKey, { bus: "sfx", duckMs, deepDuck, gainMul: 1 })) {
+      if (playEventSample(sampleKey, { bus: "sfx", duckMs, deepDuck, gainMul: 1, spatial: spatialResolved })) {
         if (epic) lastEpicStingWallMs = performance.now();
         return;
       }
@@ -845,7 +861,10 @@ export function playPresentationSting(kind) {
 
     const now = ctx.currentTime;
     const master = ctx.createGain();
-    master.connect(sfxBus);
+    const spatialOut = ctx.createGain();
+    spatialOut.gain.value = sm;
+    master.connect(spatialOut);
+    spatialOut.connect(sfxBus);
 
     if (k === "nuke-bomb") {
       master.gain.setValueAtTime(0.0001, now);
@@ -1021,64 +1040,80 @@ export function playPurchaseSuccess() {
   });
 }
 
-export function playBuffPersonalSfx() {
+/** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] */
+export function playBuffPersonalSfx(spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
-    if (playEventSample("buff_personal", { bus: "sfx", gainMul: 0.95 })) return;
+    if (playEventSample("buff_personal", { bus: "sfx", gainMul: 0.95, spatial })) return;
+    const sm = resolveSpatialMul(spatial);
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 108, 132, 0.036, 0.11, sfxBus, now);
-    playOscThrough("sine", 132, 98, 0.028, 0.1, sfxBus, now + 0.06);
+    playOscThrough("sine", 108, 132, 0.036 * sm, 0.11, sfxBus, now);
+    playOscThrough("sine", 132, 98, 0.028 * sm, 0.1, sfxBus, now + 0.06);
   });
 }
 
-export function playBuffTeamSfx() {
+/** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] */
+export function playBuffTeamSfx(spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
-    if (playEventSample("buff_team", { bus: "sfx", gainMul: 0.95 })) return;
+    if (playEventSample("buff_team", { bus: "sfx", gainMul: 0.95, spatial })) return;
+    const sm = resolveSpatialMul(spatial);
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 92, 118, 0.038, 0.12, sfxBus, now);
-    playOscThrough("triangle", 88, 108, 0.032, 0.14, sfxBus, now + 0.05, 420);
+    playOscThrough("sine", 92, 118, 0.038 * sm, 0.12, sfxBus, now);
+    playOscThrough("triangle", 88, 108, 0.032 * sm, 0.14, sfxBus, now + 0.05, 420);
   });
 }
 
-export function playPixelPlace() {
+/** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] по умолчанию личный пиксель (полная громкость). */
+export function playPixelPlace(spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
+    const spec = spatial ?? { scope: "personal", weight: 1 };
     registerLowPrioritySfx();
-    if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72 })) return;
+    if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
+    const sm = resolveSpatialMul(spec);
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
-    playFilteredNoiseBurst(sfxBus, now, 0.012, 0.035, 680);
-    playOscThrough("sine", 265, 198, 0.045, 0.028, sfxBus, now + 0.001);
+    playFilteredNoiseBurst(sfxBus, now, 0.012, 0.035 * sm, 680);
+    playOscThrough("sine", 265, 198, 0.045 * sm, 0.028, sfxBus, now + 0.001);
   });
 }
 
 /**
  * @param {4 | 6 | 12 | void} [zoneSide] сторона зоны захвата; без аргумента — только процедурный звук.
+ * @param {import("./audio-spatial.js").SpatialSpec | null} [spatial]
  */
-export function playTerritoryExpand(zoneSide) {
+export function playTerritoryExpand(zoneSide, spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     if (zoneSide === 4 || zoneSide === 6 || zoneSide === 12) {
       const key = zoneSide === 12 ? "territory_12" : zoneSide === 6 ? "territory_6" : "territory_4";
-      if (playEventSample(key, { bus: "sfx", gainMul: 1 })) return;
+      if (playEventSample(key, { bus: "sfx", gainMul: 1, spatial })) return;
     }
+    const sm = resolveSpatialMul(spatial);
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 55, 95, 0.048, 0.28, sfxBus, now);
-    playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022, 380);
+    playOscThrough("sine", 55, 95, 0.048 * sm, 0.28, sfxBus, now);
+    playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022 * sm, 380);
   });
 }
 
+/** Глобально слышимый стинг плацдарма (по ТЗ). */
 export function playMilitaryBaseDeploySound() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
-    if (playEventSample("military_base", { bus: "sfx", gainMul: 1 })) return;
+    const spatial = /** @type {const} */ ({ scope: "global", weight: 1 });
+    if (playEventSample("military_base", { bus: "sfx", gainMul: 1, spatial })) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 55, 95, 0.048, 0.28, sfxBus, now);
     playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022, 380);
   });
 }
 
-export function playFlagBaseHit() {
+/** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] */
+export function playFlagBaseHit(spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     const nowW = performance.now();
@@ -1086,10 +1121,12 @@ export function playFlagBaseHit() {
     lastBaseHitWallMs = nowW;
     const now = ctx.currentTime;
     duckMusicForAlert(260, false);
-    if (playEventSample("base_hit", { bus: "sfx", gainMul: 1.02 })) return;
-    playSubThump(sfxBus, now, 0.26, 68, 42, 0.26);
-    playFilteredNoiseBurst(sfxBus, now + 0.01, 0.07, 0.065, 1100);
-    playOscThrough("triangle", 78, 48, 0.028, 0.15, sfxBus, now + 0.018, 420);
+    if (playEventSample("base_hit", { bus: "sfx", gainMul: 1.02, spatial })) return;
+    const sm = resolveSpatialMul(spatial);
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
+    playSubThump(sfxBus, now, 0.26, 68, 42, 0.26 * sm);
+    playFilteredNoiseBurst(sfxBus, now + 0.01, 0.07, 0.065 * sm, 1100);
+    playOscThrough("triangle", 78, 48, 0.028 * sm, 0.15, sfxBus, now + 0.018, 420);
   });
 }
 
@@ -1100,11 +1137,12 @@ export function playBombExplosion() {
     if (nowW - lastExplosionWallMs < 380) return;
     lastExplosionWallMs = nowW;
     duckMusicForAlert(520, true);
-    if (playEventSample("bomb", { bus: "sfx", gainMul: 1.05 })) {
+    const nuke = /** @type {const} */ ({ scope: "global", weight: 1 });
+    if (playEventSample("bomb", { bus: "sfx", gainMul: 1.05, spatial: nuke })) {
       lastEpicStingWallMs = performance.now();
       return;
     }
-    playPresentationSting("nuke-bomb");
+    playPresentationSting("nuke-bomb", nuke);
   });
 }
 
@@ -1204,23 +1242,28 @@ export function playAlertTerritoryCutOff() {
 /** @type {ReturnType<typeof setTimeout> | null} */
 let seismicAfterSfxTimer = null;
 
-export function playSeismicImpactSfx() {
+/** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] локальный удар по эпицентру / fallback global */
+export function playSeismicImpactSfx(spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
+    const spatialUse = spatial ?? { scope: "global", weight: 1 };
     duckMusicForAlert(600, true);
-    if (playEventSample("seismic_hit", { bus: "sfx", gainMul: 1.02 })) return;
-    playPresentationSting("seismic");
+    if (playEventSample("seismic_hit", { bus: "sfx", gainMul: 1.02, spatial: spatialUse })) return;
+    if (resolveSpatialMul(spatialUse) < SPATIAL_MIN_AUDIBLE) return;
+    playPresentationSting("seismic", spatialUse);
   });
 }
 
-export function scheduleSeismicAftermathSfx() {
+/** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] */
+export function scheduleSeismicAftermathSfx(spatial) {
   if (typeof window === "undefined") return;
   if (seismicAfterSfxTimer != null) clearTimeout(seismicAfterSfxTimer);
+  const spatialUse = spatial ?? { scope: "global", weight: 0.85 };
   seismicAfterSfxTimer = window.setTimeout(() => {
     seismicAfterSfxTimer = null;
     resumeAudioContext().then(() => {
       if (!ctx || settings.muted) return;
-      playEventSample("seismic_after", { bus: "sfx", gainMul: 0.78 });
+      playEventSample("seismic_after", { bus: "sfx", gainMul: 0.78, spatial: spatialUse });
     });
   }, 1100);
 }
@@ -1229,7 +1272,8 @@ export function playRoundEndSfx() {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
     duckMusicForAlert(900, true);
-    if (playEventSample("round_end", { bus: "sfx", gainMul: 1 })) return;
+    const g = /** @type {const} */ ({ scope: "global", weight: 1 });
+    if (playEventSample("round_end", { bus: "sfx", gainMul: 1, spatial: g })) return;
     if (!sfxBus) return;
     const now = ctx.currentTime;
     playSubThump(sfxBus, now, 0.38, 40, 22, 0.26);
@@ -1241,7 +1285,8 @@ export function playFinalVictorySfx() {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
     duckMusicForAlert(1400, true);
-    if (playEventSample("final_victory", { bus: "sfx", gainMul: 1.02 })) return;
+    const g = /** @type {const} */ ({ scope: "global", weight: 1 });
+    if (playEventSample("final_victory", { bus: "sfx", gainMul: 1.02, spatial: g })) return;
     if (!sfxBus) return;
     const now = ctx.currentTime;
     playSubThump(sfxBus, now, 0.45, 36, 20, 0.32);
@@ -1253,7 +1298,8 @@ export function playFinalVictorySfx() {
 export function playTreasureFoundSfx() {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
-    if (playEventSample("treasure", { bus: "sfx", gainMul: 0.95 })) return;
+    const p = /** @type {const} */ ({ scope: "personal", weight: 1 });
+    if (playEventSample("treasure", { bus: "sfx", gainMul: 0.95, spatial: p })) return;
     if (!sfxBus) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 118, 92, 0.042, 0.28, sfxBus, now);

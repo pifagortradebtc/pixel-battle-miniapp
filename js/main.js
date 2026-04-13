@@ -45,6 +45,8 @@ import {
   playTerritoryExpand,
   playMenuChoiceSfx,
   playMenuOpenSfx,
+  registerSpatialAudioListener,
+  registerSpatialAmbientAnchor,
 } from "./game-audio.js";
 import { subscribeStreamingBgmResync } from "./streaming-bgm.js";
 import {
@@ -4437,8 +4439,62 @@ function teamNameForPresentation(teamId) {
   return n || `Команда ${id}`;
 }
 
+/** Центр базы команды в клетках — якорь для командных/личных баффов без координаты события. */
+function teamSoundAnchor(teamId) {
+  const tid = teamId | 0;
+  const def = teamsMeta?.find((x) => (Number(x.id) | 0) === tid);
+  const sp = def?.spawn;
+  if (!sp || typeof sp.x0 !== "number" || typeof sp.y0 !== "number") {
+    return { gx: gridW * 0.5, gy: gridH * 0.5 };
+  }
+  const w = typeof sp.w === "number" ? sp.w | 0 : 6;
+  const h = typeof sp.h === "number" ? sp.h | 0 : 6;
+  return { gx: sp.x0 + w * 0.5, gy: sp.y0 + h * 0.5 };
+}
+
+/**
+ * Захват зоны: своя команда — личный полный; чужая — локально от центра зоны.
+ * @param {number} teamId
+ * @param {number} gx
+ * @param {number} gy
+ * @param {number} sz
+ * @returns {import("./audio-spatial.js").SpatialSpec}
+ */
+function spatialForZoneCapture(teamId, gx, gy, sz) {
+  const s = sz | 0;
+  const cx = (gx | 0) + s * 0.5;
+  const cy = (gy | 0) + s * 0.5;
+  const tid = teamId | 0;
+  if (myTeamId != null && tid === (myTeamId | 0)) {
+    return { scope: "personal", weight: 1 };
+  }
+  const weight = s >= 12 ? 0.92 : s >= 6 ? 0.74 : 0.56;
+  return { scope: "local", gx: cx, gy: cy, weight };
+}
+
+/**
+ * @param {unknown[][]} cells
+ * @param {number} [weight]
+ * @returns {import("./audio-spatial.js").SpatialSpec}
+ */
+function spatialCentroidFromCells(cells, weight = 0.9) {
+  if (!Array.isArray(cells) || !cells.length) return { scope: "global", weight };
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (let i = 0; i < cells.length; i++) {
+    const p = cells[i];
+    if (!Array.isArray(p) || p.length < 2) continue;
+    sx += p[0] | 0;
+    sy += p[1] | 0;
+    n++;
+  }
+  if (!n) return { scope: "global", weight };
+  return { scope: "local", gx: sx / n, gy: sy / n, weight };
+}
+
 /** SFX зоны 4×4 / 6×6 / 12×12 (сервер может прислать только kind). */
-function playTerritoryCaptureZoneSfx(kind, sz) {
+function playTerritoryCaptureZoneSfx(kind, sz, spatial) {
   const raw = sz | 0;
   const side =
     raw === 4 || raw === 6 || raw === 12
@@ -4448,7 +4504,7 @@ function playTerritoryCaptureZoneSfx(kind, sz) {
         : kind === "massCapture"
           ? 6
           : 4;
-  playTerritoryExpand(/** @type {4 | 6 | 12} */ (side));
+  playTerritoryExpand(/** @type {4 | 6 | 12} */ (side), spatial);
 }
 
 function applyGlobalPurchaseVfx(msg) {
@@ -4517,7 +4573,15 @@ function applyGlobalPurchaseVfx(msg) {
           : kind === "massCapture"
             ? 6
             : 12;
-    playTerritoryCaptureZoneSfx(kind, sz);
+    const zoneSp = hasGrid
+      ? spatialForZoneCapture(msg.teamId | 0, gx | 0, gy | 0, sz)
+      : myTeamId != null && (msg.teamId | 0) === (myTeamId | 0)
+        ? { scope: /** @type {const} */ ("personal"), weight: 1 }
+        : (() => {
+            const a = teamSoundAnchor(msg.teamId | 0);
+            return { scope: /** @type {const} */ ("local"), gx: a.gx, gy: a.gy, weight: 0.45 };
+          })();
+    playTerritoryCaptureZoneSfx(kind, sz, zoneSp);
     const gxi = gx | 0;
     const gyi = gy | 0;
     scheduleDraw({
@@ -4532,7 +4596,15 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
-    playBuffPersonalSfx();
+    {
+      const a = teamSoundAnchor(msg.teamId | 0);
+      const isMine = myTeamId != null && (msg.teamId | 0) === (myTeamId | 0);
+      playBuffPersonalSfx(
+        isMine
+          ? { scope: /** @type {const} */ ("personal"), weight: 1 }
+          : { scope: /** @type {const} */ ("local"), gx: a.gx, gy: a.gy, weight: 0.42 }
+      );
+    }
     return;
   }
   if (kind === "zoneCapture" && hasGrid) {
@@ -4540,10 +4612,12 @@ function applyGlobalPurchaseVfx(msg) {
       typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
         ? msg.size | 0
         : 4;
+    const zoneSp = spatialForZoneCapture(msg.teamId | 0, gx | 0, gy | 0, sz);
     enqueueTerritoryCapturePresentation(
       "zoneCapture",
       teamNameForPresentation(msg.teamId),
-      sz
+      sz,
+      zoneSp
     );
     if (boardVfx) {
       boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
@@ -4557,10 +4631,12 @@ function applyGlobalPurchaseVfx(msg) {
       typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
         ? msg.size | 0
         : 6;
+    const zoneSp = spatialForZoneCapture(msg.teamId | 0, gx | 0, gy | 0, sz);
     enqueueTerritoryCapturePresentation(
       "massCapture",
       teamNameForPresentation(msg.teamId),
-      sz
+      sz,
+      zoneSp
     );
     if (boardVfx) {
       boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
@@ -4574,10 +4650,12 @@ function applyGlobalPurchaseVfx(msg) {
       typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size > 0
         ? msg.size | 0
         : 12;
+    const zoneSp = spatialForZoneCapture(msg.teamId | 0, gx | 0, gy | 0, sz);
     enqueueTerritoryCapturePresentation(
       "zone12Capture",
       teamNameForPresentation(msg.teamId),
-      sz
+      sz,
+      zoneSp
     );
     if (boardVfx) {
       boardVfx.zoneFlash(gx | 0, gy | 0, teamColor(msg.teamId | 0), tr, sz);
@@ -4590,7 +4668,10 @@ function applyGlobalPurchaseVfx(msg) {
     const gxi = gx | 0;
     const gyi = gy | 0;
     const col = teamColor(msg.teamId | 0);
-    enqueueTerritoryCapturePresentation("militaryBase", teamNameForPresentation(msg.teamId), FLAG_SPAWN_SIZE);
+    enqueueTerritoryCapturePresentation("militaryBase", teamNameForPresentation(msg.teamId), FLAG_SPAWN_SIZE, {
+      scope: /** @type {const} */ ("global"),
+      weight: 1,
+    });
     runMilitaryBaseDeployPresentation(msg.teamId | 0);
     if (boardVfx) {
       boardVfx.militaryBaseDeploy(gxi, gyi, col, tr);
@@ -4611,7 +4692,15 @@ function applyGlobalPurchaseVfx(msg) {
     boardVfx?.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
-    playBuffTeamSfx();
+    {
+      const a = teamSoundAnchor(msg.teamId | 0);
+      const isMine = myTeamId != null && (msg.teamId | 0) === (myTeamId | 0);
+      playBuffTeamSfx(
+        isMine
+          ? { scope: /** @type {const} */ ("personal"), weight: 1 }
+          : { scope: /** @type {const} */ ("local"), gx: a.gx, gy: a.gy, weight: 0.48 }
+      );
+    }
   }
 }
 
@@ -5922,8 +6011,11 @@ function connectWs() {
         flushBoardVfxFrame();
       }
       runBoardSeismicHitShake();
-      playSeismicImpactSfx();
-      scheduleSeismicAftermathSfx();
+      {
+        const sp = spatialCentroidFromCells(cells, 0.9);
+        playSeismicImpactSfx(sp);
+        scheduleSeismicAftermathSfx(sp);
+      }
       applySeismicTremorBodyOverride();
       syncEventBanner();
       scheduleDraw({ full: true });
@@ -6036,7 +6128,12 @@ function connectWs() {
               const col = aid ? teamColor(aid) : "#ffaa66";
               boardVfx.flagBaseHitImpact(fgx, fgy, col, getVfxTransform());
               flushBoardVfxFrame();
-              playFlagBaseHit();
+              playFlagBaseHit({
+                scope: /** @type {const} */ ("local"),
+                gx: fgx + 0.5,
+                gy: fgy + 0.5,
+                weight: 0.84,
+              });
               bumpCombat(1600);
             }
           }
@@ -9287,6 +9384,12 @@ async function bootstrap() {
   await loadRegions();
   loadFromStorage();
   initGameAudio();
+  registerSpatialAudioListener(() => {
+    if (!canvas) return { gx: gridW * 0.5, gy: gridH * 0.5 };
+    const rect = canvas.getBoundingClientRect();
+    return screenToGrid(rect.width * 0.5, rect.height * 0.5);
+  });
+  registerSpatialAmbientAnchor(() => ({ gx: gridW * 0.5, gy: gridH * 0.5 }));
   subscribeStreamingBgmResync(() => syncDynamicBgmFromMain());
   initEventPresentation();
   migrateLegacySessionStorage();
