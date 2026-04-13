@@ -794,6 +794,35 @@ let boardSeismicShakeClearTimer = null;
 let lastMyTeamScoreShare = null;
 /** Прогресс захвата флага по защищающейся команде: teamId → { progress, attackerTeamId }. */
 let flagCaptureClientState = new Map();
+
+function clientMainFlagKey(teamId) {
+  return `b:${teamId | 0}`;
+}
+function clientMilitaryFlagKey(teamId, x0, y0) {
+  return `m:${teamId | 0}:${x0 | 0}:${y0 | 0}`;
+}
+/** Сообщения flag* с опциональным militaryAnchor для передовой 6×6. */
+function clientFlagKeyFromServerMsg(msg) {
+  if (
+    msg.militaryAnchor &&
+    typeof msg.militaryAnchor.x0 === "number" &&
+    typeof msg.militaryAnchor.y0 === "number"
+  ) {
+    return clientMilitaryFlagKey(msg.defenderTeamId | 0, msg.militaryAnchor.x0, msg.militaryAnchor.y0);
+  }
+  return clientMainFlagKey(msg.defenderTeamId | 0);
+}
+
+/** Удалить состояние HP флага главной базы и всех FOB защитника (при полном захвате главной). */
+function deleteFlagCaptureStateForDefenderTeam(did) {
+  const d = did | 0;
+  if (d <= 0) return;
+  flagCaptureClientState.delete(clientMainFlagKey(d));
+  const prefix = `m:${d}:`;
+  for (const k of [...flagCaptureClientState.keys()]) {
+    if (typeof k === "string" && k.startsWith(prefix)) flagCaptureClientState.delete(k);
+  }
+}
 /** До какого времени показывать пульс/тревогу по своему флагу. */
 let myFlagUnderAttackUntil = 0;
 /** HP ≤ 1 у своей базы — усиленная тревога / тряска. */
@@ -805,23 +834,6 @@ let pendingMapAction = null;
 /** Сетка под курсором для превью размещения передовой базы (-1 = нет). */
 let mapHoverGx = -1;
 let mapHoverGy = -1;
-
-/** Попадание в зону боя квантовой фермы (как пунктир 4×4 вокруг якоря 2×2 на карте). */
-function clientGridCellInQuantumFarmBattleZone(gx, gy) {
-  const gxi = gx | 0;
-  const gyi = gy | 0;
-  if (!quantumFarmsMeta.length || gridW < 1 || gridH < 1) return false;
-  if (gxi < 0 || gxi >= gridW || gyi < 0 || gyi >= gridH) return false;
-  for (let i = 0; i < quantumFarmsMeta.length; i++) {
-    const f = quantumFarmsMeta[i];
-    const igx0 = Math.max(0, f.x0 - 1);
-    const igy0 = Math.max(0, f.y0 - 1);
-    const igx1 = Math.min(gridW - 1, f.x0 + f.w);
-    const igy1 = Math.min(gridH - 1, f.y0 + f.h);
-    if (gxi >= igx0 && gxi <= igx1 && gyi >= igy0 && gyi <= igy1) return true;
-  }
-  return false;
-}
 
 const CLIENT_MILITARY_GAP_OWN_MAIN = 4;
 const CLIENT_MILITARY_GAP_ENEMY_MAIN = 6;
@@ -1174,34 +1186,40 @@ function hidePlacementFeedbackBanner() {
 }
 
 /**
- * Явный фидбек: полоска под статусом + тактильный отклик; не полагаемся только на Telegram alert.
- * @param {"warn"|"error"|"success"} severity
- * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, skipCooldownChrome?: boolean }} opts
+ * Явный фидбек: опционально верхний event-banner + полоска в тулбаре (cooldown-label) + тактильный отклик.
+ * @param {"warn"|"error"|"success"|"ok"} severity
+ * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, skipCooldownChrome?: boolean, skipEventBanner?: boolean }} opts
  */
 function showPlacementFeedback(text, severity, opts = {}) {
   const telegramAlert = opts.telegramAlert === true;
   const skipCooldownChrome = opts.skipCooldownChrome === true;
+  const skipEventBanner = opts.skipEventBanner === true;
   const hideMs =
     typeof opts.bannerDurationMs === "number" && Number.isFinite(opts.bannerDurationMs) && opts.bannerDurationMs > 0
       ? opts.bannerDurationMs
       : 5600;
-  if (placementFeedbackBannerEl && text) {
+  let scheduleHide = false;
+  if (placementFeedbackBannerEl && text && !skipEventBanner) {
     placementFeedbackBannerEl.textContent = text;
     placementFeedbackBannerEl.hidden = false;
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-warn", severity === "warn");
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-error", severity === "error");
-    placementFeedbackBannerEl.classList.toggle("event-banner--feedback-success", severity === "success");
-    if (placementFeedbackHideTimer) clearTimeout(placementFeedbackHideTimer);
-    placementFeedbackHideTimer = setTimeout(() => {
-      placementFeedbackHideTimer = null;
-      hidePlacementFeedbackBanner();
-    }, hideMs);
+    placementFeedbackBannerEl.classList.toggle("event-banner--feedback-success", severity === "success" || severity === "ok");
+    scheduleHide = true;
   }
   if (cooldownLabel && text && !skipCooldownChrome) {
     cooldownLabel.hidden = false;
     cooldownLabel.textContent = text;
     cooldownLabel.classList.add("toolbar__cooldown--alert");
     cooldownLabel.title = text;
+    scheduleHide = true;
+  }
+  if (scheduleHide && hideMs > 0) {
+    if (placementFeedbackHideTimer) clearTimeout(placementFeedbackHideTimer);
+    placementFeedbackHideTimer = setTimeout(() => {
+      placementFeedbackHideTimer = null;
+      hidePlacementFeedbackBanner();
+    }, hideMs);
   }
   const tg = window.Telegram?.WebApp;
   try {
@@ -1251,7 +1269,7 @@ function applyNukeAftermathFromEpicenter(gxi, gyi) {
     gridW,
     gridH,
     isClientPlayableCell,
-    clientCellNukeProtectedSpawn
+    clientNoNukeBlastHoleExclusion
   );
   if (pairs.length === 0) {
     nukeAftermathBlastKeys = null;
@@ -1298,11 +1316,23 @@ function clientNukeBlastWouldClearTerritory(cx, cy) {
     gridW,
     gridH,
     isClientPlayableCell,
-    clientCellNukeProtectedSpawn
+    clientNoNukeBlastHoleExclusion
   );
+  const myT = myTeamId | 0;
   for (let i = 0; i < pairs.length; i++) {
     const x = pairs[i][0];
     const y = pairs[i][1];
+    if (clientCellNukeProtectedSpawn(x, y)) {
+      if (!myT || !teamsMeta) continue;
+      for (const t of teamsMeta) {
+        if (t.solo || t.eliminated || !t.spawn) continue;
+        if ((t.id | 0) === myT) continue;
+        const x0 = t.spawn.x0 | 0;
+        const y0 = t.spawn.y0 | 0;
+        if (x >= x0 && x < x0 + FLAG_SPAWN_SIZE && y >= y0 && y < y0 + FLAG_SPAWN_SIZE) return true;
+      }
+      continue;
+    }
     const v = pixels.get(`${x},${y}`);
     if (v == null) continue;
     const tid = typeof v === "number" ? v | 0 : Number(v.teamId) | 0;
@@ -3333,7 +3363,8 @@ function notifyReject(reason) {
       "Чужая база: бейте по клетке флага, чтобы снимать HP. Обычным пикселем базу не перекрасить.",
     not_leader:
       "Сервер занят (реплика кластера). Обновите страницу или подождите — ход обрабатывает основной инстанс.",
-    nuke_no_effect: "В зоне взрыва нет чужих закрашенных клеток (или только базы команд под защитой).",
+    nuke_no_effect:
+      "Бомба не дала эффекта: в кратере нет закраски для сброса и не задета чужая главная база 6×6.",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -3404,7 +3435,9 @@ function syncFlagCaptureStateFromMeta(flags) {
     }
     if (!Number.isFinite(hp)) hp = Math.max(0, maxHp - (f.progress | 0));
     if (hp >= maxHp) continue;
-    const prev = flagCaptureClientState.get(tid);
+    const slotKey =
+      typeof f.clientKey === "string" && f.clientKey.trim() !== "" ? f.clientKey.trim() : clientMainFlagKey(tid);
+    const prev = flagCaptureClientState.get(slotKey);
     let lh = 0;
     if (typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt)) lh = toEpochMsSafe(f.lastHitAt);
     else if (f.lastHitAt != null && String(f.lastHitAt).trim() !== "") {
@@ -3452,7 +3485,7 @@ function syncFlagCaptureStateFromMeta(flags) {
       entry.effectiveHp = effOut;
       entry.flagStateServerNow = snOut;
     }
-    next.set(tid, entry);
+    next.set(slotKey, entry);
   }
   flagCaptureClientState = next;
 }
@@ -3509,7 +3542,7 @@ function notifyPurchaseError(reason) {
     warmup: "Разминка: покупки и бусты после старта боя.",
     waiting_go: "Покупка сейчас недоступна (обновите клиент или дождитесь старта раунда).",
     nuke_no_effect:
-      "Бомба не сработала: в зоне нет территории для очистки (или только защищённые базы 6×6).",
+      "Бомба не дала эффекта: в кратере нет закраски для сброса и не задета чужая главная база 6×6.",
     military_cooldown: "Перед следующим развёртыванием подождите (~2 мин).",
     military_occupied: "Нужна полностью свободная суша 6×6 без чужих пикселей.",
     military_water: "Нельзя разместить на воде.",
@@ -3709,6 +3742,53 @@ function computeClientQuantumFarmIncomePer5s() {
     if ((resolveFarmControl(scores).owner | 0) === tid) n++;
   }
   return n;
+}
+
+/** Вспышка на фермах + всплывающий текст при начислении квантов с ферм (каждые 5 с). */
+function playQuantumFarmIncomeClientFx(quants) {
+  const q = quants | 0;
+  if (q < 1 || spectatorMode) return;
+  const tid = myTeamId | 0;
+  if (!tid || !quantumFarmsMeta.length) return;
+  const tr = getVfxTransform();
+  const gold = "#f0c040";
+  for (let i = 0; i < quantumFarmsMeta.length; i++) {
+    const f = quantumFarmsMeta[i];
+    const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
+      const p = key.split(",");
+      const v = clientPixelTeamIdAt(Number(p[0]), Number(p[1]));
+      return v == null ? 0 : v | 0;
+    });
+    if ((resolveFarmControl(scores).owner | 0) !== tid) continue;
+    const gcx = f.x0 + ((f.w / 2) | 0);
+    const gcy = f.y0 + ((f.h / 2) | 0);
+    if (boardVfx) {
+      boardVfx.ripple(gcx, gcy, gold, tr);
+      boardVfx.burst(gcx, gcy, "#ffd85c", tr, 16);
+    }
+  }
+  flushBoardVfxFrame();
+  requestAnimationFrame(() => flushBoardVfxFrame());
+  if (toolbarQuantumObjectiveEl && !toolbarQuantumObjectiveEl.hidden) {
+    toolbarQuantumObjectiveEl.classList.remove("toolbar__wallet--pulse");
+    void toolbarQuantumObjectiveEl.offsetWidth;
+    toolbarQuantumObjectiveEl.classList.add("toolbar__wallet--pulse");
+    setTimeout(() => toolbarQuantumObjectiveEl.classList.remove("toolbar__wallet--pulse"), 600);
+  }
+  if (floatFxHost && walletBalanceEl) {
+    const r = walletBalanceEl.getBoundingClientRect();
+    spawnFloatingText(
+      floatFxHost,
+      `+${q} ${quantWord(q)} 💵`,
+      { x: r.left + r.width * 0.5, y: r.top + r.height * 0.15 },
+      "float-fx__pop--gold"
+    );
+  }
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Бейдж «квантоцентр» в шапке: подчёркивает главную цель раунда. */
@@ -4272,8 +4352,8 @@ function handlePurchaseOk(msg) {
     }, 420);
     showPlacementFeedback(
       "Передовая база на карте — расширяйтесь от неё, но держите связь с главной базой.",
-      "ok",
-      { telegramAlert: false }
+      "success",
+      { telegramAlert: false, skipEventBanner: true }
     );
     try {
       window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
@@ -5541,17 +5621,18 @@ function connectWs() {
     }
     if (msg.type === "flagCaptureProgress") {
       const did = msg.defenderTeamId | 0;
+      const slotKey = clientFlagKeyFromServerMsg(msg);
       if (msg.reset) {
-        flagCaptureClientState.delete(did);
+        flagCaptureClientState.delete(slotKey);
       } else {
         const maxHp = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
         const hp =
           typeof msg.hp === "number"
             ? msg.hp | 0
             : Math.max(0, maxHp - (msg.progress | 0));
-        if (hp >= maxHp) flagCaptureClientState.delete(did);
+        if (hp >= maxHp) flagCaptureClientState.delete(slotKey);
         else {
-          const prev = flagCaptureClientState.get(did);
+          const prev = flagCaptureClientState.get(slotKey);
           let lh = NaN;
           if (typeof msg.lastHitAt === "number" && Number.isFinite(msg.lastHitAt)) lh = toEpochMsSafe(msg.lastHitAt);
           else if (msg.lastHitAt != null && String(msg.lastHitAt).trim() !== "") {
@@ -5601,11 +5682,27 @@ function connectWs() {
                 ? msg.serverNow
                 : Date.now();
           }
-          flagCaptureClientState.set(did, row);
+          flagCaptureClientState.set(slotKey, row);
           if (!msg.regen && teamsMeta && boardVfx) {
-            const def = teamsMeta.find((x) => (Number(x.id) | 0) === did);
-            if (def?.spawn) {
-              const { x: fgx, y: fgy } = flagCellFromSpawn(def.spawn.x0, def.spawn.y0);
+            let fgx = NaN;
+            let fgy = NaN;
+            if (
+              msg.militaryAnchor &&
+              typeof msg.militaryAnchor.x0 === "number" &&
+              typeof msg.militaryAnchor.y0 === "number"
+            ) {
+              const a = flagCellFromSpawn(msg.militaryAnchor.x0 | 0, msg.militaryAnchor.y0 | 0);
+              fgx = a.x;
+              fgy = a.y;
+            } else {
+              const def = teamsMeta.find((x) => (Number(x.id) | 0) === did);
+              if (def?.spawn) {
+                const a = flagCellFromSpawn(def.spawn.x0, def.spawn.y0);
+                fgx = a.x;
+                fgy = a.y;
+              }
+            }
+            if (Number.isFinite(fgx) && Number.isFinite(fgy)) {
               const aid = msg.attackerTeamId | 0;
               const col = aid ? teamColor(aid) : "#ffaa66";
               boardVfx.flagBaseHitImpact(fgx, fgy, col, getVfxTransform());
@@ -5622,7 +5719,7 @@ function connectWs() {
       return;
     }
     if (msg.type === "flagCaptureStopped") {
-      flagCaptureClientState.delete(msg.defenderTeamId | 0);
+      flagCaptureClientState.delete(clientFlagKeyFromServerMsg(msg));
       scheduleDraw({ full: true });
       return;
     }
@@ -5668,11 +5765,61 @@ function connectWs() {
       scheduleDraw({ full: true });
       return;
     }
+    if (msg.type === "militaryOutpostCaptured") {
+      const aid = msg.attackerTeamId | 0;
+      const did = msg.defenderTeamId | 0;
+      const x0 = msg.x0 | 0;
+      const y0 = msg.y0 | 0;
+      flagCaptureClientState.delete(clientMilitaryFlagKey(did, x0, y0));
+      const S = FLAG_SPAWN_SIZE;
+      for (let yy = y0; yy < y0 + S; yy++) {
+        for (let xx = x0; xx < x0 + S; xx++) {
+          pixels.set(`${xx},${yy}`, { teamId: aid, ownerPlayerKey: "", shieldedUntil: 0 });
+        }
+      }
+      if (boardVfx) {
+        const tr = getVfxTransform();
+        boardVfx.flagCaptureExplosion(
+          msg.gx | 0,
+          msg.gy | 0,
+          msg.attackerColor,
+          msg.defenderColor,
+          tr
+        );
+        flushBoardVfxFrame();
+        requestAnimationFrame(() => flushBoardVfxFrame());
+      }
+      const an = teamsMeta?.find((x) => (Number(x.id) | 0) === aid)?.name || "атакующие";
+      const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "защита";
+      showPlacementFeedback(
+        `Передовая база захвачена: плацдарм 6×6 у «${an}» (команда «${dn}» не выбыла).`,
+        "warn",
+        { telegramAlert: false }
+      );
+      if ((did | 0) === (myTeamId | 0)) {
+        try {
+          window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("warning");
+        } catch {
+          /* ignore */
+        }
+      }
+      scheduleDraw({ full: true });
+      schedulePersist();
+      return;
+    }
+    if (msg.type === "militaryOutpostRemoved") {
+      const tid = msg.teamId | 0;
+      const x0 = msg.x0 | 0;
+      const y0 = msg.y0 | 0;
+      flagCaptureClientState.delete(clientMilitaryFlagKey(tid, x0, y0));
+      scheduleDraw({ full: true });
+      return;
+    }
     if (msg.type === "flagCaptured") {
       const aid = msg.attackerTeamId | 0;
       const did = msg.defenderTeamId | 0;
       const wasMyDefeat = myTeamId != null && (myTeamId | 0) === did;
-      flagCaptureClientState.delete(did);
+      deleteFlagCaptureStateForDefenderTeam(did);
       for (const [k, v] of [...pixels.entries()]) {
         const tid = typeof v === "number" ? v : v.teamId;
         if ((tid | 0) === did) {
@@ -5729,7 +5876,7 @@ function connectWs() {
       const h = typeof msg.hp === "number" ? msg.hp | 0 : mx;
       const did = typeof msg.defenderTeamId === "number" ? msg.defenderTeamId | 0 : 0;
       if (did > 0 && h < mx) {
-        flagCaptureClientState.set(did, {
+        flagCaptureClientState.set(clientFlagKeyFromServerMsg(msg), {
           hp: h,
           maxHp: mx,
           lastHitAt: Date.now(),
@@ -5765,9 +5912,22 @@ function connectWs() {
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
       invalidateTeamColorByIdCache();
-      const aliveIds = new Set((teamsMeta || []).map((x) => Number(x.id) | 0));
-      for (const id of [...flagCaptureClientState.keys()]) {
-        if (!aliveIds.has(id | 0)) flagCaptureClientState.delete(id);
+      const allowedKeys = new Set();
+      for (const t of teamsMeta || []) {
+        if (t.solo || t.eliminated) continue;
+        const tid = Number(t.id) | 0;
+        if (tid <= 0) continue;
+        if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
+          allowedKeys.add(clientMainFlagKey(tid));
+        }
+        const mos = clientMilitaryOutpostRects(tid);
+        for (let mi = 0; mi < mos.length; mi++) {
+          const o = mos[mi];
+          allowedKeys.add(clientMilitaryFlagKey(tid, o.x0 | 0, o.y0 | 0));
+        }
+      }
+      for (const k of [...flagCaptureClientState.keys()]) {
+        if (!allowedKeys.has(k)) flagCaptureClientState.delete(k);
       }
       rebuildTeamList();
       updateTeamBadge();
@@ -6203,6 +6363,13 @@ function connectWs() {
         });
       }
       syncToolbarQuantumObjective();
+      return;
+    }
+    if (msg.type === "quantFarmIncomePulse") {
+      const tid = msg.teamId | 0;
+      if (!myTeamId || (tid | 0) !== (myTeamId | 0)) return;
+      const q = typeof msg.quants === "number" && Number.isFinite(msg.quants) ? msg.quants | 0 : 0;
+      playQuantumFarmIncomeClientFx(q);
       return;
     }
     if (msg.type === "treasureClaimed") {
@@ -6752,12 +6919,24 @@ function isClientEnemyOwnedFlagAnchor(attackerTeamId, gx, gy) {
   if (teamsMeta == null || attackerTeamId == null) return false;
   const aid = attackerTeamId | 0;
   for (const t of teamsMeta) {
-    if (t.solo || t.eliminated || !t.spawn) continue;
-    if ((t.id | 0) === aid) continue;
-    const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
-    if (fx !== gx || fy !== gy) continue;
-    const owner = clientPixelOwnerTeamAt(gx, gy);
-    return owner === (t.id | 0);
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    if (tid === aid) continue;
+    if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      if (fx === gx && fy === gy) {
+        const owner = clientPixelOwnerTeamAt(gx, gy);
+        return owner === tid;
+      }
+    }
+    const mos = clientMilitaryOutpostRects(tid);
+    for (let mi = 0; mi < mos.length; mi++) {
+      const r = mos[mi];
+      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
+      if (fx !== gx || fy !== gy) continue;
+      const owner = clientPixelOwnerTeamAt(gx, gy);
+      return owner === tid;
+    }
   }
   return false;
 }
@@ -6767,27 +6946,49 @@ function clientIsEnemyBaseFlagCellCoords(gx, gy) {
   if (myTeamId == null || teamsMeta == null) return false;
   const mid = myTeamId | 0;
   for (const t of teamsMeta) {
-    if (t.solo || t.eliminated || !t.spawn) continue;
-    if ((t.id | 0) === mid) continue;
-    const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
-    if (fx === gx && fy === gy) return true;
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    if (tid === mid) continue;
+    if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      if (fx === gx && fy === gy) return true;
+    }
+    const mos = clientMilitaryOutpostRects(tid);
+    for (let mi = 0; mi < mos.length; mi++) {
+      const r = mos[mi];
+      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
+      if (fx === gx && fy === gy) return true;
+    }
   }
   return false;
 }
 
 /**
  * Сообщение `pixel` не должно перекрашивать якорь активной базы «чужим» teamId:
- * HP — через flagCaptureProgress / flagHitAck; полная смена владельца — через flagCaptured.
+ * HP — через flagCaptureProgress / flagHitAck; главная — flagCaptured; FOB — militaryOutpostCaptured.
  */
 function clientShouldIgnoreTerritoryPixelOnEnemyFlagAnchor(x, y, newTeamId) {
   if (teamsMeta == null) return false;
   const nid = newTeamId | 0;
   for (const t of teamsMeta) {
-    if (t.solo || t.eliminated || !t.spawn) continue;
-    const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
-    if (fx !== x || fy !== y) continue;
-    return (t.id | 0) !== nid;
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      if (fx === x && fy === y) return tid !== nid;
+    }
+    const mos = clientMilitaryOutpostRects(tid);
+    for (let mi = 0; mi < mos.length; mi++) {
+      const r = mos[mi];
+      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
+      if (fx === x && fy === y) return tid !== nid;
+    }
   }
+  return false;
+}
+
+/** Кратер бомбы на клиенте: суша в форме не вырезается (защита баз — в логике очистки / сервере). */
+function clientNoNukeBlastHoleExclusion(_gx, _gy) {
   return false;
 }
 
@@ -6900,7 +7101,7 @@ function planClientNukeBombKeys(cx, cy) {
     gridW,
     gridH,
     isClientPlayableCell,
-    clientCellNukeProtectedSpawn
+    clientNoNukeBlastHoleExclusion
   );
   return pairs.map(([x, y]) => `${x},${y}`);
 }
@@ -6916,6 +7117,8 @@ function applyOptimisticNukeBomb(cx, cy) {
   const prev = new Map();
   const clearedKeys = [];
   for (const k of blastKeys) {
+    const [px, py] = k.split(",").map(Number);
+    if (clientCellNukeProtectedSpawn(px, py)) continue;
     const cell = snapshotPixelCell(k);
     if (cell === undefined) continue;
     const tid = typeof cell === "number" ? cell | 0 : Number(cell.teamId) | 0;
@@ -6923,10 +7126,6 @@ function applyOptimisticNukeBomb(cx, cy) {
     prev.set(k, cell);
     pixels.delete(k);
     clearedKeys.push(k);
-  }
-  if (clearedKeys.length === 0) {
-    notifyReject("nuke_no_effect");
-    return false;
   }
   optimisticWeaponPending = {
     kind: "nukeBomb",
@@ -6937,7 +7136,7 @@ function applyOptimisticNukeBomb(cx, cy) {
     blastKeys,
     prev,
   };
-  const dr = dirtyRectFromKeys(blastKeys);
+  const dr = dirtyRectFromKeys(blastKeys.length ? blastKeys : clearedKeys);
   scheduleDraw(dr ? { dirty: dr } : { full: true });
   return true;
 }
@@ -7765,7 +7964,6 @@ function draw(time = performance.now(), drawOpts = {}) {
     const tcy = mapHoverGy | 0;
     const valid =
       isClientPlayableCell(tcx, tcy) &&
-      !clientCellNukeProtectedSpawn(tcx, tcy) &&
       clientNukeBlastWouldClearTerritory(tcx, tcy);
     const pulseT = 0.5 + 0.5 * Math.sin(time * 0.0065);
     const blastPairs = computeNukeBombBlastCells(
@@ -7775,7 +7973,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       gridW,
       gridH,
       isClientPlayableCell,
-      clientCellNukeProtectedSpawn
+      clientNoNukeBlastHoleExclusion
     );
     const inBlast = new Set(blastPairs.map(([bx, by]) => `${bx},${by}`));
     ctx.save();
@@ -7945,14 +8143,11 @@ function draw(time = performance.now(), drawOpts = {}) {
   if (!lite && online && teamsMeta && cell >= 1.5) {
     const shNowF = Date.now();
     const maxH = FLAG_BASE_MAX_HP;
-    for (const t of teamsMeta) {
-      if (t.solo || t.eliminated || !t.spawn) continue;
-      const sp = t.spawn;
-      const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
+    /** Главная база и FOB — одна логика HP (`flagCaptureClientState` по clientKey). */
+    const drawClientFlagBaseHpUi = (fgx, fgy, tidFlag, stateKey, teamHex, compact) => {
       const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
-      if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) continue;
-      const tidFlag = Number(t.id) | 0;
-      const raw = flagCaptureClientState.get(tidFlag);
+      if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) return;
+      const raw = flagCaptureClientState.get(stateKey);
       const effHpFloat = computeClientFlagDisplayEffHp(raw, shNowF);
       const displayHp = Math.min(maxH, Math.max(0, Math.floor(effHpFloat + 1e-9)));
       const dmgTaken = maxH - displayHp;
@@ -7964,7 +8159,9 @@ function draw(time = performance.now(), drawOpts = {}) {
       const dangerMid = displayHp <= 5 && displayHp > 0;
       const dangerCrit = displayHp <= 1 && displayHp > 0;
       const dangerHpZero = displayHp <= 0 && raw != null;
-      const pulseF = 0.5 + 0.5 * Math.sin(time * 0.012 + dmgTaken * 0.15);
+      const pulseF = compact
+        ? 0.55 + 0.45 * Math.sin(time * 0.004 + fgx * 0.19)
+        : 0.5 + 0.5 * Math.sin(time * 0.012 + dmgTaken * 0.15);
       const pulseRed =
         dangerCrit && shNowF < myFlagCriticalUntil && tidFlag === (myTeamId | 0)
           ? 0.35 + 0.35 * Math.sin(time * 0.055)
@@ -7973,46 +8170,61 @@ function draw(time = performance.now(), drawOpts = {}) {
             : dangerLow
               ? 0.06 + 0.06 * Math.sin(time * 0.022)
               : 0;
-      const teamHex = t.color || teamColor(t.id);
       const { r, g, b } = hexToRgb(teamHex);
       const rb = Math.min(255, Math.round(r * 1.14 + 28));
       const gb = Math.min(255, Math.round(g * 1.14 + 28));
       const bb = Math.min(255, Math.round(b * 1.14 + 28));
-      const mastW = Math.max(4, cell * 0.24);
-      const mastX = px + cw * 0.66;
-      const topY = py - FLAG_VISUAL_CELLS_ABOVE * ch;
-      const wave = Math.sin(time * 0.0033 + fgx * 0.35 + fgy * 0.22) * ch * 0.11;
+      const mastW = compact ? Math.max(3, cell * 0.17) : Math.max(4, cell * 0.24);
+      const mastX = px + cw * (compact ? 0.58 : 0.66);
+      const topY = compact
+        ? py - Math.max(1.5, cell * 0.22) * ch
+        : py - FLAG_VISUAL_CELLS_ABOVE * ch;
+      const wave = compact
+        ? Math.sin(time * 0.004 + fgx * 0.19) * ch * 0.06
+        : Math.sin(time * 0.0033 + fgx * 0.35 + fgy * 0.22) * ch * 0.11;
       ctx.save();
-      ctx.fillStyle = "rgba(0,0,0,0.35)";
-      ctx.fillRect(mastX + 1.6, topY + 1.6, mastW, py + ch - topY);
-      ctx.fillStyle = "rgba(48,48,52,0.98)";
-      ctx.fillRect(mastX, topY, mastW, py + ch - topY);
-      const cLeft = px - cw * 0.1;
+      if (compact) {
+        ctx.fillStyle = "rgba(34,36,42,0.96)";
+        ctx.fillRect(mastX, topY, mastW, py + ch - topY);
+      } else {
+        ctx.fillStyle = "rgba(0,0,0,0.35)";
+        ctx.fillRect(mastX + 1.6, topY + 1.6, mastW, py + ch - topY);
+        ctx.fillStyle = "rgba(48,48,52,0.98)";
+        ctx.fillRect(mastX, topY, mastW, py + ch - topY);
+      }
+      const cLeft = px - cw * (compact ? 0.04 : 0.1);
       const cTop = topY + ch * 0.06;
-      const cW = cw * 1.02;
-      const cH = py + ch * 0.92 - cTop;
+      const cW = cw * (compact ? 0.9 : 1.02);
+      const cH = py + ch * (compact ? 0.9 : 0.92) - cTop;
       ctx.beginPath();
-      ctx.moveTo(mastX, cTop + wave * 0.25);
-      ctx.lineTo(cLeft + cW, cTop + wave);
-      ctx.lineTo(cLeft + cW * 0.9, cTop + cH + wave * 0.15);
-      ctx.lineTo(cLeft, cTop + cH * 0.96);
+      if (compact) {
+        ctx.moveTo(mastX, cTop);
+        ctx.lineTo(cLeft + cW, cTop + 1.5);
+        ctx.lineTo(cLeft + cW * 0.87, cTop + cH + wave * 0.08);
+        ctx.lineTo(cLeft, cTop + cH * 0.96);
+      } else {
+        ctx.moveTo(mastX, cTop + wave * 0.25);
+        ctx.lineTo(cLeft + cW, cTop + wave);
+        ctx.lineTo(cLeft + cW * 0.9, cTop + cH + wave * 0.15);
+        ctx.lineTo(cLeft, cTop + cH * 0.96);
+      }
       ctx.closePath();
-      const clothA = 0.94 + pulseF * 0.05 - pulseRed * 0.22;
+      const clothA = (compact ? 0.86 : 0.94) + pulseF * 0.05 - pulseRed * 0.22;
       ctx.fillStyle = `rgba(${rb},${gb},${bb},${Math.max(0.9, clothA)})`;
       ctx.fill();
       if (pulseRed > 0) {
         ctx.fillStyle = `rgba(255, 40, 60, ${pulseRed * 0.55})`;
         ctx.fill();
       }
-      ctx.strokeStyle = "rgba(0,0,0,0.62)";
-      ctx.lineWidth = Math.max(1.5, cell * 0.085);
+      ctx.strokeStyle = compact ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.62)";
+      ctx.lineWidth = Math.max(1, compact ? cell * 0.055 : cell * 0.085);
       ctx.stroke();
-      ctx.strokeStyle = `rgba(255,255,255,${0.42 + pulseF * 0.12})`;
-      ctx.lineWidth = Math.max(1, cell * 0.045);
-      ctx.stroke();
+      if (!compact) {
+        ctx.strokeStyle = `rgba(255,255,255,${0.42 + pulseF * 0.12})`;
+        ctx.lineWidth = Math.max(1, cell * 0.045);
+        ctx.stroke();
+      }
       ctx.restore();
-      /* Не заливаем якорь базы цветом атакующего: клетка остаётся цветом защитника в данных и на канве;
-       * краткий «удар» атакующим цветом даёт только boardVfx.flagBaseHitImpact (сервер → flagCaptureProgress). */
       if (myTeamId != null && tidFlag === (myTeamId | 0) && shNowF < myFlagUnderAttackUntil && dmgTaken > 0) {
         const flash = 0.18 + 0.2 * Math.sin(time * 0.028);
         ctx.fillStyle = `rgba(255, 35, 60, ${flash})`;
@@ -8049,10 +8261,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.textBaseline = "bottom";
         const tx = px + cw / 2;
         const ty = by - 3;
-        const hpLabel =
-          displayHp <= 0
-            ? "FINISH!"
-            : `${displayHp} / ${maxH} HP`;
+        const hpLabel = displayHp <= 0 ? "FINISH!" : `${displayHp} / ${maxH} HP`;
         ctx.lineWidth = Math.max(2, fs * 0.18);
         ctx.strokeStyle = "rgba(0,0,0,0.8)";
         ctx.strokeText(hpLabel, tx, ty);
@@ -8060,6 +8269,13 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.fillText(hpLabel, tx, ty);
         ctx.restore();
       }
+    };
+    for (const t of teamsMeta) {
+      if (t.solo || t.eliminated || !t.spawn) continue;
+      const sp = t.spawn;
+      const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
+      const tidFlag = Number(t.id) | 0;
+      drawClientFlagBaseHpUi(fgx, fgy, tidFlag, clientMainFlagKey(tidFlag), t.color || teamColor(t.id), false);
     }
     for (const tm of teamsMeta) {
       if (tm.solo || tm.eliminated) continue;
@@ -8067,6 +8283,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       if (!mos.length) continue;
       const teamHex = tm.color || teamColor(tm.id);
       const { r: rr, g: gg, b: bb } = hexToRgb(teamHex);
+      const tidM = Number(tm.id) | 0;
       for (let mi = 0; mi < mos.length; mi++) {
         const r = mos[mi];
         const gx00 = r.x0 | 0;
@@ -8088,36 +8305,15 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.lineWidth = Math.max(1, cell * 0.055);
         ctx.strokeRect(obx0 + cell * 0.18, oby0 + cell * 0.18, osw - cell * 0.36, osh - cell * 0.36);
         ctx.restore();
-        const fgx = gx00 + ((gw / 2) | 0);
-        const fgy = gy00 + ((gh / 2) | 0);
-        const px = offsetX + fgx * cell;
-        const py = offsetY + fgy * cell;
-        const cw = Math.ceil(cell);
-        const ch = Math.ceil(cell);
-        const mastW = Math.max(3, cell * 0.17);
-        const mastX = px + cw * 0.58;
-        const rowsAbove = Math.max(1.5, cell * 0.22);
-        const topY = py - rowsAbove * ch;
-        const pulseF = 0.55 + 0.45 * Math.sin(time * 0.004 + gx00 * 0.19);
-        ctx.save();
-        ctx.fillStyle = "rgba(34,36,42,0.96)";
-        ctx.fillRect(mastX, topY, mastW, py + ch - topY);
-        const cLeft = px - cw * 0.04;
-        const cTop = topY + ch * 0.06;
-        const cW = cw * 0.9;
-        const cH = py + ch * 0.9 - cTop;
-        ctx.beginPath();
-        ctx.moveTo(mastX, cTop);
-        ctx.lineTo(cLeft + cW, cTop + 1.5);
-        ctx.lineTo(cLeft + cW * 0.87, cTop + cH);
-        ctx.lineTo(cLeft, cTop + cH * 0.96);
-        ctx.closePath();
-        ctx.fillStyle = `rgba(${Math.min(255, rr + 30)},${Math.min(255, gg + 30)},${Math.min(255, bb + 22)},${0.86 + pulseF * 0.1})`;
-        ctx.fill();
-        ctx.strokeStyle = "rgba(0,0,0,0.5)";
-        ctx.lineWidth = Math.max(1, cell * 0.055);
-        ctx.stroke();
-        ctx.restore();
+        const { x: fgx, y: fgy } = flagCellFromSpawn(gx00, gy00);
+        drawClientFlagBaseHpUi(
+          fgx,
+          fgy,
+          tidM,
+          clientMilitaryFlagKey(tidM, gx00, gy00),
+          teamHex,
+          true
+        );
       }
     }
   }
@@ -8325,19 +8521,6 @@ function placePixel(gx, gy) {
   }
 
   const online = wantOnline && getWsUrl();
-  if (
-    online &&
-    quantumFarmsMeta.length > 0 &&
-    !pendingMapAction &&
-    clientGridCellInQuantumFarmBattleZone(gx, gy)
-  ) {
-    showPlacementFeedback(
-      "Квантовая ферма: вокруг квадрата 2×2 считается зона 4×4. У какой команды в зоне больше закрашенных клеток — та получает +1 квант каждые 5 с с этого узла (при равенстве дохода нет). Держите сушу вокруг точки.",
-      "success",
-      { telegramAlert: false, bannerDurationMs: 8200, skipCooldownChrome: true }
-    );
-    return;
-  }
   if (online && spectatorMode) {
     notifyReject("spectator");
     return;

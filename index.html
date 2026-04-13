@@ -532,7 +532,7 @@
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Тактическая бомба</h3>
                   <p class="game-shop__card-desc">
-                    Удар по карте: органическая волна ~12×12 с рваным краем сносит закраску в нейтраль — рвёт коридоры, изоляцию и оборону. Базы 6×6 не задеты.
+                    Удар по карте: органическая волна ~12×12 с рваным краем сносит закраску в нейтраль. Клетки главной и передовой базы 6×6 не стираются пачкой; если кратер задевает чужую главную базу — по ней один удар по флагу, как от одного пикселя (−1 HP).
                   </p>
                 </div>
               </div>
@@ -732,6 +732,16 @@
         <div id="float-fx" class="float-fx" aria-hidden="true"></div>
       </main>
 
+      <aside
+        id="quick-buy-rail"
+        class="quick-buy-rail quick-buy-rail--dock"
+        hidden
+        aria-label="Повтор последних покупок"
+      >
+        <div class="quick-buy-rail__caption">Повторить</div>
+        <div id="quick-buy-list" class="quick-buy-rail__list"></div>
+      </aside>
+
       <footer class="palette-bar">
         <div class="palette-bar__inner">
           <div class="palette-bar__lead">
@@ -805,15 +815,6 @@
               </button>
             </div>
           </div>
-          <aside
-            id="quick-buy-rail"
-            class="quick-buy-rail quick-buy-rail--bottom"
-            hidden
-            aria-label="Повтор последних покупок"
-          >
-            <div class="quick-buy-rail__caption">Повторить</div>
-            <div id="quick-buy-list" class="quick-buy-rail__list"></div>
-          </aside>
         </div>
       </footer>
     </div>

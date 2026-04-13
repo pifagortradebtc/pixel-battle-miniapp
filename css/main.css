@@ -371,16 +371,47 @@ body {
   display: none !important;
 }
 
-.quick-buy-rail--bottom {
+/* Над нижней панелью, справа: колонка кнопок (не в строке с командой — иначе уезжают за край). */
+.quick-buy-rail--dock {
+  position: absolute;
+  z-index: 8;
+  right: max(6px, env(safe-area-inset-right, 0px));
+  /* Высота palette-bar + отступ; не перекрывать нижнее меню */
+  bottom: calc(58px + env(safe-area-inset-bottom, 0px));
   display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: min(168px, 40vw);
+  max-width: min(168px, 40vw);
+  flex: unset;
   min-width: 0;
-  /* Шире блок — подпись и три карточки умещаются в одну строку */
-  max-width: min(82%, 320px);
-  justify-content: flex-start;
+  box-sizing: border-box;
+}
+
+.quick-buy-rail--dock .quick-buy-rail__caption {
+  text-align: right;
+  margin-right: 0;
+  padding-right: 2px;
+  align-self: flex-end;
+}
+
+.quick-buy-rail--dock .quick-buy-rail__list {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  max-height: min(38vh, 240px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0;
+}
+
+.quick-buy-rail--dock .quick-buy-rail__list .quick-buy-rail__btn {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .quick-buy-rail__caption {

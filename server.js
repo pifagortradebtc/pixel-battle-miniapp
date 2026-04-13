@@ -1486,13 +1486,34 @@ const teamFirstHitPeakAt = new Map();
  * @type {Map<number, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number, _flagRegenBroadcastPhase?: boolean, _lastRegenBroadcastAt?: number }>}
  */
 const flagCaptureByDefender = new Map();
+/** Если 20 с подряд нет ни одного пикселя владельца в 6×6 — передовая база снимается с карты. */
+const MILITARY_OUTPOST_ABANDON_MS = 20_000;
+/**
+ * HP флага передовой базы: ключ `${defenderId}:${x0}:${y0}` (левый верх 6×6).
+ * @type {Map<string, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number, _flagRegenBroadcastPhase?: boolean, _lastRegenBroadcastAt?: number }>}
+ */
+const militaryFlagCaptureByKey = new Map();
+
+function militaryOutpostFlagStateKey(defenderTeamId, ox0, oy0) {
+  return `${defenderTeamId | 0}:${ox0 | 0}:${oy0 | 0}`;
+}
 
 function clearAllFlagCaptureState() {
   flagCaptureByDefender.clear();
+  militaryFlagCaptureByKey.clear();
 }
 
 function clearFlagCaptureStateForDefender(defenderId) {
-  flagCaptureByDefender.delete(defenderId | 0);
+  const d = defenderId | 0;
+  flagCaptureByDefender.delete(d);
+  for (const k of [...militaryFlagCaptureByKey.keys()]) {
+    const head = String(k).split(":")[0];
+    if ((Number(head) | 0) === d) militaryFlagCaptureByKey.delete(k);
+  }
+}
+
+function clearMilitaryFlagStateForOutpost(defenderTeamId, ox0, oy0) {
+  militaryFlagCaptureByKey.delete(militaryOutpostFlagStateKey(defenderTeamId, ox0, oy0));
 }
 
 /** Снимок числа клеток по командам до последнего изменения (драма). До rebuildLandFromRound. */
@@ -2451,6 +2472,11 @@ async function tickQuantumFarmIncome() {
   }
   await walletStore.save();
   await broadcastWalletPayloadToAllClients();
+  for (const [tid, nf] of farmsPerTeam) {
+    const nFarm = nf | 0;
+    if (nFarm < 1) continue;
+    broadcast({ type: "quantFarmIncomePulse", teamId: tid | 0, quants: nFarm });
+  }
 }
 
 function applyFullMessageToPixelsCluster(msg) {
@@ -2631,8 +2657,15 @@ function applyClusterGameReplication(msg) {
       return;
     case "flagCaptureProgress": {
       const did = msg.defenderTeamId | 0;
+      const mil =
+        msg.militaryAnchor && typeof msg.militaryAnchor.x0 === "number" && typeof msg.militaryAnchor.y0 === "number"
+          ? { x0: msg.militaryAnchor.x0 | 0, y0: msg.militaryAnchor.y0 | 0 }
+          : null;
+      const stKey = mil ? militaryOutpostFlagStateKey(did, mil.x0, mil.y0) : did;
+      const prevSt = mil ? militaryFlagCaptureByKey.get(stKey) : flagCaptureByDefender.get(did);
       if (msg.reset) {
-        flagCaptureByDefender.delete(did);
+        if (mil) militaryFlagCaptureByKey.delete(stKey);
+        else flagCaptureByDefender.delete(did);
         return;
       }
       let hp;
@@ -2644,7 +2677,8 @@ function applyClusterGameReplication(msg) {
       }
       if (hp === undefined) hp = Math.max(0, FLAG_BASE_MAX_HP - (msg.progress | 0));
       if (hp >= FLAG_BASE_MAX_HP) {
-        flagCaptureByDefender.delete(did);
+        if (mil) militaryFlagCaptureByKey.delete(stKey);
+        else flagCaptureByDefender.delete(did);
         return;
       }
       let lastHitAt = 0;
@@ -2658,8 +2692,7 @@ function applyClusterGameReplication(msg) {
       if (!Number.isFinite(lastHitAt) || lastHitAt < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
         lastHitAt = nowRepl - FLAG_REGEN_IDLE_MS;
       }
-      const prevSt = flagCaptureByDefender.get(did);
-      flagCaptureByDefender.set(did, {
+      const entry = {
         hp,
         lastHitAt,
         attackerTeamId: msg.attackerTeamId | 0,
@@ -2670,11 +2703,19 @@ function applyClusterGameReplication(msg) {
               _lastRegenBroadcastAt: prevSt._lastRegenBroadcastAt,
             }
           : {}),
-      });
+      };
+      if (mil) militaryFlagCaptureByKey.set(stKey, entry);
+      else flagCaptureByDefender.set(did, entry);
       return;
     }
     case "flagCaptureStopped": {
-      flagCaptureByDefender.delete(msg.defenderTeamId | 0);
+      const did = msg.defenderTeamId | 0;
+      const mil =
+        msg.militaryAnchor && typeof msg.militaryAnchor.x0 === "number" && typeof msg.militaryAnchor.y0 === "number"
+          ? { x0: msg.militaryAnchor.x0 | 0, y0: msg.militaryAnchor.y0 | 0 }
+          : null;
+      if (mil) militaryFlagCaptureByKey.delete(militaryOutpostFlagStateKey(did, mil.x0, mil.y0));
+      else flagCaptureByDefender.delete(did);
       return;
     }
     case "flagCaptured": {
@@ -2686,6 +2727,36 @@ function applyClusterGameReplication(msg) {
         }
       }
       clearFlagCaptureStateForDefender(did);
+      return;
+    }
+    case "militaryOutpostCaptured": {
+      const did = msg.defenderTeamId | 0;
+      const aid = msg.attackerTeamId | 0;
+      const x0 = msg.x0 | 0;
+      const y0 = msg.y0 | 0;
+      const dt = dynamicTeams.find((t) => t.id === did);
+      if (dt && Array.isArray(dt.militaryOutposts)) {
+        const idx = dt.militaryOutposts.findIndex((o) => o && (o.x0 | 0) === x0 && (o.y0 | 0) === y0);
+        if (idx >= 0) dt.militaryOutposts.splice(idx, 1);
+      }
+      clearMilitaryFlagStateForOutpost(did, x0, y0);
+      for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE; yy++) {
+        for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
+          pixels.set(`${xx},${yy}`, { teamId: aid, ownerPlayerKey: "", shieldedUntil: 0 });
+        }
+      }
+      return;
+    }
+    case "militaryOutpostRemoved": {
+      const did = msg.teamId | 0;
+      const x0 = msg.x0 | 0;
+      const y0 = msg.y0 | 0;
+      const dt = dynamicTeams.find((t) => t.id === did);
+      if (dt && Array.isArray(dt.militaryOutposts)) {
+        const idx = dt.militaryOutposts.findIndex((o) => o && (o.x0 | 0) === x0 && (o.y0 | 0) === y0);
+        if (idx >= 0) dt.militaryOutposts.splice(idx, 1);
+      }
+      clearMilitaryFlagStateForOutpost(did, x0, y0);
       return;
     }
     case "territoryIsolationSync": {
@@ -2737,6 +2808,7 @@ function applyClusterGameReplication(msg) {
     case "flagUnderAttack":
     case "flagDefendWarn":
     case "flagHitAck":
+    case "quantFarmIncomePulse":
       return;
     case "stats":
     case "purchaseVfx":
@@ -2869,14 +2941,30 @@ function canPlaceForTeam(x, y, teamId) {
   return cellTouchesTeamTerritory(x, y, teamId);
 }
 
-function findDefenderTeamAtFlagCell(x, y) {
+/**
+ * Якорь флага главной базы или передовой 6×6.
+ * @returns {{ kind: "main", team: object } | { kind: "military", team: object, outpost: { x0: number, y0: number } } | null}
+ */
+function resolveFlagBaseAtCell(x, y) {
+  const xi = x | 0;
+  const yi = y | 0;
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
-    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
-    const fc = flagCellFromSpawn(t.spawnX0, t.spawnY0);
-    if (fc.x === x && fc.y === y) return t;
+    if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
+      const fc = flagCellFromSpawn(t.spawnX0, t.spawnY0);
+      if (fc.x === xi && fc.y === yi) return { kind: "main", team: t };
+    }
+    for (const o of getTeamMilitaryOutposts(t)) {
+      const fc = flagCellFromSpawn(o.x0, o.y0);
+      if (fc.x === xi && fc.y === yi) return { kind: "military", team: t, outpost: { x0: o.x0 | 0, y0: o.y0 | 0 } };
+    }
   }
   return null;
+}
+
+function findDefenderTeamAtFlagCell(x, y) {
+  const r = resolveFlagBaseAtCell(x, y);
+  return r ? r.team : null;
 }
 
 /** Клетка — якорь флага чужой (не атакующей) команды: отдельная ветка атаки базы, не обычная покраска. */
@@ -2892,11 +2980,51 @@ function findEnemyFlagDefenderAtCell(attackerTeamId, x, y) {
  * Такую клетку нельзя перекрасить обычным пикселем / зоной — только 20 «ударов» по флагу.
  */
 function isEnemyOwnedFlagBaseCell(attackerTeamId, x, y) {
-  const def = findDefenderTeamAtFlagCell(x, y);
-  if (!def || (def.id | 0) === (attackerTeamId | 0)) return false;
+  const r = resolveFlagBaseAtCell(x, y);
+  if (!r || (r.team.id | 0) === (attackerTeamId | 0)) return false;
+  const did = r.team.id | 0;
   const existing = pixels.get(`${x},${y}`);
   const owner = existing != null ? pixelTeam(existing) : 0;
-  return owner === (def.id | 0);
+  return owner === did;
+}
+
+function pushOneFlagSnapshotRow(out, now, teamId, fx, fy, st, clientKey, militaryAnchor) {
+  if (st) {
+    const lh = toEpochMsSafe(st.lastHitAt);
+    if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+      st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
+    }
+  }
+  const eff = computeEffectiveBaseHp(st, now);
+  const displayFloor = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
+  const metaHp = st
+    ? Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0))
+    : displayFloor;
+  const attackerTeamId = (st?.attackerTeamId | 0) || 0;
+  let lhMeta = now;
+  if (st) {
+    const lh = toEpochMsSafe(st.lastHitAt);
+    lhMeta =
+      Number.isFinite(lh) && lh >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
+        ? lh
+        : now - FLAG_REGEN_IDLE_MS;
+  }
+  /** @type {Record<string, unknown>} */
+  const row = {
+    teamId,
+    fx,
+    fy,
+    hp: metaHp,
+    maxHp: FLAG_BASE_MAX_HP,
+    lastHitAt: lhMeta,
+    attackerTeamId,
+    underAttack: displayFloor < FLAG_BASE_MAX_HP,
+    effectiveHp: eff,
+    flagStateServerNow: now,
+    clientKey,
+  };
+  if (militaryAnchor) row.militaryAnchor = militaryAnchor;
+  out.push(row);
 }
 
 function buildFlagsSnapshot() {
@@ -2904,42 +3032,20 @@ function buildFlagsSnapshot() {
   const now = Date.now();
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
-    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
-    const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
-    const st = flagCaptureByDefender.get(Number(t.id) | 0);
-    if (st) {
-      const lh = toEpochMsSafe(st.lastHitAt);
-      if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
-        st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
-      }
+    const tid = Number(t.id) | 0;
+    if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
+      const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
+      const st = flagCaptureByDefender.get(tid);
+      pushOneFlagSnapshotRow(out, now, tid, x, y, st, `b:${tid}`, null);
     }
-    const eff = computeEffectiveBaseHp(st, now);
-    const displayFloor = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
-    /* В meta/клиент: hp = якорь после дискретных ударов (st.hp), не floor(eff) — иначе реген ломает computeEffectiveBaseHp. */
-    const metaHp = st
-      ? Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0))
-      : displayFloor;
-    const attackerTeamId = (st?.attackerTeamId | 0) || 0;
-    let lhMeta = now;
-    if (st) {
-      const lh = toEpochMsSafe(st.lastHitAt);
-      lhMeta =
-        Number.isFinite(lh) && lh >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS
-          ? lh
-          : now - FLAG_REGEN_IDLE_MS;
+    for (const o of getTeamMilitaryOutposts(t)) {
+      const ox0 = o.x0 | 0;
+      const oy0 = o.y0 | 0;
+      const mk = militaryOutpostFlagStateKey(tid, ox0, oy0);
+      const stM = militaryFlagCaptureByKey.get(mk);
+      const { x, y } = flagCellFromSpawn(ox0, oy0);
+      pushOneFlagSnapshotRow(out, now, tid, x, y, stM, `m:${tid}:${ox0}:${oy0}`, { x0: ox0, y0: oy0 });
     }
-    out.push({
-      teamId: t.id,
-      fx: x,
-      fy: y,
-      hp: metaHp,
-      maxHp: FLAG_BASE_MAX_HP,
-      lastHitAt: lhMeta,
-      attackerTeamId,
-      underAttack: displayFloor < FLAG_BASE_MAX_HP,
-      effectiveHp: eff,
-      flagStateServerNow: now,
-    });
   }
   return out;
 }
@@ -2947,6 +3053,7 @@ function buildFlagsSnapshot() {
 function tickFlagBaseRegen(now) {
   if (!isClusterLeader()) return;
   if (gameFinished || roundEnding) return;
+  scanMilitaryOutpostsVacancyAndExpire(now);
   const regenBroadcastPeriodMs = 800;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
@@ -2991,39 +3098,99 @@ function tickFlagBaseRegen(now) {
       serverNow: now,
     });
   }
+  for (const [mkey, st] of [...militaryFlagCaptureByKey.entries()]) {
+    if (!st) continue;
+    const parts = String(mkey).split(":");
+    const d = (Number(parts[0]) | 0) || 0;
+    if (!d) continue;
+    const lh0 = toEpochMsSafe(st.lastHitAt);
+    if (!Number.isFinite(lh0) || lh0 < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+      st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
+    }
+    const eff = computeEffectiveBaseHp(st, now);
+    if (eff >= FLAG_BASE_MAX_HP - 1e-9) {
+      militaryFlagCaptureByKey.delete(mkey);
+      const ox0 = Number(parts[1]) | 0;
+      const oy0 = Number(parts[2]) | 0;
+      broadcast({
+        type: "flagCaptureStopped",
+        defenderTeamId: d,
+        reason: "regen_full",
+        militaryAnchor: { x0: ox0, y0: oy0 },
+      });
+      continue;
+    }
+    const idleEnd = st.lastHitAt + FLAG_REGEN_IDLE_MS;
+    if (now < idleEnd) {
+      st._flagRegenBroadcastPhase = false;
+      continue;
+    }
+    if (!st._flagRegenBroadcastPhase) {
+      st._flagRegenBroadcastPhase = true;
+      st._lastRegenBroadcastHp = -1;
+    }
+    const curInt = Math.max(0, Math.min(FLAG_BASE_MAX_HP - 1, Math.floor(eff + 1e-9)));
+    const needBroadcast =
+      st._lastRegenBroadcastHp !== curInt ||
+      !st._lastRegenBroadcastAt ||
+      now - st._lastRegenBroadcastAt >= regenBroadcastPeriodMs;
+    if (!needBroadcast) continue;
+    st._lastRegenBroadcastHp = curInt;
+    st._lastRegenBroadcastAt = now;
+    const ox0 = Number(parts[1]) | 0;
+    const oy0 = Number(parts[2]) | 0;
+    broadcast({
+      type: "flagCaptureProgress",
+      defenderTeamId: d,
+      attackerTeamId: st.attackerTeamId | 0,
+      hp: Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0)),
+      maxHp: FLAG_BASE_MAX_HP,
+      lastHitAt: st.lastHitAt,
+      regen: true,
+      effectiveHp: eff,
+      serverNow: now,
+      militaryAnchor: { x0: ox0, y0: oy0 },
+    });
+  }
 }
 
 /**
- * Удар по базе: HP −1; при HP уже 0 — захват.
- * Не вызывает обычную покраску: `pixels` на клетке флага не трогаем до {@link executeFlagCaptureSuccess}.
- * @returns {null | { rateLimited?: true } | { hit: true, defenderTeamId: number, hp: number, maxHp: number } | { captured: true, defenderTeamId: number }}
+ * Удар по базе: HP −1; при HP уже 0 — захват (главная или передовая 6×6).
+ * @param {{ skipAdjacency?: boolean, skipRateLimit?: boolean }} [opts]
+ * @returns {null | { rateLimited?: true } | { hit: true, defenderTeamId: number, hp: number, maxHp: number, militaryAnchor?: { x0: number, y0: number } } | { captured: true, defenderTeamId: number, militaryAnchor?: { x0: number, y0: number } }}
  */
-function tryFlagCaptureHit(attackerTeamId, x, y, now) {
-  const defTeam = findDefenderTeamAtFlagCell(x, y);
-  if (!defTeam) return null;
-  const did = defTeam.id | 0;
+function tryFlagCaptureHit(attackerTeamId, x, y, now, opts) {
+  opts = opts || {};
+  const skipAdjacency = opts.skipAdjacency === true;
+  const skipRateLimit = opts.skipRateLimit === true;
+  const resolved = resolveFlagBaseAtCell(x, y);
+  if (!resolved) return null;
+  const did = resolved.team.id | 0;
   const aid = attackerTeamId | 0;
   if (did === 0 || did === aid) return null;
   if (isTeamEliminated(aid) || isTeamEliminated(did)) return null;
-  /* Без отдельных таймеров/фаз: удар по флагу возможен в том же запросе pixel, что и обычный ход
-   * (разминка, кулдаун, соседство, вода и т.д. уже проверены выше по коду). */
-  if (!canPlaceForTeam(x, y, aid)) return null;
+  if (!skipAdjacency && !canPlaceForTeam(x, y, aid)) return null;
+
+  const isMil = resolved.kind === "military";
+  const ox0 = isMil ? resolved.outpost.x0 | 0 : 0;
+  const oy0 = isMil ? resolved.outpost.y0 | 0 : 0;
+  const mk = isMil ? militaryOutpostFlagStateKey(did, ox0, oy0) : null;
+  const milAnchor = isMil ? { x0: ox0, y0: oy0 } : undefined;
 
   const key = `${x},${y}`;
   const existing = pixels.get(key);
   let owner = existing != null ? pixelTeam(existing) | 0 : 0;
-  /* Якорь базы — не обычная клетка: допускаем пустую клетку (сейсмика/изоляция) и числовое совпадение owner/def.id. */
   if (owner !== 0 && owner !== did) return null;
   if (owner === 0) {
     pixels.set(key, { teamId: did, ownerPlayerKey: "", shieldedUntil: 0 });
     broadcast({ type: "pixel", x, y, t: did, ownerPlayerKey: "", shieldedUntil: 0 });
   }
 
-  if (!flagTeamHitLimiter.allow(`fc:${aid}`, FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC, 1000)) {
+  if (!skipRateLimit && !flagTeamHitLimiter.allow(`fc:${aid}`, FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC, 1000)) {
     return { rateLimited: true };
   }
 
-  let st = flagCaptureByDefender.get(did);
+  let st = isMil ? militaryFlagCaptureByKey.get(mk) : flagCaptureByDefender.get(did);
   if (st) {
     const lh = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) st.lastHitAt = now;
@@ -3032,14 +3199,16 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
   const curHp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(curHpFloat + 1e-9)));
 
   if (curHp <= 0) {
-    executeFlagCaptureSuccess(aid, did);
-    return { captured: true, defenderTeamId: did };
+    if (isMil) executeMilitaryOutpostCaptureSuccess(aid, did, ox0, oy0);
+    else executeFlagCaptureSuccess(aid, did);
+    return { captured: true, defenderTeamId: did, ...(milAnchor ? { militaryAnchor: milAnchor } : {}) };
   }
 
   const newHp = curHp - 1;
   if (!st) {
     st = { hp: newHp, lastHitAt: now, attackerTeamId: aid };
-    flagCaptureByDefender.set(did, st);
+    if (isMil) militaryFlagCaptureByKey.set(mk, st);
+    else flagCaptureByDefender.set(did, st);
   } else {
     st.hp = newHp;
     st.lastHitAt = now;
@@ -3055,6 +3224,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
       attackerTeamId: aid,
       hp: newHp,
       maxHp: FLAG_BASE_MAX_HP,
+      ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
     });
   }
 
@@ -3068,6 +3238,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
     lastHitAt: now,
     effectiveHp: effAfterHit,
     serverNow: now,
+    ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
   });
 
   for (const th of FLAG_WARN_THRESHOLDS) {
@@ -3079,12 +3250,19 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now) {
         hp: newHp,
         maxHp: FLAG_BASE_MAX_HP,
         level: th,
+        ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
       });
       break;
     }
   }
 
-  return { hit: true, defenderTeamId: did, hp: newHp, maxHp: FLAG_BASE_MAX_HP };
+  return {
+    hit: true,
+    defenderTeamId: did,
+    hp: newHp,
+    maxHp: FLAG_BASE_MAX_HP,
+    ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
+  };
 }
 
 /** Единственная точка смены владельца клетки флага и всей территории защитника (после добивающего удара). */
@@ -3121,6 +3299,102 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
   });
 
   eliminateTeamByTerritoryLoss(defenderId);
+  afterTerritoryMutation();
+}
+
+function removeMilitaryOutpostAtIndex(dt, index, reason) {
+  if (!dt || !Array.isArray(dt.militaryOutposts)) return;
+  const o = dt.militaryOutposts[index];
+  if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") return;
+  const ox0 = o.x0 | 0;
+  const oy0 = o.y0 | 0;
+  clearMilitaryFlagStateForOutpost(dt.id | 0, ox0, oy0);
+  dt.militaryOutposts.splice(index, 1);
+  saveDynamicTeams();
+  broadcast({
+    type: "militaryOutpostRemoved",
+    teamId: dt.id | 0,
+    x0: ox0,
+    y0: oy0,
+    reason: reason || "removed",
+  });
+  broadcast({ type: "teamsFull", teams: teamsForMeta() });
+  afterTerritoryMutation();
+}
+
+function scanMilitaryOutpostsVacancyAndExpire(now) {
+  if (gameFinished) return;
+  if (REDIS_URL && !isClusterLeader()) return;
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    if (!Array.isArray(t.militaryOutposts)) continue;
+    for (let i = t.militaryOutposts.length - 1; i >= 0; i--) {
+      const o = t.militaryOutposts[i];
+      if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
+      const x0 = o.x0 | 0;
+      const y0 = o.y0 | 0;
+      let hasOwned = false;
+      for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE && !hasOwned; yy++) {
+        for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
+          const pv = pixels.get(`${xx},${yy}`);
+          if (pv != null && (pixelTeam(pv) | 0) === tid) {
+            hasOwned = true;
+            break;
+          }
+        }
+      }
+      if (hasOwned) {
+        if (o.vacantSinceMs != null) delete o.vacantSinceMs;
+        continue;
+      }
+      if (o.vacantSinceMs == null || !Number.isFinite(o.vacantSinceMs)) {
+        o.vacantSinceMs = now;
+      } else if (now - o.vacantSinceMs >= MILITARY_OUTPOST_ABANDON_MS) {
+        removeMilitaryOutpostAtIndex(t, i, "abandoned");
+      }
+    }
+  }
+}
+
+/** Захват передовой базы: снять узел с защитника, перекрасить 6×6 атакующему (команда защитника не выбывает). */
+function executeMilitaryOutpostCaptureSuccess(attackerId, defenderId, ox0, oy0) {
+  const dtDef = dynamicTeams.find((t) => t.id === defenderId);
+  const dtAtk = dynamicTeams.find((t) => t.id === attackerId);
+  if (!dtDef || dtDef.eliminated || dtDef.solo) return;
+  if (!dtAtk || dtAtk.eliminated) return;
+  const x0 = ox0 | 0;
+  const y0 = oy0 | 0;
+  if (!Array.isArray(dtDef.militaryOutposts)) return;
+  const idx = dtDef.militaryOutposts.findIndex((o) => o && (o.x0 | 0) === x0 && (o.y0 | 0) === y0);
+  if (idx < 0) return;
+
+  clearMilitaryFlagStateForOutpost(defenderId, x0, y0);
+  dtDef.militaryOutposts.splice(idx, 1);
+
+  const { x: fgx, y: fgy } = flagCellFromSpawn(x0, y0);
+  for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE; yy++) {
+    for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
+      pixels.set(`${xx},${yy}`, { teamId: attackerId, ownerPlayerKey: "", shieldedUntil: 0 });
+      broadcast({ type: "pixel", x: xx, y: yy, t: attackerId, ownerPlayerKey: "", shieldedUntil: 0 });
+    }
+  }
+
+  broadcast({
+    type: "militaryOutpostCaptured",
+    attackerTeamId: attackerId,
+    defenderTeamId: defenderId,
+    x0,
+    y0,
+    gx: fgx,
+    gy: fgy,
+    attackerColor: dtAtk.color || "#888888",
+    defenderColor: dtDef.color || "#888888",
+    roundIndex,
+  });
+
+  saveDynamicTeams();
+  broadcast({ type: "teamsFull", teams: teamsForMeta() });
   afterTerritoryMutation();
 }
 
@@ -3376,32 +3650,8 @@ function ensureAllTeamSpawnsAfterLoad() {
   afterTerritoryMutation();
 }
 
-/** Восстановить заливку 6×6 для сохранённых передовых баз после загрузки состояния. */
-function ensureMilitaryOutpostPixelsAfterLoad() {
-  if (!landGrid) return;
-  let changed = false;
-  for (const t of dynamicTeams) {
-    if (t.solo || t.eliminated) continue;
-    const tid = t.id | 0;
-    for (const o of getTeamMilitaryOutposts(t)) {
-      let missing = false;
-      for (let y = o.y0; y < o.y0 + TEAM_SPAWN_SIZE && !missing; y++) {
-        for (let x = o.x0; x < o.x0 + TEAM_SPAWN_SIZE; x++) {
-          const p = pixels.get(`${x},${y}`);
-          if (!p || (pixelTeam(p) | 0) !== tid) {
-            missing = true;
-            break;
-          }
-        }
-      }
-      if (missing) {
-        fillTeamSpawnAreaSilent(tid, o.x0, o.y0, "");
-        changed = true;
-      }
-    }
-  }
-  if (changed) afterTerritoryMutation();
-}
+/** Раньше подтягивали пиксели 6×6 — теперь пустой плацдарм живёт до таймера {@link MILITARY_OUTPOST_ABANDON_MS} и снимается. */
+function ensureMilitaryOutpostPixelsAfterLoad() {}
 
 /** Подсчёт пикселей по teamId на суше (как в stats). */
 function computeTeamTerritoryCounts() {
@@ -3462,6 +3712,7 @@ function afterTerritoryMutation() {
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
   checkDuelInstantWin(st);
+  scanMilitaryOutpostsVacancyAndExpire(Date.now());
 }
 
 function scanAndEliminateTeamsWithNoTerritory() {
@@ -4978,7 +5229,7 @@ wss.on("connection", (ws, req) => {
         gridW,
         gridH,
         cellAllowsPixelPlacement,
-        (x, y) => protectedMask[y * gridW + x] === 1
+        () => false
       );
       if (blast.length === 0) {
         safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
@@ -4989,13 +5240,60 @@ wss.on("connection", (ws, req) => {
       for (let i = 0; i < blast.length; i++) {
         const x = blast[i][0];
         const y = blast[i][1];
+        if (protectedMask[y * gridW + x]) continue;
         const key = `${x},${y}`;
         const v = pixels.get(key);
         if (v == null) continue;
         if ((pixelTeam(v) | 0) === 0) continue;
         cleared.push([x, y]);
       }
-      if (cleared.length === 0) {
+      const nowNuke = Date.now();
+      const aidNuke = ws.teamId | 0;
+      let nukeDidFlagDamage = false;
+      for (const t of dynamicTeams) {
+        if (t.solo || t.eliminated) continue;
+        if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
+        const did = t.id | 0;
+        if (did === aidNuke) continue;
+        const sx0 = t.spawnX0 | 0;
+        const sy0 = t.spawnY0 | 0;
+        let spawnInBlast = false;
+        for (let j = 0; j < blast.length; j++) {
+          const bx = blast[j][0];
+          const by = blast[j][1];
+          if (bx >= sx0 && bx < sx0 + TEAM_SPAWN_SIZE && by >= sy0 && by < sy0 + TEAM_SPAWN_SIZE) {
+            spawnInBlast = true;
+            break;
+          }
+        }
+        if (!spawnInBlast) continue;
+        const fc = flagCellFromSpawn(sx0, sy0);
+        const fr = tryFlagCaptureHit(aidNuke, fc.x, fc.y, nowNuke, { skipAdjacency: true, skipRateLimit: true });
+        if (fr && !fr.rateLimited && (fr.hit || fr.captured)) nukeDidFlagDamage = true;
+      }
+      for (const t of dynamicTeams) {
+        if (t.solo || t.eliminated) continue;
+        const did = t.id | 0;
+        if (did === aidNuke) continue;
+        for (const o of getTeamMilitaryOutposts(t)) {
+          const sx0 = o.x0 | 0;
+          const sy0 = o.y0 | 0;
+          let moInBlast = false;
+          for (let j = 0; j < blast.length; j++) {
+            const bx = blast[j][0];
+            const by = blast[j][1];
+            if (bx >= sx0 && bx < sx0 + TEAM_SPAWN_SIZE && by >= sy0 && by < sy0 + TEAM_SPAWN_SIZE) {
+              moInBlast = true;
+              break;
+            }
+          }
+          if (!moInBlast) continue;
+          const fc = flagCellFromSpawn(sx0, sy0);
+          const fr = tryFlagCaptureHit(aidNuke, fc.x, fc.y, nowNuke, { skipAdjacency: true, skipRateLimit: true });
+          if (fr && !fr.rateLimited && (fr.hit || fr.captured)) nukeDidFlagDamage = true;
+        }
+      }
+      if (cleared.length === 0 && !nukeDidFlagDamage) {
         safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
         return;
       }
@@ -5268,6 +5566,7 @@ wss.on("connection", (ws, req) => {
             defenderTeamId: fc.defenderTeamId | 0,
             hp: fc.hp | 0,
             maxHp: (fc.maxHp ?? FLAG_BASE_MAX_HP) | 0,
+            ...(fc.militaryAnchor ? { militaryAnchor: fc.militaryAnchor } : {}),
           });
         }
         return;
