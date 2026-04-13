@@ -1,5 +1,5 @@
 {
-  "_comment": "Положите .mp3/.ogg в папку music/ и укажите url вида \"music/имя.mp3\". Опционально loopStart/loopEnd в секундах для лупа.",
+  "_comment": "Стриминговый фон: положите music/bgm-loop.mp3 (или несколько треков — см. ниже). Копирование из Загрузок: npm run copy-music",
   "version": 1,
   "crossfadeSec": 2.4,
   "gameplayTransitionCooldownMs": 14000,
@@ -8,13 +8,13 @@
   "pauseMusicGainMul": 0.48,
   "pauseLowpassHz": 900,
   "tracks": {
-    "menu": [],
-    "preRound": [],
-    "calm": [],
-    "tension": [],
-    "battle": [],
-    "critical": [],
-    "postRound": [],
-    "final": []
+    "menu": [{ "url": "music/bgm-loop.mp3" }],
+    "preRound": [{ "url": "music/bgm-loop.mp3" }],
+    "calm": [{ "url": "music/bgm-loop.mp3" }],
+    "tension": [{ "url": "music/bgm-loop.mp3" }],
+    "battle": [{ "url": "music/bgm-loop.mp3" }],
+    "critical": [{ "url": "music/bgm-loop.mp3" }],
+    "postRound": [{ "url": "music/bgm-loop.mp3" }],
+    "final": [{ "url": "music/bgm-loop.mp3" }]
   }
 }

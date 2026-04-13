@@ -974,14 +974,20 @@ export function playPurchaseSuccess() {
 export function playBuffPersonalSfx() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
-    playEventSample("buff_personal", { bus: "sfx", gainMul: 0.95 });
+    if (playEventSample("buff_personal", { bus: "sfx", gainMul: 0.95 })) return;
+    const now = ctx.currentTime;
+    playOscThrough("sine", 108, 132, 0.036, 0.11, sfxBus, now);
+    playOscThrough("sine", 132, 98, 0.028, 0.1, sfxBus, now + 0.06);
   });
 }
 
 export function playBuffTeamSfx() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
-    playEventSample("buff_team", { bus: "sfx", gainMul: 0.95 });
+    if (playEventSample("buff_team", { bus: "sfx", gainMul: 0.95 })) return;
+    const now = ctx.currentTime;
+    playOscThrough("sine", 92, 118, 0.038, 0.12, sfxBus, now);
+    playOscThrough("triangle", 88, 108, 0.032, 0.14, sfxBus, now + 0.05, 420);
   });
 }
 
@@ -1173,7 +1179,11 @@ export function playRoundEndSfx() {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
     duckMusicForAlert(900, true);
-    playEventSample("round_end", { bus: "sfx", gainMul: 1 });
+    if (playEventSample("round_end", { bus: "sfx", gainMul: 1 })) return;
+    if (!sfxBus) return;
+    const now = ctx.currentTime;
+    playSubThump(sfxBus, now, 0.38, 40, 22, 0.26);
+    playOscThrough("sine", 88, 52, 0.05, 0.36, sfxBus, now + 0.04);
   });
 }
 
@@ -1181,14 +1191,23 @@ export function playFinalVictorySfx() {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
     duckMusicForAlert(1400, true);
-    playEventSample("final_victory", { bus: "sfx", gainMul: 1.02 });
+    if (playEventSample("final_victory", { bus: "sfx", gainMul: 1.02 })) return;
+    if (!sfxBus) return;
+    const now = ctx.currentTime;
+    playSubThump(sfxBus, now, 0.45, 36, 20, 0.32);
+    playOscThrough("triangle", 78, 118, 0.055, 0.52, sfxBus, now + 0.06, 380);
+    playFilteredNoiseBurst(sfxBus, now + 0.14, 0.2, 0.05, 720);
   });
 }
 
 export function playTreasureFoundSfx() {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
-    playEventSample("treasure", { bus: "sfx", gainMul: 0.95 });
+    if (playEventSample("treasure", { bus: "sfx", gainMul: 0.95 })) return;
+    if (!sfxBus) return;
+    const now = ctx.currentTime;
+    playOscThrough("sine", 118, 92, 0.042, 0.28, sfxBus, now);
+    playOscThrough("triangle", 88, 68, 0.028, 0.3, sfxBus, now + 0.05, 380);
   });
 }
 
