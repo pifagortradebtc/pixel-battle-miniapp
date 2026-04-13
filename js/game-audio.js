@@ -85,9 +85,10 @@ let lowPrioritySfxCount = 0;
 
 /**
  * Непрерывный процедурный фон: слои-синусы на musicBus + ambient (шум + гудение 48 Hz).
- * Выкл. — без стриминговых треков музыкальная шина тихая; остаются только явные SFX/стинги.
+ * Вкл. как подложка, пока не играют декодированные треки из music/*.mp3 (файлы не в git — их кладут на сервер или npm run import-bgm).
+ * Когда streaming-bgm реально стартует, shouldSuppressProcedural() глушит эти слои.
  */
-const ENABLE_PROCEDURAL_MUSIC_DRONE = false;
+const ENABLE_PROCEDURAL_MUSIC_DRONE = true;
 
 /** Сэмплы событий из sfx/samples.json (при отсутствии файла — процедурный fallback). */
 /** @type {Map<string, AudioBuffer>} */

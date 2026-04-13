@@ -1,5 +1,5 @@
 {
-  "_comment": "Фон: все треки из music/bgm-01…32 (импорт: npm run import-bgm). playlistOrder random — случайный следующий после конца трека.",
+  "_comment": "Фон: положите файлы music/bgm-01.mp3 … bgm-32.mp3 рядом с этим манифестом на сервере (в git их нет). Локально: npm run import-bgm или npm run copy-music. Пока файлов нет — играет процедурная подложка в game-audio.js.",
   "version": 1,
   "playlistOrder": "random",
   "crossfadeSec": 2.8,

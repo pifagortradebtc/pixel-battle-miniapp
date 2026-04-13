@@ -266,7 +266,10 @@ export class StreamingBgmDirector {
     for (const list of Object.values(this.m.tracks)) {
       for (const t of list) urls.add(t.url);
     }
-    if (!this.ctx || urls.size === 0) return;
+    if (!this.ctx || urls.size === 0) {
+      emitStreamingBgmResync();
+      return;
+    }
     for (const url of urls) {
       if (this.bufferByUrl.has(url)) continue;
       try {
@@ -280,6 +283,8 @@ export class StreamingBgmDirector {
         /* skip broken file */
       }
     }
+    /* Один раз после прохода: если все URL дали 404, подписчики снова синхронизируют (процедурный fallback). */
+    emitStreamingBgmResync();
   }
 
   /**
