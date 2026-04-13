@@ -2086,6 +2086,53 @@ function applyPlannedCapture(pk, tid, planned) {
   afterTerritoryMutation();
 }
 
+/**
+ * Выдаёт клад на клетке игроку (одиночный пиксель или часть зоны).
+ * @param {string} pk
+ * @param {string} cellKey "x,y"
+ * @param {boolean} [deferRoundStateSave] при true — не вызывать saveRoundState (пакет в claimTreasuresInPlannedCells)
+ * @returns {Promise<number>} кванты 1..200 или 0
+ */
+async function tryClaimMapTreasureForPlayer(pk, cellKey, deferRoundStateSave) {
+  const key = typeof cellKey === "string" ? cellKey.trim() : "";
+  if (!key || !pk) return 0;
+  if (!treasureQuantByCell.has(key) || treasureClaimedKeys.has(key)) return 0;
+  const tq = treasureQuantByCell.get(key) | 0;
+  if (tq < 1 || tq > 200) return 0;
+  treasureClaimedKeys.add(key);
+  if (!isDevUnlimitedWallet(pk)) {
+    await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}` });
+  }
+  if (!deferRoundStateSave) saveRoundState();
+  broadcast({ type: "treasureClaimed", key });
+  return tq;
+}
+
+/**
+ * Клады после супероружия 4×4 / 6×6 / 12×12 (каждая покрытая клетка проверяется отдельно).
+ * @param {string} pk
+ * @param {Array<[number, number]>} planned
+ * @returns {Promise<{ total: number, first: { x: number, y: number } | null }>}
+ */
+async function claimTreasuresInPlannedCells(pk, planned) {
+  let total = 0;
+  let first = null;
+  for (let i = 0; i < planned.length; i++) {
+    const p = planned[i];
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const x = p[0] | 0;
+    const y = p[1] | 0;
+    const k = `${x},${y}`;
+    const q = await tryClaimMapTreasureForPlayer(pk, k, true);
+    if (q > 0) {
+      total += q;
+      if (!first) first = { x, y };
+    }
+  }
+  if (total > 0) saveRoundState();
+  return { total, first };
+}
+
 /** @type {Map<object, number>} */
 const lastPlace = new WeakMap();
 /** @type {Map<number, number>} teamId -> число игроков */
@@ -4396,6 +4443,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       applyPlannedCapture(pk, tid, connected);
+      const tr = await claimTreasuresInPlannedCells(pk, connected);
       /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от зоны 4×4. */
       u.lastZoneCaptureAt = now;
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_4x4", { deferSave: true });
@@ -4411,6 +4459,9 @@ wss.on("connection", (ws, req) => {
       });
       safeSend(ws, { type: "purchaseOk", kind: "zoneCapture", cells: connected.length, size: 4 });
       safeSend(ws, await buildWalletPayload(ws));
+      if (tr.total > 0 && tr.first) {
+        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
+      }
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -4461,6 +4512,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       applyPlannedCapture(pk, tid, connected);
+      const tr = await claimTreasuresInPlannedCells(pk, connected);
       /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от масс-захвата 6×6. */
       u.lastMassCaptureAt = now;
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "mass_capture_6x6", { deferSave: true });
@@ -4476,6 +4528,9 @@ wss.on("connection", (ws, req) => {
       });
       safeSend(ws, { type: "purchaseOk", kind: "massCapture", cells: connected.length, size: 6 });
       safeSend(ws, await buildWalletPayload(ws));
+      if (tr.total > 0 && tr.first) {
+        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
+      }
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -4526,6 +4581,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
       applyPlannedCapture(pk, tid, connected);
+      const tr = await claimTreasuresInPlannedCells(pk, connected);
       u.lastZone12CaptureAt = now;
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_12x12", { deferSave: true });
       await walletStore.save();
@@ -4540,6 +4596,9 @@ wss.on("connection", (ws, req) => {
       });
       safeSend(ws, { type: "purchaseOk", kind: "zone12Capture", cells: connected.length, size: 12 });
       safeSend(ws, await buildWalletPayload(ws));
+      if (tr.total > 0 && tr.first) {
+        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
+      }
       scheduleBroadcastWalletDebounced();
       return;
     }
@@ -4719,19 +4778,7 @@ wss.on("connection", (ws, req) => {
       scheduleStatsBroadcast();
       afterTerritoryMutation();
 
-      let foundTreasureQuant = 0;
-      if (treasureQuantByCell.has(key) && !treasureClaimedKeys.has(key)) {
-        const tq = treasureQuantByCell.get(key) | 0;
-        if (tq >= 1 && tq <= 200) {
-          treasureClaimedKeys.add(key);
-          foundTreasureQuant = tq;
-          if (!isDevUnlimitedWallet(pk)) {
-            await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}` });
-          }
-          saveRoundState();
-          broadcast({ type: "treasureClaimed", key });
-        }
-      }
+      const foundTreasureQuant = await tryClaimMapTreasureForPlayer(pk, key, false);
 
       safeSend(ws, await buildWalletPayload(ws));
       if (foundTreasureQuant > 0) {
