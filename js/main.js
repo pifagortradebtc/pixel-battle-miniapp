@@ -3842,32 +3842,158 @@ function computeClientQuantumFarmIncomePer5s() {
   return n;
 }
 
-/** Вспышка на фермах + всплывающий текст при начислении квантов с ферм (каждые 5 с). */
+const BATTLE_EVENT_ZONE_QUANT_PER_STACK = 5;
+
+function clientTeamTerritoryOverlapsRect(teamId, rect) {
+  const tid = teamId | 0;
+  if (!tid || !rect) return false;
+  for (const [key] of pixels) {
+    const parts = key.split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if ((clientPixelTeamIdAt(x, y) | 0) !== tid) continue;
+    if (pointInRect(x, y, rect)) return true;
+  }
+  return false;
+}
+
+function clientTeamTerritoryOverlapsBestCompression(teamId, comp) {
+  const tid = teamId | 0;
+  if (!tid || !comp || gridW < 1 || gridH < 1) return false;
+  const candidates = [comp.centerMult, comp.nonCenterMult];
+  if (comp.outerRingMult != null && Number.isFinite(comp.outerRingMult)) candidates.push(comp.outerRingMult);
+  const best = Math.max(...candidates);
+  for (const [key] of pixels) {
+    const parts = key.split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if ((clientPixelTeamIdAt(x, y) | 0) !== tid) continue;
+    const m = tournamentCompressionMultiplierForCell(x, y, gridW, gridH, comp);
+    if (m >= best - 1e-8) return true;
+  }
+  return false;
+}
+
+/**
+ * Оценка +квантов / 5 с за пересечение территории с зонами турнира (золото, бум-регион, лучший слой сжатия карты).
+ * Должна совпадать с сервером при актуальном globalEvent и карте.
+ */
+function computeClientBattleEventZoneQuantsPer5s() {
+  const tid = myTeamId | 0;
+  if (!tid || gridW < 1 || gridH < 1) return 0;
+  const ge = getClientGlobalEventSnapshot();
+  const be = ge?.battleEvents;
+  const layers = be?.layers;
+  if (!Array.isArray(layers) || !layers.length) return 0;
+  const now = Date.now();
+  const battleEndsAt = typeof be.battleEndsAt === "number" ? be.battleEndsAt : 0;
+  let stack = 0;
+
+  for (let li = 0; li < layers.length; li++) {
+    const L = layers[li];
+    if (!L || typeof L.untilMs !== "number" || L.untilMs <= now) continue;
+    const k = L.kind;
+    if (k === "gold_zone" || k === "target_zone" || k === "duel_zone") {
+      if (L.rect && clientTeamTerritoryOverlapsRect(tid, L.rect)) stack++;
+      continue;
+    }
+    if (k === "economic_shift" || k === "economic_rotation" || k === "resource_surge") {
+      const rects =
+        Array.isArray(L.rects) && L.rects.length ? L.rects : L.rect ? [L.rect] : [];
+      let bonus = false;
+      for (let ri = 0; ri < rects.length; ri++) {
+        const rr = rects[ri];
+        if (rr && typeof rr.mult === "number" && rr.mult > 1 && clientTeamTerritoryOverlapsRect(tid, rr)) {
+          bonus = true;
+          break;
+        }
+      }
+      if (bonus) stack++;
+      continue;
+    }
+    if (k === "map_compression" && L.compression) {
+      const mcUntil = Math.min(L.untilMs, battleEndsAt > now ? battleEndsAt : L.untilMs);
+      if (now >= mcUntil) continue;
+      if (clientTeamTerritoryOverlapsBestCompression(tid, L.compression)) stack++;
+    }
+  }
+
+  return stack * BATTLE_EVENT_ZONE_QUANT_PER_STACK;
+}
+
+/**
+ * Пассив для подписи в UI: по текущей карте и globalEvent (совпадает с начислением на сервере при тех же данных).
+ * Не используем кэш из wallet — чтобы при захвате зоны подпись обновлялась без ожидания следующего тика.
+ */
+function getDisplayedPassiveQuantumBreakdown() {
+  if (myTeamId == null || spectatorMode) return { farm: 0, zone: 0, total: 0 };
+  const farm = computeClientQuantumFarmIncomePer5s();
+  const zone = computeClientBattleEventZoneQuantsPer5s();
+  return { farm, zone, total: farm + zone };
+}
+
+function computePassiveQuantumIncomeQuantsPer5s() {
+  return getDisplayedPassiveQuantumBreakdown().total;
+}
+
+function passiveQuantumIncomeSubtitle(farm, zone, total) {
+  if (total < 1) return { text: "", hidden: true };
+  if (farm > 0 && zone > 0) {
+    return { text: `+${total} / 5 с (фермы + зоны турнира)`, hidden: false };
+  }
+  if (zone > 0) {
+    return { text: `+${total} / 5 с за зоны турнира на карте`, hidden: false };
+  }
+  return { text: `+${total} / 5 с с квантовых ферм (команда)`, hidden: false };
+}
+
+/** Обновление подписи пассива при движении по карте / смене событий (без полного updateWalletBar). */
+function refreshPassiveIncomeDisplays() {
+  const online = wantOnline && getWsUrl();
+  if (!online || !walletState || spectatorMode || myTeamId == null) return;
+  syncShopHeaderBalance();
+  if (!walletBalanceEl || walletState.devUnlimited) return;
+  const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
+  const t = usdtToQuant(b);
+  const { farm: farmOnly, zone: zoneOnly, total: passiveTotal } = getDisplayedPassiveQuantumBreakdown();
+  const farmSuffix = passiveTotal > 0 ? ` (+${passiveTotal} / 5 с)` : "";
+  walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}${farmSuffix}`;
+  walletBalanceEl.title =
+    passiveTotal > 0
+      ? `Баланс в квантах. Пассивный доход: ${passiveTotal} квант. / 5 с (фермы: ${farmOnly}, зоны турнира на карте: ${zoneOnly}). Таймер пикселя — слева.`
+      : "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
+}
+
+/** Вспышка на фермах + всплывающий текст при пассивном доходе (фермы и/или зоны турнира, каждые 5 с). */
 function playQuantumFarmIncomeClientFx(quants) {
   const q = quants | 0;
   if (q < 1 || spectatorMode) return;
   playQuantumIncomeTick();
   const tid = myTeamId | 0;
-  if (!tid || !quantumFarmsMeta.length) return;
+  if (!tid) return;
   const tr = getVfxTransform();
   const gold = "#f0c040";
-  for (let i = 0; i < quantumFarmsMeta.length; i++) {
-    const f = quantumFarmsMeta[i];
-    const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
-      const p = key.split(",");
-      const v = clientPixelTeamIdAt(Number(p[0]), Number(p[1]));
-      return v == null ? 0 : v | 0;
-    });
-    if ((resolveFarmControl(scores).owner | 0) !== tid) continue;
-    const gcx = f.x0 + ((f.w / 2) | 0);
-    const gcy = f.y0 + ((f.h / 2) | 0);
-    if (boardVfx) {
-      boardVfx.ripple(gcx, gcy, gold, tr);
-      boardVfx.burst(gcx, gcy, "#ffd85c", tr, 16);
+  if (quantumFarmsMeta.length) {
+    for (let i = 0; i < quantumFarmsMeta.length; i++) {
+      const f = quantumFarmsMeta[i];
+      const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
+        const p = key.split(",");
+        const v = clientPixelTeamIdAt(Number(p[0]), Number(p[1]));
+        return v == null ? 0 : v | 0;
+      });
+      if ((resolveFarmControl(scores).owner | 0) !== tid) continue;
+      const gcx = f.x0 + ((f.w / 2) | 0);
+      const gcy = f.y0 + ((f.h / 2) | 0);
+      if (boardVfx) {
+        boardVfx.ripple(gcx, gcy, gold, tr);
+        boardVfx.burst(gcx, gcy, "#ffd85c", tr, 16);
+      }
     }
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
   }
-  flushBoardVfxFrame();
-  requestAnimationFrame(() => flushBoardVfxFrame());
   if (toolbarQuantumObjectiveEl && !toolbarQuantumObjectiveEl.hidden) {
     toolbarQuantumObjectiveEl.classList.remove("toolbar__wallet--pulse");
     void toolbarQuantumObjectiveEl.offsetWidth;
@@ -3977,21 +4103,11 @@ function syncShopHeaderBalance() {
   const t = usdtToQuant(b);
   el.textContent = String(t);
   if (unitEl) unitEl.textContent = quantWord(t);
-  const qFarmRaw = walletState?.quantFarmIncomeQuantsPer5s;
-  const qFarm =
-    typeof qFarmRaw === "number" && Number.isFinite(qFarmRaw)
-      ? Math.max(0, qFarmRaw | 0)
-      : myTeamId != null
-        ? computeClientQuantumFarmIncomePer5s()
-        : 0;
+  const { farm: farmOnly, zone: zoneOnly, total: passiveTotal } = getDisplayedPassiveQuantumBreakdown();
   if (subEl) {
-    if (qFarm > 0) {
-      subEl.textContent = `+${qFarm} / 5 с с квантовых ферм (команда)`;
-      subEl.hidden = false;
-    } else {
-      subEl.textContent = "";
-      subEl.hidden = true;
-    }
+    const sub = passiveQuantumIncomeSubtitle(farmOnly, zoneOnly, passiveTotal);
+    subEl.textContent = sub.text;
+    subEl.hidden = sub.hidden;
   }
   syncDevUnlimitedShopHints();
 }
@@ -4085,6 +4201,7 @@ function updateToolbarHud() {
   syncToolbarHeightCssVar();
   syncEventBanner();
   syncReactiveMusicFromMain();
+  refreshPassiveIncomeDisplays();
 }
 
 /** Высота шапки для отступа лидерборда; всегда в пределах [34px … --toolbar-h-max], без раздувания на весь экран. */
@@ -4206,12 +4323,12 @@ function updateWalletBar() {
   if (walletState.devUnlimited) {
     prevWalletQuant = null;
     const qFarmDev =
-      !spectatorMode && myTeamId != null ? computeClientQuantumFarmIncomePer5s() : 0;
-    const farmDev = qFarmDev > 0 ? ` · фермы +${qFarmDev}/5 с` : "";
+      !spectatorMode && myTeamId != null ? computePassiveQuantumIncomeQuantsPer5s() : 0;
+    const farmDev = qFarmDev > 0 ? ` · пассив +${qFarmDev}/5 с` : "";
     walletBalanceEl.textContent = `💰 ∞ квантов (тест)${farmDev}`;
     walletBalanceEl.title =
       "Режим теста: бесконечные кванты. Интервал между пикселями — как у всех (таймер слева)." +
-      (qFarmDev > 0 ? ` Квантовые фермы команды: ${qFarmDev}.` : "");
+      (qFarmDev > 0 ? ` Оценка пассива (фермы + зоны турнира): ${qFarmDev} квант. / 5 с.` : "");
   } else {
     const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
     const t = usdtToQuant(b);
@@ -4220,18 +4337,12 @@ function updateWalletBar() {
       setTimeout(() => walletBalanceEl.classList.remove("toolbar__wallet--pulse"), 700);
     }
     prevWalletQuant = t;
-    const qFarmRaw = walletState?.quantFarmIncomeQuantsPer5s;
-    const qFarm =
-      typeof qFarmRaw === "number" && Number.isFinite(qFarmRaw)
-        ? Math.max(0, qFarmRaw | 0)
-        : !spectatorMode && myTeamId != null
-          ? computeClientQuantumFarmIncomePer5s()
-          : 0;
-    const farmSuffix = qFarm > 0 ? ` (+${qFarm} / 5 с)` : "";
+    const { farm: farmOnly, zone: zoneOnly, total: passiveTotal } = getDisplayedPassiveQuantumBreakdown();
+    const farmSuffix = passiveTotal > 0 ? ` (+${passiveTotal} / 5 с)` : "";
     walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}${farmSuffix}`;
     walletBalanceEl.title =
-      qFarm > 0
-        ? `Баланс в квантах. Квантовые фермы под контролем команды: ${qFarm} (+${qFarm} квант / 5 с на всю команду). Таймер пикселя — слева.`
+      passiveTotal > 0
+        ? `Баланс в квантах. Пассивный доход: ${passiveTotal} квант. / 5 с (фермы: ${farmOnly}, зоны турнира на карте: ${zoneOnly}). Таймер пикселя — слева.`
         : "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
   }
   syncShopHeaderBalance();

@@ -49,7 +49,9 @@ import {
   MANUAL_BATTLE_EVENT_HELP_RU,
   MANUAL_TELEGRAM_CMD_FIRST_WORDS,
   mergeManualBattleSlotsIntoSnapshot,
+  pointInRect,
   resolveManualBattleCommandToTimelineDef,
+  tournamentCompressionMultiplierForCell,
 } from "./lib/battle-events.js";
 import {
   FLAG_BASE_MAX_HP,
@@ -74,6 +76,9 @@ import {
   scoreTeamsAroundFarm,
   resolveFarmControl,
 } from "./lib/quantum-farms.js";
+
+/** За каждую активную «визуальную» зону события, где есть хотя бы одна клетка территории команды, +столько квантов / 5 с. */
+const BATTLE_EVENT_ZONE_QUANT_PER_STACK = 5;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -272,10 +277,16 @@ const COOLDOWN_MS = 0;
 const ROUND_MS = 100 * 60 * 60 * 1000;
 /** Длина фазы боя текущего раунда в мс (после разминки). */
 let roundDurationMs = ROUND_MS;
-/** Админ-команда бота «test»: все раунды — короткий бой для проверки цепочки турнира. */
-const QUICK_TEST_ROUND_BATTLE_MS = 30 * 1000;
+/** Админ-команда бота «test»: фаза боя в каждом раунде одинаковая (1 мин), разминка короткая. */
+const QUICK_TEST_ROUND_BATTLE_MS = 60 * 1000;
 const QUICK_TEST_WARMUP_MS = 5 * 1000;
 let tournamentQuickTestMode = false;
+
+function applyQuickTestRoundTimingToState() {
+  if (!tournamentQuickTestMode) return;
+  roundDurationMs = QUICK_TEST_ROUND_BATTLE_MS;
+  round0WarmupMs = QUICK_TEST_WARMUP_MS;
+}
 
 function effectiveBattleDurationForRound(ri) {
   if (tournamentQuickTestMode) return QUICK_TEST_ROUND_BATTLE_MS;
@@ -1355,10 +1366,7 @@ function loadRoundState() {
       } else {
         round0WarmupMs = WARMUP_MS;
       }
-      if (tournamentQuickTestMode) {
-        roundDurationMs = QUICK_TEST_ROUND_BATTLE_MS;
-        if (roundIndex === 0) round0WarmupMs = QUICK_TEST_WARMUP_MS;
-      }
+      if (tournamentQuickTestMode) applyQuickTestRoundTimingToState();
       if (typeof j.roundTimerStarted === "boolean") {
         roundTimerStarted = j.roundTimerStarted;
       } else {
@@ -2399,10 +2407,12 @@ async function buildWalletPayload(ws) {
   const ref = u.invitedByPlayerKey ? sanitizePlayerKey(u.invitedByPlayerKey) : "";
   const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, now) : BASE_ACTION_COOLDOWN_SEC;
   const farmQ5 = tid && quantumFarmLayouts.length ? getQuantumFarmIncomeQuantsForTeam(tid) : 0;
+  const zoneQ5 = tid ? getBattleEventZoneQuantumQuantsForTeam(tid, now) : 0;
   return {
     type: "wallet",
     balanceUSDT: devUnl ? 999999999 : u.balanceUSDT,
     quantFarmIncomeQuantsPer5s: farmQ5,
+    battleEventZoneQuantsPer5s: zoneQ5,
     cooldownMs: cd,
     effectiveRecoverySec,
     personalRecoveryUntil: u.personalRecoveryUntil,
@@ -2465,6 +2475,91 @@ function getQuantumFarmIncomeQuantsForTeam(teamId) {
   return n;
 }
 
+/** @param {string} key формат "x,y" */
+function parsePixelKeyXY(key) {
+  const i = String(key).indexOf(",");
+  if (i < 1) return null;
+  const x = Number(String(key).slice(0, i));
+  const y = Number(String(key).slice(i + 1));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x: x | 0, y: y | 0 };
+}
+
+function teamTerritoryOverlapsRect(teamId, rect) {
+  const tid = teamId | 0;
+  if (!tid || !rect) return false;
+  for (const [key, cell] of pixels) {
+    if (pixelTeam(cell) !== tid) continue;
+    const p = parsePixelKeyXY(key);
+    if (!p) continue;
+    if (pointInRect(p.x, p.y, rect)) return true;
+  }
+  return false;
+}
+
+function teamTerritoryOverlapsBestCompressionRegion(teamId, comp) {
+  const tid = teamId | 0;
+  if (!tid || !comp) return false;
+  const candidates = [comp.centerMult, comp.nonCenterMult];
+  if (comp.outerRingMult != null && Number.isFinite(comp.outerRingMult)) candidates.push(comp.outerRingMult);
+  let best = candidates[0];
+  for (let i = 1; i < candidates.length; i++) best = Math.max(best, candidates[i]);
+  for (const [key, cell] of pixels) {
+    if (pixelTeam(cell) !== tid) continue;
+    const p = parsePixelKeyXY(key);
+    if (!p) continue;
+    const m = tournamentCompressionMultiplierForCell(p.x, p.y, gridW, gridH, comp);
+    if (m >= best - 1e-8) return true;
+  }
+  return false;
+}
+
+/**
+ * Сколько «стеков» визуальных бонус-зон событий пересекается с территорией команды (золото, бум-регион, лучший слой сжатия карты).
+ * @param {number} teamId
+ * @param {number} nowMs
+ */
+function getBattleEventZoneQuantumStackForTeam(teamId, nowMs) {
+  const ctx = getBattleEventsContext(nowMs);
+  if (!ctx) return 0;
+  const snap = computeBattleScoringSnapshotWithManualBattle(nowMs, ctx);
+  const battleEndMs = ctx.battleEndMs;
+  let stack = 0;
+
+  if (snap.goldRect && snap.goldUntilMs != null && snap.goldUntilMs > nowMs) {
+    if (teamTerritoryOverlapsRect(teamId, snap.goldRect)) stack++;
+  }
+
+  if (snap.economicRects?.length && snap.economicUntilMs != null && snap.economicUntilMs > nowMs) {
+    let touchedBonus = false;
+    for (let i = 0; i < snap.economicRects.length; i++) {
+      const r = snap.economicRects[i];
+      if (!r || typeof r.mult !== "number" || r.mult <= 1) continue;
+      if (teamTerritoryOverlapsRect(teamId, r)) {
+        touchedBonus = true;
+        break;
+      }
+    }
+    if (touchedBonus) stack++;
+  }
+
+  if (snap.mapCompression && battleEndMs > nowMs) {
+    const mcUntil =
+      typeof snap.mapCompressionUntilMs === "number" && Number.isFinite(snap.mapCompressionUntilMs)
+        ? snap.mapCompressionUntilMs
+        : battleEndMs;
+    if (nowMs < mcUntil && teamTerritoryOverlapsBestCompressionRegion(teamId, snap.mapCompression)) {
+      stack++;
+    }
+  }
+
+  return stack;
+}
+
+function getBattleEventZoneQuantumQuantsForTeam(teamId, nowMs) {
+  return getBattleEventZoneQuantumStackForTeam(teamId, nowMs) * BATTLE_EVENT_ZONE_QUANT_PER_STACK;
+}
+
 function broadcastQuantumFarmTeamNotice(teamId, payload) {
   const tid = teamId | 0;
   broadcast({ ...payload, teamId: tid });
@@ -2506,20 +2601,38 @@ function syncQuantumFarmStateAfterTerritoryChange() {
 
 async function tickQuantumFarmIncome() {
   if (REDIS_URL && !isClusterLeader()) return;
-  if (gamePaused || gameFinished || !quantumFarmLayouts.length) return;
-  const owners = computeQuantumFarmOwnersNow();
+  if (gamePaused || gameFinished) return;
+  const nowMs = effectiveGameClockMs();
+
   /** @type {Map<number, number>} */
   const farmsPerTeam = new Map();
-  for (let i = 0; i < owners.length; i++) {
-    const t = owners[i] | 0;
-    if (!t) continue;
-    farmsPerTeam.set(t, (farmsPerTeam.get(t) | 0) + 1);
+  if (quantumFarmLayouts.length) {
+    const owners = computeQuantumFarmOwnersNow();
+    for (let i = 0; i < owners.length; i++) {
+      const t = owners[i] | 0;
+      if (!t) continue;
+      farmsPerTeam.set(t, (farmsPerTeam.get(t) | 0) + 1);
+    }
   }
-  if (farmsPerTeam.size === 0) return;
+
+  /** @type {Map<number, number>} */
+  const zoneQuantsByTeam = new Map();
+  for (let ti = 0; ti < dynamicTeams.length; ti++) {
+    const t = dynamicTeams[ti];
+    if (!t || t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    if (!tid) continue;
+    const zq = getBattleEventZoneQuantumQuantsForTeam(tid, nowMs) | 0;
+    if (zq > 0) zoneQuantsByTeam.set(tid, zq);
+  }
+
+  if (farmsPerTeam.size === 0 && zoneQuantsByTeam.size === 0) return;
+
   quantumFarmIncomeTickSeq += 1;
   const tickTag = `${roundIndex}_${quantumFarmIncomeTickSeq}_${Date.now()}`;
   /** @type {Map<string, number>} */
   const quantByPk = new Map();
+
   for (const [tid, nf] of farmsPerTeam) {
     const nFarm = nf | 0;
     if (nFarm < 1) continue;
@@ -2529,18 +2642,40 @@ async function tickQuantumFarmIncome() {
       quantByPk.set(pk, (quantByPk.get(pk) | 0) + nFarm);
     }
   }
+
+  for (const [tid, zq] of zoneQuantsByTeam) {
+    const zoneQ = zq | 0;
+    if (zoneQ < 1) continue;
+    const playerKeys = collectWinnerTeamPlayerKeys(tid);
+    for (const pk of playerKeys) {
+      if (!pk || isDevUnlimitedWallet(pk)) continue;
+      quantByPk.set(pk, (quantByPk.get(pk) | 0) + zoneQ);
+    }
+  }
+
   if (quantByPk.size === 0) return;
   for (const [pk, q] of quantByPk) {
     const qq = q | 0;
     if (qq < 1) continue;
-    await walletStore.credit(pk, quantToUsdt(qq), { txHash: `quantum_farms:${tickTag}:${pk.slice(0, 24)}` });
+    await walletStore.credit(pk, quantToUsdt(qq), { txHash: `passive_quant:${tickTag}:${pk.slice(0, 24)}` });
   }
   await walletStore.save();
   await broadcastWalletPayloadToAllClients();
-  for (const [tid, nf] of farmsPerTeam) {
-    const nFarm = nf | 0;
-    if (nFarm < 1) continue;
-    broadcast({ type: "quantFarmIncomePulse", teamId: tid | 0, quants: nFarm });
+
+  /** Пульс клиенту: сумма ферм + зоны событий за тик (на игрока). */
+  const pulseTeams = new Set([...farmsPerTeam.keys(), ...zoneQuantsByTeam.keys()]);
+  for (const tid of pulseTeams) {
+    const nFarm = farmsPerTeam.get(tid) | 0;
+    const nZone = zoneQuantsByTeam.get(tid) | 0;
+    const total = nFarm + nZone;
+    if (total < 1) continue;
+    broadcast({
+      type: "quantFarmIncomePulse",
+      teamId: tid | 0,
+      quants: total,
+      farmQuants: nFarm > 0 ? nFarm : undefined,
+      eventZoneQuants: nZone > 0 ? nZone : undefined,
+    });
   }
 }
 
@@ -4705,6 +4840,7 @@ async function advanceToDuelRound(winnerRow) {
     roundTimerStarted = true;
     roundStartMs = Date.now();
     roundDurationMs = effectiveBattleDurationForRound(3);
+    applyQuickTestRoundTimingToState();
     clearTiebreakSnapshots();
     resetBattleEventsStateForNewBattleRound();
     rebuildLandFromRound(3);
@@ -4864,9 +5000,10 @@ async function runMaybeEndRound() {
     const endedRoundIndex = roundIndex;
     roundIndex++;
     roundTimerStarted = true;
-    round0WarmupMs = WARMUP_MS;
+    round0WarmupMs = tournamentQuickTestMode ? QUICK_TEST_WARMUP_MS : WARMUP_MS;
     roundStartMs = Date.now();
     roundDurationMs = effectiveBattleDurationForRound(roundIndex);
+    applyQuickTestRoundTimingToState();
     clearTiebreakSnapshots();
     resetBattleEventsStateForNewBattleRound();
     rebuildLandFromRound(roundIndex);
@@ -6574,8 +6711,7 @@ async function telegramPollLoop() {
               continue;
             }
             tournamentQuickTestMode = true;
-            roundDurationMs = QUICK_TEST_ROUND_BATTLE_MS;
-            if (roundIndex === 0) round0WarmupMs = QUICK_TEST_WARMUP_MS;
+            applyQuickTestRoundTimingToState();
             saveRoundState();
             broadcastTournamentTimeScaleToClients();
             if (wss) {
@@ -6860,7 +6996,7 @@ server.listen(PORT, () => {
     }
     if (WAIT_FOR_TELEGRAM_GO) {
       console.log(
-        'Первый раунд: «go» + часы; «test» / «test off» — турнир с раундами по 30 с боя (разминка 5 с); «speed» — Альт Сезон; рестарт — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
+        'Первый раунд: «go» + часы; «test» / «test off» — турнир: бой в каждом раунде 1 мин (разминка 5 с); «speed» — Альт Сезон; рестарт — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
       );
     } else if (TELEGRAM_ADMIN_IDS.size === 0) {
       console.warn(
