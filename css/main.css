@@ -359,9 +359,9 @@ body {
   opacity: 0.88;
 }
 
-/* Блок «Повторить»: ровно 3 последние покупки в строку, без горизонтального скролла */
+/* Быстрый повтор: лёгкие плавающие контролы; промежутки между кругами не перехватывают карту */
 .quick-buy-rail {
-  pointer-events: auto;
+  pointer-events: none;
   isolation: isolate;
   -webkit-transform: translateZ(0);
   transform: translateZ(0);
@@ -371,199 +371,157 @@ body {
   display: none !important;
 }
 
-/* Над нижней панелью, справа: колонка кнопок (не в строке с командой — иначе уезжают за край). */
-.quick-buy-rail--dock {
+.quick-buy-rail__caption--sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Правый нижний угол: компактный «воздушный» кластер, не как панель */
+.quick-buy-rail--dock.quick-buy-rail--fab-cluster {
   position: absolute;
   z-index: 8;
-  right: max(6px, env(safe-area-inset-right, 0px));
-  /* Высота palette-bar + отступ; не перекрывать нижнее меню */
-  bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+  right: max(8px, env(safe-area-inset-right, 0px));
+  bottom: calc(50px + env(safe-area-inset-bottom, 0px));
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  width: min(168px, 40vw);
-  max-width: min(168px, 40vw);
-  flex: unset;
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 0;
+  width: auto;
+  max-width: none;
   min-width: 0;
   box-sizing: border-box;
-}
-
-.quick-buy-rail--dock .quick-buy-rail__caption {
-  text-align: right;
-  margin-right: 0;
-  padding-right: 2px;
-  align-self: flex-end;
-}
-
-.quick-buy-rail--dock .quick-buy-rail__list {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  max-height: min(38vh, 240px);
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
   padding: 0;
+  pointer-events: none;
 }
 
-.quick-buy-rail--dock .quick-buy-rail__list .quick-buy-rail__btn {
-  flex: 0 0 auto;
-  width: 100%;
+.quick-buy-rail--fab-cluster .quick-buy-rail__list {
+  display: flex;
+  flex-direction: row-reverse;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  padding: 0;
+  margin: 0;
   min-width: 0;
-  max-width: 100%;
-}
-
-.quick-buy-rail__caption {
-  font-size: clamp(0.45rem, 1.9vw, 0.55rem);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: none;
-  color: color-mix(in srgb, var(--tg-hint) 88%, transparent);
-  text-align: left;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
-  flex-shrink: 0;
-  line-height: 1.15;
-  white-space: nowrap;
-  margin-right: 6px;
-  padding-right: 2px;
-  /* Раньше width: 2.4em — подпись наезжала на первую карточку */
+  max-height: none;
+  overflow: visible;
+  pointer-events: none;
 }
 
 .quick-buy-rail__list {
   display: flex;
   flex-direction: row;
-  gap: 4px;
-  overflow-x: hidden;
-  overflow-y: hidden;
-  overscroll-behavior-x: none;
-  padding: 2px 0;
-  flex: 1 1 auto;
-  min-width: 0;
-  max-height: 52px;
-  align-items: stretch;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  gap: 7px;
+  list-style: none;
 }
 
-.quick-buy-rail__list::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-/* Три кнопки делят ширину поровну — без бегунка */
-.quick-buy-rail__list .quick-buy-rail__btn {
-  flex: 1 1 0;
-  min-width: 0;
-  max-width: none;
-}
-
-.quick-buy-rail__btn {
+/* Круглый FAB: почти «воздух» — тонкое стекло, без тяжёлых панелей */
+.quick-buy-rail__btn--fab {
+  --quick-fab-size: 38px;
   appearance: none;
-  border: 1px solid color-mix(in srgb, var(--tg-hint) 38%, transparent);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.38);
-  color: var(--tg-text);
-  padding: 2px 2px 3px;
+  position: relative;
+  width: var(--quick-fab-size);
+  height: var(--quick-fab-size);
+  min-width: var(--quick-fab-size);
+  min-height: var(--quick-fab-size);
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 50%;
   cursor: pointer;
+  flex-shrink: 0;
+  pointer-events: auto;
+  color: rgba(244, 248, 255, 0.96);
+  background: rgba(8, 12, 22, 0.26);
+  -webkit-backdrop-filter: blur(8px) saturate(1.1);
+  backdrop-filter: blur(8px) saturate(1.1);
+  box-shadow:
+    0 0 0 0.5px rgba(255, 255, 255, 0.1),
+    0 2px 6px rgba(0, 0, 0, 0.18);
+  transition:
+    transform 0.12s cubic-bezier(0.34, 1.35, 0.64, 1),
+    box-shadow 0.16s ease,
+    background 0.16s ease,
+    filter 0.16s ease,
+    opacity 0.16s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .quick-buy-rail__btn--fab {
+    background: rgba(16, 22, 36, 0.52);
+  }
+}
+
+.quick-buy-rail__btn--fab:hover:not(:disabled) {
+  transform: scale(1.06);
+  background: rgba(10, 16, 30, 0.4);
+  box-shadow:
+    0 0 0 0.5px rgba(186, 230, 253, 0.28),
+    0 0 12px rgba(56, 189, 248, 0.12),
+    0 3px 10px rgba(0, 0, 0, 0.22);
+  filter: brightness(1.05);
+}
+
+.quick-buy-rail__btn--fab:active:not(:disabled) {
+  transform: scale(0.96);
+  transition-duration: 0.05s;
+}
+
+.quick-buy-rail__btn--fab:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+  filter: grayscale(0.5) brightness(0.9);
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.quick-buy-rail__fab {
+  position: relative;
   display: flex;
+  width: 100%;
+  height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0;
-  min-height: 0;
-  min-width: 0;
-  flex-shrink: 1;
-  overflow: hidden;
-  transition: transform 0.12s ease, filter 0.15s ease, opacity 0.15s ease, box-shadow 0.2s ease;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
 }
 
-.quick-buy-rail__list .quick-buy-rail__label,
-.quick-buy-rail__list .quick-buy-rail__price {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-buy-rail__btn:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
-.quick-buy-rail__btn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
-.quick-buy-rail__btn:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
-/* Выбран захват зоны: ждём тап по карте — заметная подсветка; снимается после постановки или сброса */
-.quick-buy-rail__btn.quick-buy-rail__btn--map-armed {
-  border-color: rgba(56, 189, 248, 0.85);
-  background: linear-gradient(165deg, rgba(22, 78, 118, 0.72), rgba(10, 32, 56, 0.9));
-  box-shadow:
-    0 0 0 2px rgba(34, 211, 238, 0.55),
-    0 0 18px rgba(34, 211, 238, 0.32),
-    0 3px 12px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14);
-  transform: scale(1.04);
-  z-index: 1;
-  position: relative;
-}
-
-.quick-buy-rail__btn.quick-buy-rail__btn--map-armed .quick-buy-rail__label {
-  color: #ecfeff;
-  font-weight: 800;
-  text-shadow: 0 0 12px rgba(56, 189, 248, 0.5);
-}
-
-.quick-buy-rail__btn.quick-buy-rail__btn--map-armed .quick-buy-rail__price {
-  color: #fef08a;
-}
-
-.quick-buy-rail__btn.quick-buy-rail__btn--map-armed:hover:not(:disabled) {
-  filter: brightness(1.12);
-}
-
-.quick-buy-rail__btn.quick-buy-rail__btn--map-armed:active:not(:disabled) {
-  transform: scale(1.01);
-}
-
-.quick-buy-rail__face {
-  position: relative;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+.quick-buy-rail__fab--recovery {
+  justify-content: center;
 }
 
 .quick-buy-rail__orbit {
   position: absolute;
   left: 50%;
-  top: 1px;
-  width: 44px;
-  height: 44px;
-  margin-left: -22px;
+  top: 50%;
+  width: 32px;
+  height: 32px;
+  margin: -16px 0 0 -16px;
   pointer-events: none;
 }
 
 .quick-buy-rail__svg {
-  width: 44px;
-  height: 44px;
+  width: 32px;
+  height: 32px;
   display: block;
 }
 
 .quick-buy-rail__ring-track {
-  stroke: rgba(255, 255, 255, 0.14);
-  stroke-width: 3px;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 2px;
 }
 
 .quick-buy-rail__ring-arc {
-  stroke-width: 3px;
+  stroke-width: 2px;
   stroke-linecap: round;
   transition: stroke-dashoffset 0.35s linear;
 }
@@ -577,58 +535,78 @@ body {
 }
 
 .quick-buy-rail__btn--buff-ticking.quick-buy-rail__btn--kind-personal .quick-buy-rail__orbit {
-  filter: drop-shadow(0 0 5px rgba(251, 191, 36, 0.45));
+  filter: drop-shadow(0 0 3px rgba(251, 191, 36, 0.35));
 }
 
 .quick-buy-rail__btn--buff-ticking.quick-buy-rail__btn--kind-team .quick-buy-rail__orbit {
-  filter: drop-shadow(0 0 5px rgba(74, 222, 128, 0.4));
+  filter: drop-shadow(0 0 3px rgba(74, 222, 128, 0.32));
 }
 
-.quick-buy-rail__orbit-inner {
+.quick-buy-rail__glyph {
   position: relative;
   z-index: 1;
-  width: 44px;
-  min-height: 44px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  padding: 2px 1px;
-  box-sizing: border-box;
-  text-align: center;
-}
-
-.quick-buy-rail__source-badge {
-  font-size: 0.45rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 14px;
   line-height: 1;
-  margin-bottom: 1px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  user-select: none;
 }
 
-.quick-buy-rail__btn--kind-personal .quick-buy-rail__source-badge {
-  color: #fde68a;
+.quick-buy-rail__glyph--num {
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
 }
 
-.quick-buy-rail__btn--kind-team .quick-buy-rail__source-badge {
-  color: #bbf7d0;
+.quick-buy-rail__glyph--num12 {
+  font-size: 9px;
+  font-weight: 800;
 }
 
-.quick-buy-rail__label {
-  font-size: 0.5rem;
-  font-weight: 700;
-  line-height: 1.05;
-  text-align: center;
+.quick-buy-rail__cost {
+  position: absolute;
+  z-index: 2;
+  right: 2px;
+  bottom: 2px;
+  left: auto;
+  transform: none;
+  font-size: 7px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: rgba(253, 224, 130, 0.82);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
 }
 
-.quick-buy-rail__price {
-  font-size: 0.42rem;
-  font-weight: 600;
-  color: color-mix(in srgb, #fbbf24 90%, var(--tg-text));
-  text-align: center;
-  line-height: 1.05;
+.quick-buy-rail__fab--recovery .quick-buy-rail__glyph {
+  margin-top: -2px;
+}
+
+/* Активное ожидание тапа по карте — заметно, но без «тяжёлой» панели */
+.quick-buy-rail__btn--fab.quick-buy-rail__btn--map-armed {
+  transform: scale(1.04);
+  background: rgba(12, 28, 48, 0.42);
+  box-shadow:
+    0 0 0 1px rgba(34, 211, 238, 0.45),
+    0 0 14px rgba(34, 211, 238, 0.18),
+    0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.quick-buy-rail__btn--fab.quick-buy-rail__btn--map-armed:hover:not(:disabled) {
+  transform: scale(1.07);
+  filter: brightness(1.06);
+}
+
+.quick-buy-rail__btn--fab.quick-buy-rail__btn--map-armed:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+@media (min-width: 600px) {
+  .quick-buy-rail__btn--fab {
+    --quick-fab-size: 40px;
+  }
 }
 
 .stage-wrap {
@@ -2450,6 +2428,15 @@ a.overlay__btn {
     animation: none;
   }
 
+  .quick-buy-rail__btn--fab,
+  .quick-buy-rail__btn--fab:hover:not(:disabled),
+  .quick-buy-rail__btn--fab:active:not(:disabled),
+  .quick-buy-rail__btn--fab.quick-buy-rail__btn--map-armed,
+  .quick-buy-rail__btn--fab.quick-buy-rail__btn--map-armed:hover:not(:disabled),
+  .quick-buy-rail__btn--fab.quick-buy-rail__btn--map-armed:active:not(:disabled) {
+    transform: none;
+  }
+
   .toolbar__btn:hover {
     transform: none;
     filter: none;
@@ -2801,4 +2788,59 @@ a.overlay__btn {
     0 0 12px rgba(129, 140, 248, 0.9),
     0 2px 10px rgba(0, 0, 0, 0.85);
   opacity: 0.95;
+}
+
+.toolbar__audio-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.game-audio-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12040;
+  min-width: min(280px, 92vw);
+  padding: 12px 14px 14px;
+  border-radius: 12px;
+  background: rgba(22, 28, 38, 0.96);
+  border: 1px solid rgba(120, 160, 220, 0.28);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+}
+
+.game-audio-panel__title {
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(200, 214, 235, 0.85);
+  margin-bottom: 10px;
+}
+
+.game-audio-panel__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82rem;
+  color: rgba(226, 232, 240, 0.92);
+  margin-bottom: 8px;
+}
+
+.game-audio-panel__row--mute {
+  grid-template-columns: auto 1fr;
+  margin-bottom: 0;
+  margin-top: 4px;
+}
+
+.game-audio-panel input[type="range"] {
+  width: 120px;
+  accent-color: #7c9cff;
+}
+
+.game-audio-panel input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #7c9cff;
 }

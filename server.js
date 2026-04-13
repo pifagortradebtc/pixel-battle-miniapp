@@ -1486,7 +1486,10 @@ const teamFirstHitPeakAt = new Map();
  * @type {Map<number, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number, _flagRegenBroadcastPhase?: boolean, _lastRegenBroadcastAt?: number }>}
  */
 const flagCaptureByDefender = new Map();
-/** Если 20 с подряд нет ни одного пикселя владельца в 6×6 — передовая база снимается с карты. */
+/**
+ * Если 20 с подряд нет ни одного пикселя владельца в 6×6 — передовая база снимается (напр. смыв бомбой).
+ * При коллапсе изоляции FOB в кармане удаляется сразу — см. removeMilitaryOutpostsFullyInsideIsolationCellSet.
+ */
 const MILITARY_OUTPOST_ABANDON_MS = 20_000;
 /**
  * HP флага передовой базы: ключ `${defenderId}:${x0}:${y0}` (левый верх 6×6).
@@ -2101,6 +2104,8 @@ function advanceTerritoryIsolationState() {
           const sy = Number(parts[1]);
           if (Number.isFinite(sx) && Number.isFinite(sy)) xyList.push([sx | 0, sy | 0]);
         }
+        /* FOB целиком в этом кармане — убрать сразу; иначе игрок ждал бы ещё MILITARY_OUTPOST_ABANDON_MS после обнуления клеток. */
+        removeMilitaryOutpostsFullyInsideIsolationCellSet(m.teamId, m.cells);
         broadcast({
           type: "territoryIsolationCollapse",
           teamId: m.teamId,
@@ -3302,7 +3307,11 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
   afterTerritoryMutation();
 }
 
-function removeMilitaryOutpostAtIndex(dt, index, reason) {
+/**
+ * Удаление передовой базы из меты и рассылка клиентам без afterTerritoryMutation
+ * (иначе рекурсия из advanceTerritoryIsolationState).
+ */
+function removeMilitaryOutpostAtIndexCore(dt, index, reason) {
   if (!dt || !Array.isArray(dt.militaryOutposts)) return;
   const o = dt.militaryOutposts[index];
   if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") return;
@@ -3319,6 +3328,38 @@ function removeMilitaryOutpostAtIndex(dt, index, reason) {
     reason: reason || "removed",
   });
   broadcast({ type: "teamsFull", teams: teamsForMeta() });
+}
+
+/**
+ * Передовая 6×6 полностью внутри нейтрализованного изолированного кармана — снять сразу при коллапсе.
+ * @param {number} teamId
+ * @param {Set<string>} cellSet ключи "x,y"
+ */
+function removeMilitaryOutpostsFullyInsideIsolationCellSet(teamId, cellSet) {
+  const tid = teamId | 0;
+  if (tid <= 0 || !cellSet || cellSet.size < 1) return;
+  const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
+  if (!dt || dt.solo || dt.eliminated || !Array.isArray(dt.militaryOutposts) || !dt.militaryOutposts.length) return;
+  const S = TEAM_SPAWN_SIZE;
+  for (let i = dt.militaryOutposts.length - 1; i >= 0; i--) {
+    const o = dt.militaryOutposts[i];
+    if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
+    const x0 = o.x0 | 0;
+    const y0 = o.y0 | 0;
+    let allInPocket = true;
+    for (let yy = y0; yy < y0 + S && allInPocket; yy++) {
+      for (let xx = x0; xx < x0 + S && allInPocket; xx++) {
+        if (!cellSet.has(`${xx},${yy}`)) allInPocket = false;
+      }
+    }
+    if (allInPocket) {
+      removeMilitaryOutpostAtIndexCore(dt, i, "isolation_collapse");
+    }
+  }
+}
+
+function removeMilitaryOutpostAtIndex(dt, index, reason) {
+  removeMilitaryOutpostAtIndexCore(dt, index, reason);
   afterTerritoryMutation();
 }
 

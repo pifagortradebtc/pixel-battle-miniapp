@@ -14,8 +14,26 @@ import {
   notifySeismicPreview,
   enqueueBaseCapturedPresentation,
   enqueueTerritoryCapturePresentation,
-  playNukeBombImpactSound,
 } from "./event-presentation.js";
+import {
+  initGameAudio,
+  syncReactiveMusic,
+  getCombatBumpUntil,
+  bumpCombat,
+  playUiError,
+  playPurchaseSuccess,
+  playPixelPlace,
+  playTerritoryExpand,
+  playFlagBaseHit,
+  playBombExplosion,
+  playQuantumConnect,
+  playQuantumDisconnect,
+  playQuantumIncomeTick,
+  playAlertBaseUnderAttack,
+  playAlertLastCells,
+  playAlertLastCell,
+  playAlertTerritoryCutOff,
+} from "./game-audio.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
   getCurrentCooldownMs,
@@ -383,6 +401,8 @@ let teamDefeatUiTimer = null;
 let baseReminderUntil = 0;
 /** Красная пульсация оставшейся территории (мало клеток). */
 let myTerritoryDangerUntil = 0;
+/** Последнее значение `cellsRemaining` из `teamDanger` (для музыки / алертов). */
+let lastTeamDangerCellsRemaining = 999;
 /** Сильная пульсация при одной клетке. */
 let myTerritoryLastCellUntil = 0;
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -1186,14 +1206,17 @@ function hidePlacementFeedbackBanner() {
 }
 
 /**
- * Явный фидбек: опционально верхний event-banner + полоска в тулбаре (cooldown-label) + тактильный отклик.
+ * Явный фидбек: полоска в тулбаре (cooldown-label) и/или верхний event-banner + тактильный отклик.
+ * По умолчанию при показе тулбара верхняя плашка не дублируется; `skipEventBanner: false` — принудительно показать верх.
  * @param {"warn"|"error"|"success"|"ok"} severity
  * @param {{ telegramAlert?: boolean, bannerDurationMs?: number, skipCooldownChrome?: boolean, skipEventBanner?: boolean }} opts
  */
 function showPlacementFeedback(text, severity, opts = {}) {
   const telegramAlert = opts.telegramAlert === true;
   const skipCooldownChrome = opts.skipCooldownChrome === true;
-  const skipEventBanner = opts.skipEventBanner === true;
+  const skipEventBanner = Object.prototype.hasOwnProperty.call(opts, "skipEventBanner")
+    ? opts.skipEventBanner === true
+    : !skipCooldownChrome;
   const hideMs =
     typeof opts.bannerDurationMs === "number" && Number.isFinite(opts.bannerDurationMs) && opts.bannerDurationMs > 0
       ? opts.bannerDurationMs
@@ -1536,6 +1559,7 @@ function applyClientTerritoryIsolationFromServer(payload) {
     msLeft = Math.max(0, msLeft);
     const line = buildIsolationCorridorBannerLine(msLeft);
     if (line) {
+      playAlertTerritoryCutOff();
       showPlacementFeedback(line, "warn", {
         telegramAlert: false,
         skipCooldownChrome: true,
@@ -1884,6 +1908,22 @@ function setCompactTeamName(el, fullName) {
     el.title = String(fullName);
   } else {
     el.removeAttribute("title");
+  }
+}
+
+/** Рейтинг: максимум 5 символов + «…», полное имя в title. */
+const LEADERBOARD_NAME_MAX_CHARS = 5;
+
+function setLeaderboardRowTeamName(el, fullName) {
+  if (!el) return;
+  const s = String(fullName ?? "").trim();
+  const chars = [...s];
+  if (chars.length <= LEADERBOARD_NAME_MAX_CHARS) {
+    el.textContent = s;
+    el.removeAttribute("title");
+  } else {
+    el.textContent = `${chars.slice(0, LEADERBOARD_NAME_MAX_CHARS).join("")}…`;
+    el.title = s;
   }
 }
 
@@ -2322,7 +2362,7 @@ function renderLeaderboard(msg) {
     em.textContent = row.emoji || "";
     const name = document.createElement("span");
     name.className = "lb-row__name";
-    setCompactTeamName(name, row.name || "");
+    setLeaderboardRowTeamName(name, row.name || "");
     const scoreEl = document.createElement("span");
     scoreEl.className = "lb-row__score";
     const sc = typeof row.score === "number" ? row.score : null;
@@ -3376,12 +3416,13 @@ function notifyReject(reason) {
   const telegramAlert = hard && reason !== "team_eliminated";
   showPlacementFeedback(text, hard ? "error" : "warn", {
     telegramAlert,
-    /* Дубль: тот же текст на placement-banner и в строке таймера — выглядит как два разных предупреждения */
+    /* Только верхняя плашка — строка таймера занята подсказкой need_telegram */
     skipCooldownChrome: reason === "need_telegram",
   });
   if (reason === "not_adjacent" || reason === "enemy_base_not_adjacent") {
     remindInvalidPlacementBase(false);
   }
+  playUiError();
 }
 
 /** HP полоски флага: якорь + lastHitAt и при наличии снимок effectiveHp с сервера (реген без рассинхрона). */
@@ -3412,6 +3453,38 @@ function computeClientFlagDisplayEffHp(raw, nowMs) {
     }
   }
   return Math.min(maxH, Math.max(0, eff));
+}
+
+function getClientMyMainBaseHpRatio01(nowMs = Date.now()) {
+  if (myTeamId == null) return 1;
+  const raw = flagCaptureClientState.get(clientMainFlagKey(myTeamId));
+  return computeClientFlagDisplayEffHp(raw, nowMs) / FLAG_BASE_MAX_HP;
+}
+
+function syncReactiveMusicFromMain() {
+  let isolationMyTeam = false;
+  if (myTeamId != null && territoryIsolationCellMeta.size) {
+    for (const m of territoryIsolationCellMeta.values()) {
+      if ((m.teamId | 0) === (myTeamId | 0)) {
+        isolationMyTeam = true;
+        break;
+      }
+    }
+  }
+  syncReactiveMusic({
+    now: Date.now(),
+    hasTeam: myTeamId != null,
+    spectator: !!spectatorMode,
+    lastCellUntil: myTerritoryLastCellUntil,
+    territoryDangerUntil: myTerritoryDangerUntil,
+    territoryCellsRemaining: lastTeamDangerCellsRemaining,
+    flagCriticalUntil: myFlagCriticalUntil,
+    flagUnderAttackUntil: myFlagUnderAttackUntil,
+    mainBaseHpRatio: getClientMyMainBaseHpRatio01(),
+    isolationMyTeam,
+    combatBumpUntil: getCombatBumpUntil(),
+    nukeAfterglowUntil: nukeAftermathUntilMs,
+  });
 }
 
 function syncFlagCaptureStateFromMeta(flags) {
@@ -3557,6 +3630,7 @@ function notifyPurchaseError(reason) {
     reason === "team_eliminated" || reason === "bad request" || reason === "not available";
   showPlacementFeedback(text, severe ? "error" : "warn", { telegramAlert: false });
   if (reason === "not_adjacent") remindInvalidPlacementBase(false);
+  playUiError();
 }
 
 const ROUND_END_BANNER_MS = 10 * 60 * 1000;
@@ -3748,6 +3822,7 @@ function computeClientQuantumFarmIncomePer5s() {
 function playQuantumFarmIncomeClientFx(quants) {
   const q = quants | 0;
   if (q < 1 || spectatorMode) return;
+  playQuantumIncomeTick();
   const tid = myTeamId | 0;
   if (!tid || !quantumFarmsMeta.length) return;
   const tr = getVfxTransform();
@@ -3985,6 +4060,7 @@ function updateToolbarHud() {
   updateQuickBuyBuffRings();
   syncToolbarHeightCssVar();
   syncEventBanner();
+  syncReactiveMusicFromMain();
 }
 
 /** Высота шапки для отступа лидерборда; всегда в пределах [34px … --toolbar-h-max], без раздувания на весь экран. */
@@ -4187,7 +4263,8 @@ function applyGlobalPurchaseVfx(msg) {
       const gxi = gx | 0;
       const gyi = gy | 0;
       runNukeFlashPresentation(gxi, gyi);
-      playNukeBombImpactSound();
+      playBombExplosion();
+      bumpCombat(4500);
       applyNukeAftermathFromEpicenter(gxi, gyi);
       const pos = gridBlastCenterClientPx(gxi, gyi);
       spawnFloatingText(floatFxHost, "УДАР!", pos, "float-fx__pop--raid");
@@ -4257,6 +4334,7 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
+    playTerritoryExpand();
     return;
   }
   if (kind === "massCapture" && hasGrid) {
@@ -4274,6 +4352,7 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
+    playTerritoryExpand();
     return;
   }
   if (kind === "zone12Capture" && hasGrid) {
@@ -4291,6 +4370,7 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
+    playTerritoryExpand();
     return;
   }
   if (kind === "militaryBase" && hasGrid) {
@@ -4307,6 +4387,7 @@ function applyGlobalPurchaseVfx(msg) {
         flushBoardVfxFrame();
       });
     }
+    playTerritoryExpand();
     scheduleDraw({
       dirty: { gx0: gxi, gy0: gyi, gx1: gxi + FLAG_SPAWN_SIZE - 1, gy1: gyi + FLAG_SPAWN_SIZE - 1 },
     });
@@ -4353,7 +4434,7 @@ function handlePurchaseOk(msg) {
     showPlacementFeedback(
       "Передовая база на карте — расширяйтесь от неё, но держите связь с главной базой.",
       "success",
-      { telegramAlert: false, skipEventBanner: true }
+      { telegramAlert: false }
     );
     try {
       window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
@@ -4367,6 +4448,7 @@ function handlePurchaseOk(msg) {
   }
   recordQuickBuyAfterPurchase(kind, msg);
   applyShopPurchaseSuccessUi(msg);
+  playPurchaseSuccess();
 }
 
 function ensureShopBtnDefaultLabels() {
@@ -4494,6 +4576,31 @@ function quickBuyShortLabel(entry) {
   return "?";
 }
 
+/** Иконка в круглой FAB-кнопке (без крупных подписей). */
+function quickBuyFabGlyphMeta(entry) {
+  if (entry.action === "personalRecovery") return { char: "⚡", glyphClass: "" };
+  if (entry.action === "teamRecovery") return { char: "👥", glyphClass: "" };
+  if (entry.action === "zoneCapture") return { char: "4", glyphClass: " quick-buy-rail__glyph--num" };
+  if (entry.action === "massCapture") return { char: "6", glyphClass: " quick-buy-rail__glyph--num" };
+  if (entry.action === "zone12Capture")
+    return { char: "12", glyphClass: " quick-buy-rail__glyph--num quick-buy-rail__glyph--num12" };
+  if (entry.action === "nukeBomb") return { char: "☢", glyphClass: "" };
+  if (entry.action === "militaryBase") return { char: "⛺", glyphClass: "" };
+  return { char: "?", glyphClass: "" };
+}
+
+/** Краткое имя для aria-label на FAB. */
+function quickBuyAriaName(entry) {
+  if (entry.action === "personalRecovery") return `Личное ускорение, ${entry.tierSec} с`;
+  if (entry.action === "teamRecovery") return `Командное ускорение, ${entry.tierSec} с`;
+  if (entry.action === "zoneCapture") return "Захват зоны 4×4";
+  if (entry.action === "massCapture") return "Масс-захват 6×6";
+  if (entry.action === "zone12Capture") return "Зона 12×12";
+  if (entry.action === "nukeBomb") return "Тактическая бомба";
+  if (entry.action === "militaryBase") return "Плацдарм";
+  return "Покупка";
+}
+
 function playerCanAffordQuickBuy(entry) {
   const q = getQuickBuyPriceQuant(entry);
   if (!q) return false;
@@ -4596,7 +4703,7 @@ function executeQuickBuy(entry) {
   }
 }
 
-const QUICK_BUY_RING_R = 14;
+const QUICK_BUY_RING_R = 10;
 const QUICK_BUY_RING_C = 2 * Math.PI * QUICK_BUY_RING_R;
 
 function renderQuickBuyRail() {
@@ -4622,7 +4729,7 @@ function renderQuickBuyRail() {
     if (!q) continue;
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "quick-buy-rail__btn";
+    btn.className = "quick-buy-rail__btn quick-buy-rail__btn--fab";
     btn.dataset.action = entry.action;
     if (entry.tierSec != null) btn.dataset.tierSec = String(entry.tierSec);
     const blocked = isQuickBuyEntryBlocked(entry);
@@ -4642,75 +4749,63 @@ function renderQuickBuyRail() {
       btn.title = `${short} · ${q} кв. — быстрая покупка`;
     }
     btn.dataset.titleBase = btn.title;
+    btn.setAttribute("aria-label", `${quickBuyAriaName(entry)}, ${q} квантов`);
+
+    const fab = document.createElement("span");
+    fab.className = "quick-buy-rail__fab";
 
     const isRecovery =
       entry.action === "personalRecovery" || entry.action === "teamRecovery";
+    const { char: glyphChar, glyphClass } = quickBuyFabGlyphMeta(entry);
 
     if (isRecovery) {
+      fab.classList.add("quick-buy-rail__fab--recovery");
       btn.classList.add(
         entry.action === "teamRecovery"
           ? "quick-buy-rail__btn--kind-team"
           : "quick-buy-rail__btn--kind-personal"
       );
-      const face = document.createElement("div");
-      face.className = "quick-buy-rail__face";
-
       const orbit = document.createElement("div");
       orbit.className = "quick-buy-rail__orbit";
       orbit.setAttribute("aria-hidden", "true");
       const svgNs = "http://www.w3.org/2000/svg";
       const svg = document.createElementNS(svgNs, "svg");
       svg.setAttribute("class", "quick-buy-rail__svg");
-      svg.setAttribute("viewBox", "0 0 40 40");
+      svg.setAttribute("viewBox", "0 0 36 36");
       const track = document.createElementNS(svgNs, "circle");
       track.setAttribute("class", "quick-buy-rail__ring-track");
-      track.setAttribute("cx", "20");
-      track.setAttribute("cy", "20");
+      track.setAttribute("cx", "18");
+      track.setAttribute("cy", "18");
       track.setAttribute("r", String(QUICK_BUY_RING_R));
       track.setAttribute("fill", "none");
       const arc = document.createElementNS(svgNs, "circle");
       arc.setAttribute("class", "quick-buy-rail__ring-arc");
-      arc.setAttribute("cx", "20");
-      arc.setAttribute("cy", "20");
+      arc.setAttribute("cx", "18");
+      arc.setAttribute("cy", "18");
       arc.setAttribute("r", String(QUICK_BUY_RING_R));
       arc.setAttribute("fill", "none");
-      arc.setAttribute("transform", "rotate(-90 20 20)");
+      arc.setAttribute("transform", "rotate(-90 18 18)");
       arc.style.strokeDasharray = String(QUICK_BUY_RING_C);
       arc.style.strokeDashoffset = String(QUICK_BUY_RING_C);
       svg.appendChild(track);
       svg.appendChild(arc);
       orbit.appendChild(svg);
-
-      const inner = document.createElement("div");
-      inner.className = "quick-buy-rail__orbit-inner";
-
-      const badge = document.createElement("span");
-      badge.className = "quick-buy-rail__source-badge";
-      badge.textContent = entry.action === "teamRecovery" ? "Команда" : "Лично";
-
-      const label = document.createElement("span");
-      label.className = "quick-buy-rail__label";
-      label.textContent = short;
-      const price = document.createElement("span");
-      price.className = "quick-buy-rail__price";
-      price.textContent = `${q} кв.`;
-
-      inner.appendChild(badge);
-      inner.appendChild(label);
-      inner.appendChild(price);
-      face.appendChild(orbit);
-      face.appendChild(inner);
-      btn.appendChild(face);
-    } else {
-      const label = document.createElement("span");
-      label.className = "quick-buy-rail__label";
-      label.textContent = short;
-      const price = document.createElement("span");
-      price.className = "quick-buy-rail__price";
-      price.textContent = `${q} кв.`;
-      btn.appendChild(label);
-      btn.appendChild(price);
+      fab.appendChild(orbit);
     }
+
+    const glyph = document.createElement("span");
+    glyph.className = `quick-buy-rail__glyph${glyphClass}`;
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = glyphChar;
+
+    const cost = document.createElement("span");
+    cost.className = "quick-buy-rail__cost";
+    cost.setAttribute("aria-hidden", "true");
+    cost.textContent = String(q);
+
+    fab.appendChild(glyph);
+    fab.appendChild(cost);
+    btn.appendChild(fab);
 
     host.appendChild(btn);
   }
@@ -5611,6 +5706,8 @@ function connectWs() {
       }
       const ecx = typeof msg.cx === "number" && Number.isFinite(msg.cx) ? msg.cx | 0 : NaN;
       const ecy = typeof msg.cy === "number" && Number.isFinite(msg.cy) ? msg.cy | 0 : NaN;
+      playBombExplosion();
+      bumpCombat(4500);
       if (Number.isFinite(ecx) && Number.isFinite(ecy)) {
         applyNukeAftermathFromEpicenter(ecx, ecy);
       }
@@ -5707,6 +5804,8 @@ function connectWs() {
               const col = aid ? teamColor(aid) : "#ffaa66";
               boardVfx.flagBaseHitImpact(fgx, fgy, col, getVfxTransform());
               flushBoardVfxFrame();
+              playFlagBaseHit();
+              bumpCombat(1600);
             }
           }
           if ((did | 0) === (myTeamId | 0) && hp <= 1) {
@@ -5728,6 +5827,7 @@ function connectWs() {
         myFlagUnderAttackUntil = Date.now() + 16_000;
         const mx = typeof msg.maxHp === "number" ? msg.maxHp | 0 : FLAG_BASE_MAX_HP;
         const h = typeof msg.hp === "number" ? msg.hp | 0 : mx - 1;
+        playAlertBaseUnderAttack();
         showFlagAlertBanner(`ВАША БАЗА ПОД АТАКОЙ — ${h} / ${mx} HP`);
         try {
           window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("warning");
@@ -6208,6 +6308,7 @@ function connectWs() {
       baseReminderUntil = 0;
       myTerritoryDangerUntil = 0;
       myTerritoryLastCellUntil = 0;
+      lastTeamDangerCellsRemaining = 999;
       const openTeamList = pendingLeaveToTeamList;
       const openCreate = pendingLeaveToCreate;
       pendingLeaveToTeamList = false;
@@ -6344,20 +6445,24 @@ function connectWs() {
       if (!myTeamId || (tid | 0) !== (myTeamId | 0)) return;
       const kind = typeof msg.kind === "string" ? msg.kind : "";
       if (kind === "connected") {
+        playQuantumConnect();
         showPlacementFeedback(
           "Квантовая ферма в штурме центра: команда получает +1 квант / 5 с с этой точки.",
           "ok",
           { telegramAlert: false }
         );
       } else if (kind === "disconnected") {
+        playQuantumDisconnect();
         showPlacementFeedback(
           "Квантовая ферма потеряна — доход с ключевой точки остановлен, бейте центр.",
           "warn",
           { telegramAlert: false }
         );
       } else if (kind === "lost") {
+        playQuantumDisconnect();
         showPlacementFeedback("Враг отжал квантовую ферму у центра карты.", "warn", { telegramAlert: false });
       } else if (kind === "captured_from") {
+        playQuantumConnect();
         showPlacementFeedback("Ваша команда захватила квантовую ферму — контроль центра усилен.", "ok", {
           telegramAlert: false,
         });
@@ -6426,6 +6531,8 @@ function connectWs() {
     if (msg.type === "teamDanger") {
       if ((msg.teamId | 0) !== (myTeamId | 0)) return;
       const n = msg.cellsRemaining | 0;
+      lastTeamDangerCellsRemaining = n;
+      if (n <= 6) playAlertLastCells();
       myTerritoryDangerUntil = Date.now() + 9000;
       const lines = [
         `⚠ Мало территории: осталось ${n} клет. База под угрозой!`,
@@ -6446,6 +6553,8 @@ function connectWs() {
       const now = Date.now();
       myTerritoryLastCellUntil = now + 14000;
       myTerritoryDangerUntil = Math.max(myTerritoryDangerUntil, now + 14000);
+      lastTeamDangerCellsRemaining = 1;
+      playAlertLastCell();
       showTerritoryDramaBanner("ПОСЛЕДНЯЯ КЛЕТКА! ПОТЕРЯЕТЕ ЕЁ — ВЫ ЛЕТИТЕ!", ALERT_AUTO_HIDE_MS, true);
       try {
         window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
@@ -8640,6 +8749,8 @@ function placePixel(gx, gy) {
 
     if (onEnemyFlag) {
       sendPixelOnline(gx, gy);
+      playPixelPlace();
+      bumpCombat(2200);
       updateToolbarHud();
       return;
     }
@@ -8651,12 +8762,15 @@ function placePixel(gx, gy) {
     }
     scheduleDraw({ dirty: { gx0: gx, gy0: gy, gx1: gx, gy1: gy } });
     sendPixelOnline(gx, gy);
+    playPixelPlace();
+    bumpCombat(1800);
     updateToolbarHud();
   } else {
     pixels.set(`${gx},${gy}`, selectedColor);
     if (boardVfx) {
       boardVfx.popPixel(gx, gy, PALETTE[selectedColor] ?? "#ffffff", getVfxTransform());
     }
+    playPixelPlace();
     if (COOLDOWN_MS > 0) {
       updateToolbarHud();
     }
@@ -8929,6 +9043,7 @@ async function bootstrap() {
   initTelegram();
   await loadRegions();
   loadFromStorage();
+  initGameAudio();
   initEventPresentation();
   migrateLegacySessionStorage();
   clearSoloFromSession();

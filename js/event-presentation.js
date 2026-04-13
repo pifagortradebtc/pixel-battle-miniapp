@@ -3,6 +3,8 @@
  * Не смешивать с игровой логикой — только отображение и лёгкие audio-sting.
  */
 
+import { playPresentationSting } from "./game-audio.js";
+
 /** @type {HTMLElement | null} */
 let cinematicRoot = null;
 /** @type {HTMLElement | null} */
@@ -37,9 +39,6 @@ let lastRoundEventStartMsg = null;
 /** @type {{ title: string; subtitle: string; theme: string; holdMs?: number; sound?: string; kicker?: string }[]} */
 const cinematicQueue = [];
 let cinematicPlaying = false;
-
-/** @type {AudioContext | null} */
-let audioCtx = null;
 
 function escapeHtml(s) {
   return String(s)
@@ -208,89 +207,8 @@ function appendRoundEventHudFallback(chips, ge) {
   });
 }
 
-/**
- * @param {"sine"|"triangle"|"square"|"sawtooth"} type
- * @param {number} f0
- * @param {number} f1
- * @param {number} peakGain
- * @param {number} durSec
- * @param {GainNode} master
- * @param {number} now
- */
-function playOscThrough(type, f0, f1, peakGain, durSec, master, now) {
-  if (!audioCtx) return;
-  const osc = audioCtx.createOscillator();
-  osc.type = type;
-  const g = audioCtx.createGain();
-  g.gain.setValueAtTime(0.0001, now);
-  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peakGain), now + 0.018);
-  g.gain.exponentialRampToValueAtTime(0.0001, now + durSec);
-  osc.frequency.setValueAtTime(f0, now);
-  if (f1 !== f0) {
-    if (type === "triangle" || type === "sine")
-      osc.frequency.exponentialRampToValueAtTime(Math.max(20, f1), now + durSec * 0.92);
-    else osc.frequency.linearRampToValueAtTime(f1, now + durSec * 0.85);
-  }
-  osc.connect(g);
-  g.connect(master);
-  osc.start(now);
-  osc.stop(now + durSec + 0.04);
-}
-
 function playSting(kind) {
-  try {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return;
-    if (!audioCtx) audioCtx = new Ctx();
-    if (audioCtx.state === "suspended") void audioCtx.resume();
-
-    const now = audioCtx.currentTime;
-    const master = audioCtx.createGain();
-    if (kind === "nuke-bomb") {
-      master.gain.setValueAtTime(0.0001, now);
-      master.gain.exponentialRampToValueAtTime(0.34, now + 0.032);
-      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.78);
-      master.connect(audioCtx.destination);
-      playOscThrough("triangle", 44, 15, 0.21, 0.64, master, now);
-      playOscThrough("sine", 102, 38, 0.11, 0.52, master, now + 0.035);
-      playOscThrough("square", 228, 88, 0.052, 0.3, master, now + 0.1);
-      return;
-    }
-    const epic = kind === "base_captured" || kind === "final-ten";
-    const tail = epic ? 0.58 : 0.44;
-    master.gain.setValueAtTime(0.0001, now);
-    master.gain.exponentialRampToValueAtTime(epic ? 0.28 : 0.22, now + 0.024);
-    master.gain.exponentialRampToValueAtTime(0.0001, now + tail);
-    master.connect(audioCtx.destination);
-
-    if (kind === "base_captured") {
-      playOscThrough("triangle", 95, 42, 0.14, 0.52, master, now);
-      playOscThrough("sine", 190, 95, 0.07, 0.38, master, now + 0.04);
-      playOscThrough("square", 380, 190, 0.04, 0.12, master, now + 0.12);
-      return;
-    }
-    if (kind === "final-ten") {
-      playOscThrough("sine", 196, 392, 0.11, 0.42, master, now);
-      playOscThrough("sine", 293.66, 440, 0.06, 0.36, master, now + 0.05);
-      return;
-    }
-
-    if (kind === "gold" || kind === "center") {
-      playOscThrough("sine", 880, 1320, 0.12, 0.32, master, now);
-    } else if (kind === "seismic" || kind === "seismic-incoming") {
-      playOscThrough("triangle", 58, 26, 0.14, 0.4, master, now);
-    } else if (kind === "compression" || kind === "final-phase") {
-      playOscThrough("sawtooth", 110, 168, 0.1, 0.34, master, now);
-    } else if (kind === "economic" || kind === "boom" || kind === "recession") {
-      playOscThrough("square", 330, 440, 0.1, 0.28, master, now);
-    } else if (kind === "dramatic") {
-      playOscThrough("sine", 220, 660, 0.1, 0.36, master, now);
-    } else {
-      playOscThrough("sine", 523, 784, 0.1, 0.3, master, now);
-    }
-  } catch {
-    /* ignore */
-  }
+  playPresentationSting(String(kind || "default"));
 }
 
 function kickerFromThemeAndTitle(theme, title) {
