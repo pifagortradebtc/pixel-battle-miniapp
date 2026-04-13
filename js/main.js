@@ -752,6 +752,18 @@ let connectingHangTimer = null;
 /** Throttle для повторной отправки clientProfile при возврате из фона (например после оплаты) */
 let lastVisibilityWalletRefreshAt = 0;
 
+/** Защита от чрезмерно больших JSON по WebSocket (память / parse). */
+const MAX_WS_INCOMING_CHARS = 5_000_000;
+
+/**
+ * Пачка с сервера: больше порога — не вызывать pop/shield на каждую клетку (на телефоне это главный источник микрофризов).
+ * Одиночные pixel / маленькие батчи визуально без изменений.
+ */
+const PIXEL_BATCH_VFX_MAX_CELLS = 22;
+
+/** Минимум между перерисовками DOM рейтинга (stats); реже — меньше работы на слабых телефонах. */
+const STATS_UI_MIN_INTERVAL_MS = 300;
+
 /** Онлайн-режим: есть URL WebSocket */
 let wantOnline = false;
 /** Успешно выбрана команда (онлайн) */
@@ -2398,7 +2410,39 @@ function syncLeaderboardPanelMode() {
   );
 }
 
-function renderLeaderboard(msg) {
+let statsUiThrottleTimer = null;
+/** @type {object | null} */
+let statsUiPending = null;
+let statsUiLastApplyAt = 0;
+
+function flushThrottledStatsUi() {
+  if (statsUiThrottleTimer != null) {
+    clearTimeout(statsUiThrottleTimer);
+    statsUiThrottleTimer = null;
+  }
+  if (!statsUiPending) return;
+  const msg = statsUiPending;
+  statsUiPending = null;
+  statsUiLastApplyAt = Date.now();
+  renderLeaderboardImmediate(msg);
+}
+
+/** Отложенное обновление таблицы очков: сливает частые пакеты stats в один проход. */
+function scheduleThrottledStatsUi(msg) {
+  statsUiPending = msg;
+  const now = Date.now();
+  if (now - statsUiLastApplyAt >= STATS_UI_MIN_INTERVAL_MS) {
+    flushThrottledStatsUi();
+    return;
+  }
+  if (statsUiThrottleTimer != null) return;
+  statsUiThrottleTimer = setTimeout(() => {
+    statsUiThrottleTimer = null;
+    flushThrottledStatsUi();
+  }, STATS_UI_MIN_INTERVAL_MS - (now - statsUiLastApplyAt));
+}
+
+function renderLeaderboardImmediate(msg) {
   if (!onlineCountEl || !leaderboardListEl) return;
   lastStatsPayload = msg;
   if (msg.globalEvent) {
@@ -2508,6 +2552,14 @@ function renderLeaderboard(msg) {
     lastMyTeamScoreShare = share;
   }
   syncEventBanner();
+}
+
+function clientPrefersReducedMotion() {
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches === true;
+  } catch {
+    return false;
+  }
 }
 
 function applyTeamDisplay(teamId, name, emoji, color) {
@@ -3198,7 +3250,7 @@ function setupCreateTeamUi() {
       /* ignore */
     }
     syncLeaderboardPanelMode();
-    if (lastStatsPayload) renderLeaderboard(lastStatsPayload);
+    if (lastStatsPayload) renderLeaderboardImmediate(lastStatsPayload);
   });
   roundEndedDismissBtn?.addEventListener("click", hideRoundEndedOverlay);
   btnToolbarBase?.addEventListener("click", () => {
@@ -5396,6 +5448,10 @@ function startMapAnimLoop() {
   const tick = () => {
     mapAnimTimer = null;
     if (!wantOnline || !getWsUrl()) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      mapAnimTimer = setTimeout(tick, 900);
+      return;
+    }
     if (!mapDrawUseLite()) drawFull(performance.now());
     const base =
       lastDrawVisibleCellCount > 16000 ? 160
@@ -5416,6 +5472,11 @@ function stopMapAnimLoop() {
 }
 
 function vfxLoop(now) {
+  /* В фоне (свёрнули Telegram) не крутим VFX — меньше CPU/GPU и шанс, что система убьёт WebView. */
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    requestAnimationFrame(vfxLoop);
+    return;
+  }
   applySeismicTremorBodyOverride();
   try {
     if (boardVfx && canvasVfx) {
@@ -5914,7 +5975,9 @@ function connectWs() {
   ws.addEventListener("message", (ev) => {
     let msg;
     try {
-      msg = JSON.parse(ev.data);
+      const raw = ev.data;
+      if (typeof raw === "string" && raw.length > MAX_WS_INCOMING_CHARS) return;
+      msg = JSON.parse(typeof raw === "string" ? raw : String(raw));
     } catch {
       return;
     }
@@ -6520,7 +6583,7 @@ function connectWs() {
       return;
     }
     if (msg.type === "stats") {
-      renderLeaderboard(msg);
+      scheduleThrottledStatsUi(msg);
       return;
     }
     if (msg.type === "counts") {
@@ -6913,6 +6976,63 @@ function connectWs() {
       }
       return;
     }
+    if (msg.type === "pixelBatch") {
+      const fmt = msg.pixelFormat === "v2" ? "v2" : "v1";
+      const list = Array.isArray(msg.cells) ? msg.cells : [];
+      const allowBatchVfx =
+        list.length <= PIXEL_BATCH_VFX_MAX_CELLS && !clientPrefersReducedMotion();
+      /** @type {{ gx0: number, gy0: number, gx1: number, gy1: number } | null} */
+      let dr = null;
+      let any = false;
+      for (let i = 0; i < list.length; i++) {
+        const row = list[i];
+        if (!Array.isArray(row) || row.length < 3) continue;
+        any = true;
+        const x = row[0] | 0;
+        const y = row[1] | 0;
+        const t = row[2];
+        const newSh = fmt === "v2" && row.length >= 5 ? Number(row[4]) || 0 : 0;
+        const pk = `${x},${y}`;
+        if (x < 0 || x >= gridW || y < 0 || y >= gridH) {
+          pixels.delete(pk);
+          if (optimisticPixelPending?.key === pk) optimisticPixelPending = null;
+          dr = mergeDirtyRects(dr, { gx0: x, gy0: y, gx1: x, gy1: y });
+          continue;
+        }
+        if (wantOnline && clientShouldIgnoreTerritoryPixelOnEnemyFlagAnchor(x, y, t | 0)) {
+          dr = mergeDirtyRects(dr, { gx0: x, gy0: y, gx1: x, gy1: y });
+          continue;
+        }
+        const skipOwnPop =
+          optimisticPixelPending && optimisticPixelPending.key === pk && t === myTeamId;
+        if (optimisticPixelPending && optimisticPixelPending.key === pk) {
+          optimisticPixelPending = null;
+        }
+        const prev = pixels.get(pk);
+        const prevSh = typeof prev === "object" && prev ? prev.shieldedUntil || 0 : 0;
+        pixels.set(pk, {
+          teamId: t,
+          shieldedUntil: newSh,
+        });
+        const tr = getVfxTransform();
+        const col = teamColor(t);
+        if (boardVfx && allowBatchVfx) {
+          if (!skipOwnPop) {
+            boardVfx.popPixel(x, y, col, tr);
+          }
+          if (newSh > Date.now() && newSh > prevSh) {
+            boardVfx.shieldBurst(x, y, col, tr);
+          }
+        }
+        dr = mergeDirtyRects(dr, { gx0: x, gy0: y, gx1: x, gy1: y });
+      }
+      if (any) {
+        if (dr) scheduleDraw({ dirty: dr });
+        else scheduleDraw();
+        schedulePersist();
+      }
+      return;
+    }
     if (msg.type === "pixel") {
       const x = msg.x | 0;
       const y = msg.y | 0;
@@ -6945,7 +7065,7 @@ function connectWs() {
       });
       const tr = getVfxTransform();
       const col = teamColor(msg.t);
-      if (boardVfx) {
+      if (boardVfx && !clientPrefersReducedMotion()) {
         if (!skipOwnPop) {
           boardVfx.popPixel(msg.x, msg.y, col, tr);
         }
@@ -9627,11 +9747,15 @@ async function bootstrap() {
   connectWs();
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible") return;
-    const now = Date.now();
-    if (now - lastVisibilityWalletRefreshAt < 2500) return;
-    lastVisibilityWalletRefreshAt = now;
-    sendClientProfileToServer();
+    if (document.visibilityState === "visible") {
+      const now = Date.now();
+      if (now - lastVisibilityWalletRefreshAt >= 2500) {
+        lastVisibilityWalletRefreshAt = now;
+        sendClientProfileToServer();
+      }
+      /* Один кадр карты после возврата — экран не «пустой» до следующего тика. */
+      scheduleDraw();
+    }
   });
 
   if (perfDebug) {

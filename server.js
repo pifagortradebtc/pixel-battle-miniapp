@@ -4,6 +4,7 @@
  * Запуск: npm start
  */
 
+import "dotenv/config";
 import http from "http";
 import fs from "fs";
 import path from "path";
@@ -39,6 +40,10 @@ import {
   DUEL_INSTANT_WIN_SCORE_SHARE,
 } from "./lib/tournament-flow.js";
 import { aggregateScoresFromPixels } from "./lib/scoring.js";
+import {
+  applyIncrementalTeamScorePixelStep,
+  fillMassSumFromAggregate,
+} from "./lib/team-score-incremental.js";
 import {
   buildBattleEventsClientPayload,
   cellsInManhattanBall,
@@ -212,6 +217,11 @@ const API_IPN_PER_MIN = Math.min(20000, Math.max(20, Number(process.env.API_IPN_
 const MAX_DEPOSIT_USDT = Math.min(1e9, Math.max(1, Number(process.env.MAX_DEPOSIT_USDT) || 100_000));
 const TELEGRAM_INITDATA_MAX_AGE_SEC = Math.min(604800, Math.max(120, Number(process.env.TELEGRAM_INITDATA_MAX_AGE_SEC) || 86400));
 const HTTP_BODY_MAX = Math.min(2_000_000, Math.max(4096, Number(process.env.HTTP_BODY_MAX) || 65536));
+/** Реже слать stats всем клиентам при всплесках событий — меньше JSON и перерисовок на телефонах. */
+const STATS_BROADCAST_DEBOUNCE_MS = Math.min(
+  5000,
+  Math.max(150, Number(process.env.STATS_BROADCAST_DEBOUNCE_MS) || 420)
+);
 
 const apiDepositLimiter = new SlidingWindowRateLimiter();
 const apiIpnLimiter = new SlidingWindowRateLimiter();
@@ -305,6 +315,23 @@ const MAX_PER_TEAM_FINAL = 2;
 const MAX_PLAYERS_ADVANCING_FROM_SEMI = 10;
 
 const ROUND_STATE_PATH = path.join(ROOT, "data", "round-state.json");
+/** Снимок карты для восстановления после рестарта (только лидер кластера или одиночный процесс). */
+const PIXELS_SNAPSHOT_PATH = path.join(DATA_DIR, "pixels-snapshot.json");
+const PIXELS_SNAPSHOT_TMP_PATH = path.join(DATA_DIR, "pixels-snapshot.json.tmp");
+const PIXELS_SNAPSHOT_DISABLE = /^true$/i.test(String(process.env.PIXELS_SNAPSHOT_DISABLE || "").trim());
+const PIXELS_SNAPSHOT_DEBOUNCE_MS = Math.min(
+  120_000,
+  Math.max(800, Number(process.env.PIXELS_SNAPSHOT_DEBOUNCE_MS) || 3000)
+);
+const PIXELS_SNAPSHOT_INTERVAL_MS = Math.min(
+  600_000,
+  Math.max(5000, Number(process.env.PIXELS_SNAPSHOT_INTERVAL_MS) || 45_000)
+);
+/** Макс. клеток в одном WS/Redis кадре pixelBatch (меньше — стабильнее при слабых сетях). */
+const PIXEL_BATCH_MAX_CELLS = Math.min(
+  4000,
+  Math.max(120, Number(process.env.PIXEL_BATCH_MAX_CELLS) || 800)
+);
 
 /** Токен бота и список user id админов (через запятую), которые могут отправить «go» для старта 1-го раунда */
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
@@ -588,21 +615,65 @@ function sanitizePlayerKey(s) {
   return t;
 }
 
+/**
+ * Дебаунс записи economy (lastActionAt и др.) на диск: не блокировать event loop
+ * `await walletStore.save()` на каждый пиксель (особенно WalletPg.save() проходил по всему кэшу users).
+ */
+const economyFlushPending = new Set();
+let economyFlushTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+const ECONOMY_FLUSH_MS = Math.min(300, Math.max(40, Number(process.env.ECONOMY_FLUSH_MS) || 100));
+
+function scheduleEconomyFlushForPlayer(pk) {
+  const k = sanitizePlayerKey(pk);
+  if (!k) return;
+  economyFlushPending.add(k);
+  if (economyFlushTimer != null) return;
+  economyFlushTimer = setTimeout(() => {
+    economyFlushTimer = null;
+    const keys = [...economyFlushPending];
+    economyFlushPending.clear();
+    void flushEconomyKeysNow(keys);
+  }, ECONOMY_FLUSH_MS);
+}
+
+async function flushEconomyKeysNow(keys) {
+  if (!keys.length) return;
+  try {
+    if (typeof walletStore.flushUsersEconomy === "function") {
+      await walletStore.flushUsersEconomy(keys);
+    } else {
+      await walletStore.save();
+    }
+  } catch (e) {
+    console.warn("[economy flush]", e?.message || e);
+  }
+}
+
 /** Сколько WS сейчас держат этот playerKey (несколько вкладок). */
 const onlinePkRefCounts = new Map();
+/** Инкремент при смене «есть ли хотя бы одна вкладка» у ключа или состава teamMemberKeys — инвалидация кэша синергии. */
+let synergyOnlineEpoch = 0;
 
 function trackOnlinePk(pk) {
   const k = sanitizePlayerKey(pk);
   if (!k) return;
-  onlinePkRefCounts.set(k, (onlinePkRefCounts.get(k) || 0) + 1);
+  const prev = onlinePkRefCounts.get(k) || 0;
+  onlinePkRefCounts.set(k, prev + 1);
+  if (prev === 0) synergyOnlineEpoch++;
 }
 
 function untrackOnlinePk(pk) {
   const k = sanitizePlayerKey(pk);
   if (!k) return;
-  const n = (onlinePkRefCounts.get(k) || 0) - 1;
-  if (n <= 0) onlinePkRefCounts.delete(k);
-  else onlinePkRefCounts.set(k, n);
+  const prev = onlinePkRefCounts.get(k) || 0;
+  if (prev <= 0) return;
+  const n = prev - 1;
+  if (n <= 0) {
+    onlinePkRefCounts.delete(k);
+    synergyOnlineEpoch++;
+  } else {
+    onlinePkRefCounts.set(k, n);
+  }
 }
 
 function isPlayerKeyOnline(pk) {
@@ -758,6 +829,7 @@ function addTeamMemberKey(teamId, playerKey) {
   if (!pk) return;
   if (!teamMemberKeys.has(teamId)) teamMemberKeys.set(teamId, new Set());
   teamMemberKeys.get(teamId).add(pk);
+  synergyOnlineEpoch++;
 }
 
 function removeTeamMemberKey(teamId, playerKey) {
@@ -765,6 +837,7 @@ function removeTeamMemberKey(teamId, playerKey) {
   if (!pk || !teamMemberKeys.has(teamId)) return;
   teamMemberKeys.get(teamId).delete(pk);
   if (teamMemberKeys.get(teamId).size === 0) teamMemberKeys.delete(teamId);
+  synergyOnlineEpoch++;
 }
 
 /** Сбрасывает ws.teamId, если команда удалена или этот playerKey не в составе (после смены раунда / рассинхрона). */
@@ -891,13 +964,52 @@ function getActiveManualBattleSlots(nowMs = Date.now()) {
   return out;
 }
 
+function manualBattleSlotsCacheSignature() {
+  if (manualBattleSlotsByCmd.size === 0) return "";
+  const arr = [...manualBattleSlotsByCmd.entries()].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return JSON.stringify(arr);
+}
+
+let battleSnapCacheKey = "";
+/** @type {import("./lib/battle-events.js").BattleScoringSnapshot | null} */
+let battleSnapCacheSnap = null;
+let battleClientPayloadCacheKey = "";
+/** @type {ReturnType<typeof buildBattleEventsClientPayload> | null} */
+let battleClientPayloadCache = null;
+let synergyMultCacheKey = "";
+/** @type {Map<number, number> | null} */
+let synergyMultCacheVal = null;
+
+/**
+ * Дорогой путь: computeBattleScoringSnapshot + mergeManualBattleSlots.
+ * Кэш по «логическому» ключу (время, окно боя, сетка, пауза, ручные слоты) — убирает дубли в buildStatsPayload + buildScoringContext в одну миллисекунду.
+ */
 function computeBattleScoringSnapshotWithManualBattle(nowMs, ctx) {
+  pruneExpiredManualBattleSlots(nowMs);
+  const cacheKey = [
+    nowMs | 0,
+    roundIndex | 0,
+    landGridLayoutSeq | 0,
+    ctx.playStartMs | 0,
+    ctx.battleEndMs | 0,
+    ctx.gridW | 0,
+    ctx.gridH | 0,
+    gamePaused ? 1 : 0,
+    pauseWallStartedAt | 0,
+    manualBattleSlotsCacheSignature(),
+  ].join("|");
+  if (cacheKey === battleSnapCacheKey && battleSnapCacheSnap != null) {
+    return battleSnapCacheSnap;
+  }
   const snap = computeBattleScoringSnapshot(nowMs, ctx);
   mergeManualBattleSlotsIntoSnapshot(snap, getActiveManualBattleSlots(nowMs), nowMs, ctx);
+  battleSnapCacheKey = cacheKey;
+  battleSnapCacheSnap = snap;
   return snap;
 }
 
 function broadcastManualBattleSyncAndStats() {
+  invalidateTeamScoresAggCache();
   broadcast({
     type: "manualBattleSync",
     slots: Object.fromEntries(manualBattleSlotsByCmd),
@@ -938,22 +1050,40 @@ function countOnlineMembersForTeam(teamId) {
   return n;
 }
 
+function synergyEligibleTeamIdsSig() {
+  const ids = [];
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    ids.push(t.id | 0);
+  }
+  ids.sort((a, b) => a - b);
+  return ids.join(",");
+}
+
 /**
  * Множитель синергии по командам (только очки территории), см. round timeline.
+ * Кэш при неизменных battleSnapCacheKey, составе команд, synergyOnlineEpoch — без обходов memberKeys (серии пикселей в одну миллисекунду).
  * @param {import("./lib/battle-events.js").BattleScoringSnapshot} snap
  */
 function buildSynergyMultByTeamMap(snap) {
   if (!snap?.teamSynergy?.active) return null;
   const minO = snap.teamSynergy.minOnline | 0;
   const mult = typeof snap.teamSynergy.mult === "number" ? snap.teamSynergy.mult : 1.12;
+  const teamSig = synergyEligibleTeamIdsSig();
+  const fullKey = `${battleSnapCacheKey}|${minO}|${mult}|${teamSig}|${synergyOnlineEpoch | 0}`;
+  if (fullKey === synergyMultCacheKey && synergyMultCacheVal) {
+    return synergyMultCacheVal;
+  }
   /** @type {Map<number, number>} */
   const m = new Map();
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     const tid = t.id | 0;
-    if (countOnlineMembersForTeam(tid) >= minO) m.set(tid, mult);
-    else m.set(tid, 1);
+    const n = countOnlineMembersForTeam(tid);
+    m.set(tid, n >= minO ? mult : 1);
   }
+  synergyMultCacheKey = fullKey;
+  synergyMultCacheVal = m;
   return m;
 }
 
@@ -973,7 +1103,12 @@ function getGlobalEventPayload(nowMs = Date.now()) {
     };
   }
   const snap = computeBattleScoringSnapshotWithManualBattle(nowMs, ctx);
-  const be = buildBattleEventsClientPayload(snap, nowMs, ctx.battleEndMs);
+  let be = battleClientPayloadCache;
+  if (battleClientPayloadCacheKey !== battleSnapCacheKey || !be) {
+    be = buildBattleEventsClientPayload(snap, nowMs, ctx.battleEndMs);
+    battleClientPayloadCacheKey = battleSnapCacheKey;
+    battleClientPayloadCache = be;
+  }
   const pr = be.primary;
   /** @type {Record<string, unknown> | undefined} */
   let debugRoundEvents;
@@ -1080,6 +1215,7 @@ function computeSeismicClearData(defId) {
 
 function broadcastSeismicImpact(cleared, uniqueEventKey) {
   if (!cleared.length) return;
+  invalidateTeamScoresAggCache();
   for (let i = 0; i < cleared.length; i++) {
     const x = cleared[i][0];
     const y = cleared[i][1];
@@ -1166,6 +1302,8 @@ function tickBattleEvents(nowMs) {
   if (!ctx) return;
 
   tickRoundEventTransitions(nowMs);
+  /* События боя меняют getCellValue — инкрементальное табло сбрасываем раз в тик (1 Гц). */
+  teamScoreStatsEpoch++;
 
   /* Автосейсмика по таймлайну отключена — только команда seismic / evt seismic в боте (лидер кластера). */
 }
@@ -1346,6 +1484,106 @@ function saveRoundState() {
     );
   } catch (e) {
     console.warn("round-state save:", e.message);
+  }
+}
+
+let pixelsSnapshotSeq = 0;
+let pixelsSnapshotDebounceTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+let pixelsSnapshotWriteInFlight = false;
+
+function shouldPersistPixelsSnapshot() {
+  if (PIXELS_SNAPSHOT_DISABLE || gameFinished) return false;
+  if (REDIS_URL && !isClusterLeader()) return false;
+  return !!landGrid;
+}
+
+function schedulePixelsSnapshotSave() {
+  if (!shouldPersistPixelsSnapshot()) return;
+  if (pixelsSnapshotDebounceTimer) clearTimeout(pixelsSnapshotDebounceTimer);
+  pixelsSnapshotDebounceTimer = setTimeout(() => {
+    pixelsSnapshotDebounceTimer = null;
+    void writePixelsSnapshotFileAsync();
+  }, PIXELS_SNAPSHOT_DEBOUNCE_MS);
+}
+
+function buildPixelsSnapshotJson() {
+  const body = fullPayloadObject();
+  return JSON.stringify({
+    v: 1,
+    seq: ++pixelsSnapshotSeq,
+    savedAtMs: Date.now(),
+    roundIndex,
+    gridW,
+    gridH,
+    pixelFormat: body.pixelFormat || "v2",
+    pixels: body.pixels,
+  });
+}
+
+async function writePixelsSnapshotFileAsync() {
+  if (!shouldPersistPixelsSnapshot() || pixelsSnapshotWriteInFlight) return;
+  pixelsSnapshotWriteInFlight = true;
+  try {
+    const json = buildPixelsSnapshotJson();
+    await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    await fs.promises.writeFile(PIXELS_SNAPSHOT_TMP_PATH, json, "utf8");
+    await fs.promises.rename(PIXELS_SNAPSHOT_TMP_PATH, PIXELS_SNAPSHOT_PATH);
+  } catch (e) {
+    console.warn("[pixels-snapshot] save:", e?.message || e);
+  } finally {
+    pixelsSnapshotWriteInFlight = false;
+  }
+}
+
+function writePixelsSnapshotSyncForShutdown() {
+  if (!shouldPersistPixelsSnapshot()) return;
+  try {
+    const json = buildPixelsSnapshotJson();
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(PIXELS_SNAPSHOT_TMP_PATH, json, "utf8");
+    fs.renameSync(PIXELS_SNAPSHOT_TMP_PATH, PIXELS_SNAPSHOT_PATH);
+  } catch (e) {
+    console.warn("[pixels-snapshot] shutdown save:", e?.message || e);
+  }
+}
+
+function loadPixelsSnapshotIfPresentSync() {
+  if (PIXELS_SNAPSHOT_DISABLE) return;
+  if (REDIS_URL && !isClusterLeader()) return;
+  try {
+    if (!fs.existsSync(PIXELS_SNAPSHOT_PATH)) return;
+    const raw = fs.readFileSync(PIXELS_SNAPSHOT_PATH, "utf8");
+    const j = JSON.parse(raw);
+    if (j.v !== 1 || !Array.isArray(j.pixels)) return;
+    if ((j.gridW | 0) !== gridW || (j.gridH | 0) !== gridH || (j.roundIndex | 0) !== roundIndex) {
+      console.warn("[pixels-snapshot] пропуск: другой roundIndex или размер сетки");
+      return;
+    }
+    if (typeof j.seq === "number" && Number.isFinite(j.seq)) pixelsSnapshotSeq = Math.max(pixelsSnapshotSeq, j.seq | 0);
+    invalidateTeamScoresAggCache();
+    const fmt = j.pixelFormat === "v2" ? "v2" : "v1";
+    let n = 0;
+    for (let i = 0; i < j.pixels.length; i++) {
+      const p = j.pixels[i];
+      if (!Array.isArray(p) || p.length < 3) continue;
+      const x = p[0] | 0;
+      const y = p[1] | 0;
+      if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+      if (!cellAllowsPixelPlacement(x, y)) continue;
+      if (fmt === "v2" && p.length >= 5) {
+        pixels.set(`${x},${y}`, {
+          teamId: p[2] | 0,
+          ownerPlayerKey: String(p[3] || "").slice(0, 128),
+          shieldedUntil: Number(p[4]) || 0,
+        });
+      } else {
+        pixels.set(`${x},${y}`, { teamId: p[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
+      }
+      n++;
+    }
+    console.log(`[pixels-snapshot] загружено клеток: ${n} (файл seq=${j.seq})`);
+  } catch (e) {
+    console.warn("[pixels-snapshot] load:", e?.message || e);
   }
 }
 
@@ -1542,6 +1780,8 @@ try {
 
 /** @type {Uint8Array | null} маска: 0 вода (нельзя ставить пиксель), ≠0 — суша. */
 let landGrid = null;
+/** Инкремент при каждой пересборке суши (invalidate кэша pickLandRectangle / scoring snapshot). */
+let landGridLayoutSeq = 0;
 /** @type {Uint8Array | null} 1 = можно ставить пиксель (суша по cells и не «вода» по RGB плаката). */
 let playableGrid = null;
 /** Веса клеток для очков (суша; по умолчанию 1; вода 0). */
@@ -1615,10 +1855,12 @@ function rebuildLandFromRound(ri) {
     scoreWeightGrid = null;
     landPixelsTotal = gridW * gridH;
     landWeightTotal = gridW * gridH;
+    landGridLayoutSeq++;
     return;
   }
 
   landGrid = new Uint8Array(gridW * gridH);
+  landGridLayoutSeq++;
   playableGrid = new Uint8Array(gridW * gridH);
   for (let y = 0; y < gridH; y++) {
     for (let x = 0; x < gridW; x++) {
@@ -1686,6 +1928,7 @@ function rebuildLandFromRound(ri) {
   } else {
     broadcast({ type: "quantumFarmsInit", farms: [] });
   }
+  invalidateTeamScoresAggCache();
   afterTerritoryMutation();
   applyTreasuresAfterLandRebuild();
 }
@@ -1778,6 +2021,42 @@ function recalculateAllTeamScores(nowMs = Date.now()) {
   let totalAvailableScore = 0;
   for (const a of agg.values()) totalAvailableScore += a.score;
   return { agg, totalAvailableScore };
+}
+
+/** Инкрементальное табло: M клеток, S = сумма v по клеткам, score = M * S (как в aggregateScoresFromPixels). */
+let teamScoreStatsEpoch = 0;
+let teamScoreCacheEpochSynced = -1;
+/** @type {Map<number, number>} */
+const teamStatsMass = new Map();
+/** @type {Map<number, number>} */
+const teamStatsSumV = new Map();
+
+function invalidateTeamScoresAggCache() {
+  teamScoreCacheEpochSynced = -1;
+  teamStatsMass.clear();
+  teamStatsSumV.clear();
+}
+
+function rebuildTeamScoresAggFromFullScan(nowMs = Date.now()) {
+  const r = recalculateAllTeamScores(nowMs);
+  fillMassSumFromAggregate(r.agg, teamStatsMass, teamStatsSumV);
+  teamScoreCacheEpochSynced = teamScoreStatsEpoch;
+}
+
+/**
+ * После одиночного pixels.set на (x,y): обновить кэш без полного прохода по карте.
+ * При рассинхроне — сброс кэша (следующий buildStatsPayload сделает full scan).
+ */
+function tryApplyIncrementalTeamScoreForPixel(x, y, prevVal, nextVal) {
+  if (teamScoreCacheEpochSynced < 0 || teamScoreCacheEpochSynced !== teamScoreStatsEpoch) return;
+  const nowMs = effectiveGameClockMs();
+  const ctx = buildScoringContext(nowMs);
+  if (!ctx) return;
+  const xi = x | 0;
+  const yi = y | 0;
+  if (xi < 0 || xi >= gridW || yi < 0 || yi >= gridH) return;
+  const step = applyIncrementalTeamScorePixelStep(xi, yi, prevVal, nextVal, ctx, pixelTeam, teamStatsMass, teamStatsSumV);
+  if (step === "invalidate") invalidateTeamScoresAggCache();
 }
 
 function getTournamentTimeScale() {
@@ -1873,12 +2152,13 @@ function resetMassRoundBattlefieldAfterWarmup() {
   }
 
   pixels.clear();
+  invalidateTeamScoresAggCache();
 
   if (!landGrid) {
     if (teamsChanged) saveDynamicTeams();
     afterTerritoryMutation();
     saveRoundState();
-    broadcast(JSON.parse(fullPayload()));
+    broadcast(fullPayloadObject());
     broadcast({ type: "teamsFull", teams: teamsForMeta() });
     broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
     broadcastStatsImmediate();
@@ -1903,7 +2183,7 @@ function resetMassRoundBattlefieldAfterWarmup() {
 
   afterTerritoryMutation();
   saveRoundState();
-  broadcast(JSON.parse(fullPayload()));
+  broadcast(fullPayloadObject());
   broadcast({ type: "teamsFull", teams: teamsForMeta() });
   broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
   broadcastStatsImmediate();
@@ -2191,6 +2471,7 @@ function advanceTerritoryIsolationState() {
       }
       territoryIsolationByGroupId = nextMap;
       broadcastTerritoryIsolationSyncIfChanged(now);
+      if (pixelsMutated) invalidateTeamScoresAggCache();
       return pixelsMutated;
     }
     /** @type {Map<string, { teamId: number, cells: Set<string>, deadlineMs: number, groupId: string }>} */
@@ -2228,6 +2509,7 @@ function advanceTerritoryIsolationState() {
     }
     carry = nextCarry;
   }
+  if (pixelsMutated) invalidateTeamScoresAggCache();
   return pixelsMutated;
 }
 
@@ -2284,6 +2566,7 @@ function planCaptureRect(x0, y0, x1, y1) {
 }
 
 function applyPlannedCapture(pk, tid, planned) {
+  invalidateTeamScoresAggCache();
   for (const [x, y] of planned) {
     if (!cellAllowsPixelPlacement(x, y)) continue;
     if (isEnemyOwnedFlagBaseCell(tid, x, y)) continue;
@@ -2293,7 +2576,7 @@ function applyPlannedCapture(pk, tid, planned) {
       ownerPlayerKey: pk,
       shieldedUntil: 0,
     });
-    broadcast({ type: "pixel", x, y, t: tid, ownerPlayerKey: pk, shieldedUntil: 0 });
+    queuePixelBroadcast(x, y, tid, pk, 0);
   }
   afterTerritoryMutation();
 }
@@ -2358,6 +2641,7 @@ if (gameFinished) {
 } else {
   rebuildLandFromRound(roundIndex);
 }
+loadPixelsSnapshotIfPresentSync();
 ensureAllTeamSpawnsAfterLoad();
 
 function safePath(urlPath) {
@@ -2407,14 +2691,18 @@ function serveStatic(req, res) {
   });
 }
 
-function fullPayload() {
+function fullPayloadObject() {
   const list = [];
   for (const [key, val] of pixels) {
     const [x, y] = key.split(",").map(Number);
     const p = normalizePixel(val);
     list.push([x, y, p.teamId, p.ownerPlayerKey, p.shieldedUntil]);
   }
-  return JSON.stringify({ type: "full", pixels: list, pixelFormat: "v2" });
+  return { type: "full", pixels: list, pixelFormat: "v2" };
+}
+
+function fullPayload() {
+  return JSON.stringify(fullPayloadObject());
 }
 
 async function broadcastWalletPayloadToAllClients() {
@@ -2734,6 +3022,7 @@ function applyFullMessageToPixelsCluster(msg) {
       pixels.set(`${x},${y}`, { teamId: p[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
     }
   }
+  invalidateTeamScoresAggCache();
 }
 
 /**
@@ -2753,6 +3042,31 @@ function applyClusterGameReplication(msg) {
         ownerPlayerKey: String(msg.ownerPlayerKey || "").slice(0, 128),
         shieldedUntil: Number(msg.shieldedUntil) || 0,
       });
+      return;
+    }
+    case "pixelBatch": {
+      const fmt = msg.pixelFormat === "v2" ? "v2" : "v1";
+      const list = Array.isArray(msg.cells) ? msg.cells : [];
+      let any = false;
+      for (let i = 0; i < list.length; i++) {
+        const row = list[i];
+        if (!Array.isArray(row) || row.length < 3) continue;
+        const x = row[0] | 0;
+        const y = row[1] | 0;
+        if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+        if (!cellAllowsPixelPlacement(x, y)) continue;
+        if (fmt === "v2" && row.length >= 5) {
+          pixels.set(`${x},${y}`, {
+            teamId: row[2] | 0,
+            ownerPlayerKey: String(row[3] || "").slice(0, 128),
+            shieldedUntil: Number(row[4]) || 0,
+          });
+        } else {
+          pixels.set(`${x},${y}`, { teamId: row[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
+        }
+        any = true;
+      }
+      if (any) invalidateTeamScoresAggCache();
       return;
     }
     case "full":
@@ -2858,6 +3172,7 @@ function applyClusterGameReplication(msg) {
       removeTerritoryIsolationGroupsForTeam(tid);
       teamEffects.delete(tid);
       teamMemberKeys.delete(tid);
+      synergyOnlineEpoch++;
       teamPlayerCounts.delete(tid);
       if (wss) {
         for (const c of wss.clients) {
@@ -2882,6 +3197,7 @@ function applyClusterGameReplication(msg) {
         loadDynamicTeams();
         clearTeamEffectsMap();
         teamMemberKeys.clear();
+        synergyOnlineEpoch++;
         teamPlayerCounts.clear();
         pixels.clear();
         if (gameFinished) rebuildLandFromRound(Math.min(Math.max(roundIndex, 2), 3));
@@ -3140,17 +3456,73 @@ function broadcastToWebSocketClients(raw) {
   }
 }
 
-function broadcast(obj) {
-  const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
+/** Пакетная рассылка клеток: один кадр WS/PubSub на микротаску вместо N сообщений «pixel». */
+/** @type {Map<string, { x: number, y: number, t: number, ownerPlayerKey: string, shieldedUntil: number }>} */
+const pendingPixelBroadcast = new Map();
+let pixelBroadcastFlushScheduled = false;
+
+function publishGameRaw(raw) {
   broadcastToWebSocketClients(raw);
-  if (redisGamePublish) {
-    try {
-      const out = redisGamePublish(raw);
-      if (out && typeof out.then === "function") out.catch((e) => console.warn("[redis publish]", e.message));
-    } catch (e) {
-      console.warn("[redis publish]", e.message);
-    }
+  publishRedisGameInternal(raw);
+}
+
+/** Служебные сообщения между инстансами без рассылки сырого JSON клиентам (например обновление кошелька после IPN). */
+function publishRedisGameInternal(raw) {
+  if (!redisGamePublish) return;
+  try {
+    const out = redisGamePublish(raw);
+    if (out && typeof out.then === "function") out.catch((e) => console.warn("[redis publish]", e.message));
+  } catch (e) {
+    console.warn("[redis publish]", e.message);
   }
+}
+
+function flushPixelBroadcastNow() {
+  if (pendingPixelBroadcast.size === 0) return;
+  const cells = [];
+  for (const v of pendingPixelBroadcast.values()) {
+    cells.push([v.x, v.y, v.t, v.ownerPlayerKey, v.shieldedUntil]);
+  }
+  pendingPixelBroadcast.clear();
+  const chunk = PIXEL_BATCH_MAX_CELLS;
+  for (let i = 0; i < cells.length; i += chunk) {
+    const part = cells.slice(i, i + chunk);
+    publishGameRaw(
+      JSON.stringify({
+        type: "pixelBatch",
+        pixelFormat: "v2",
+        cells: part,
+      })
+    );
+  }
+}
+
+function queuePixelBroadcast(x, y, t, ownerPlayerKey, shieldedUntil) {
+  const xi = x | 0;
+  const yi = y | 0;
+  const tid = t | 0;
+  const opk = String(ownerPlayerKey || "").slice(0, 128);
+  const sh = Number(shieldedUntil) || 0;
+  pendingPixelBroadcast.set(`${xi},${yi}`, {
+    x: xi,
+    y: yi,
+    t: tid,
+    ownerPlayerKey: opk,
+    shieldedUntil: sh,
+  });
+  if (!pixelBroadcastFlushScheduled) {
+    pixelBroadcastFlushScheduled = true;
+    queueMicrotask(() => {
+      pixelBroadcastFlushScheduled = false;
+      flushPixelBroadcastNow();
+    });
+  }
+}
+
+function broadcast(obj) {
+  flushPixelBroadcastNow();
+  const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
+  publishGameRaw(raw);
 }
 
 /** Клетка внутри прямоугольника стартовой базы команды (6×6), даже без пикселя в `pixels`. */
@@ -3451,7 +3823,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now, opts) {
   if (owner !== 0 && owner !== did) return null;
   if (owner === 0) {
     pixels.set(key, { teamId: did, ownerPlayerKey: "", shieldedUntil: 0 });
-    broadcast({ type: "pixel", x, y, t: did, ownerPlayerKey: "", shieldedUntil: 0 });
+    queuePixelBroadcast(x, y, did, "", 0);
   }
 
   if (!skipRateLimit && !flagTeamHitLimiter.allow(`fc:${aid}`, FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC, 1000)) {
@@ -3539,6 +3911,8 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
   const dtAtk = dynamicTeams.find((t) => t.id === attackerId);
   if (!dtDef || dtDef.eliminated || dtDef.solo) return;
   if (!dtAtk || dtAtk.eliminated) return;
+
+  invalidateTeamScoresAggCache();
 
   const { x: gx, y: gy } =
     typeof dtDef.spawnX0 === "number" && typeof dtDef.spawnY0 === "number"
@@ -3667,6 +4041,7 @@ function executeMilitaryOutpostCaptureSuccess(attackerId, defenderId, ox0, oy0) 
   const dtAtk = dynamicTeams.find((t) => t.id === attackerId);
   if (!dtDef || dtDef.eliminated || dtDef.solo) return;
   if (!dtAtk || dtAtk.eliminated) return;
+  invalidateTeamScoresAggCache();
   const x0 = ox0 | 0;
   const y0 = oy0 | 0;
   if (!Array.isArray(dtDef.militaryOutposts)) return;
@@ -3680,7 +4055,7 @@ function executeMilitaryOutpostCaptureSuccess(attackerId, defenderId, ox0, oy0) 
   for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE; yy++) {
     for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
       pixels.set(`${xx},${yy}`, { teamId: attackerId, ownerPlayerKey: "", shieldedUntil: 0 });
-      broadcast({ type: "pixel", x: xx, y: yy, t: attackerId, ownerPlayerKey: "", shieldedUntil: 0 });
+      queuePixelBroadcast(xx, yy, attackerId, "", 0);
     }
   }
 
@@ -3888,6 +4263,7 @@ function findValidSpawnRect6() {
 
 /** Залить 6×6 базу без WS-сообщений (для массового сброса карты). */
 function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
+  invalidateTeamScoresAggCache();
   const opk = String(ownerPk || "").slice(0, 128);
   for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
     for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
@@ -3898,20 +4274,14 @@ function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
 }
 
 function paintTeamSpawnArea(teamId, x0, y0, ownerPk) {
+  invalidateTeamScoresAggCache();
   const opk = String(ownerPk || "").slice(0, 128);
   for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
     for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
       if (!cellAllowsPixelPlacement(x, y)) continue;
       const k = `${x},${y}`;
       pixels.set(k, { teamId, ownerPlayerKey: opk, shieldedUntil: 0 });
-      broadcast({
-        type: "pixel",
-        x,
-        y,
-        t: teamId,
-        ownerPlayerKey: opk,
-        shieldedUntil: 0,
-      });
+      queuePixelBroadcast(x, y, teamId, opk, 0);
     }
   }
   afterTerritoryMutation();
@@ -4012,21 +4382,23 @@ function afterTerritoryMutation() {
   const next = computeTeamTerritoryCounts();
   notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
   lastTerritoryCountSnapshot = new Map(next);
-  scanAndEliminateTeamsWithNoTerritory();
+  scanAndEliminateTeamsWithNoTerritory(next);
   syncQuantumFarmStateAfterTerritoryChange();
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
   checkDuelInstantWin(st);
   checkDuelWinByElimination(st);
   scanMilitaryOutpostsVacancyAndExpire(Date.now());
+  schedulePixelsSnapshotSave();
 }
 
-function scanAndEliminateTeamsWithNoTerritory() {
-  const byTeam = computeTeamTerritoryCounts();
+/** @param {Map<number, number> | undefined} byTeam — если уже есть результат computeTeamTerritoryCounts, не второй проход по pixels. */
+function scanAndEliminateTeamsWithNoTerritory(byTeam) {
+  const counts = byTeam ?? computeTeamTerritoryCounts();
   const victims = [];
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
-    const n = byTeam.get(t.id) | 0;
+    const n = counts.get(t.id) | 0;
     if (n === 0) victims.push(t.id);
   }
   for (const tid of victims) {
@@ -4048,6 +4420,7 @@ function eliminateTeamByTerritoryLoss(teamId) {
   saveDynamicTeams();
   teamEffects.delete(teamId);
   teamMemberKeys.delete(teamId);
+  synergyOnlineEpoch++;
   teamPlayerCounts.delete(teamId);
   let destroyGx = 0;
   let destroyGy = 0;
@@ -4241,7 +4614,16 @@ async function handleApi(req, res) {
     } else {
       console.warn("[ipn] finalizeDeposit не прошёл", String(npId));
     }
-    await pushWalletToPlayerKey(playerKey);
+    /* Несколько инстансов (Render): IPN может прийти не на тот узел, где висит WebSocket игрока — шлём сигнал в Redis, каждый узел пушит wallet своим клиентам. */
+    if (dep.ok || dep.duplicate === true) {
+      if (redisGamePublish) {
+        publishRedisGameInternal(
+          JSON.stringify({ type: "walletRefreshPlayer", playerKey: sanitizePlayerKey(playerKey) })
+        );
+      } else {
+        await pushWalletToPlayerKey(playerKey);
+      }
+    }
     res.writeHead(200);
     res.end(JSON.stringify({ ok: dep.ok, duplicate: dep.duplicate === true }));
     return;
@@ -4421,7 +4803,19 @@ function countOnlineClients() {
 
 function buildStatsPayload() {
   const nowMs = effectiveGameClockMs();
-  const { agg } = recalculateAllTeamScores(nowMs);
+  if (REDIS_URL && !isClusterLeader()) {
+    rebuildTeamScoresAggFromFullScan(nowMs);
+  } else if (teamScoreCacheEpochSynced !== teamScoreStatsEpoch) {
+    rebuildTeamScoresAggFromFullScan(nowMs);
+  }
+  /** @type {Map<number, { score: number; cells: number }>} */
+  const agg = new Map();
+  for (const tid of teamStatsMass.keys()) {
+    const M = teamStatsMass.get(tid) | 0;
+    const S = teamStatsSumV.get(tid) || 0;
+    if (M <= 0) continue;
+    agg.set(tid, { score: M * S, cells: M });
+  }
   const list = teamsForMeta().filter((t) => !t.solo && !t.eliminated);
   let totalAvailableScore = 0;
   for (const t of list) {
@@ -4483,7 +4877,7 @@ function scheduleStatsBroadcast() {
   statsBroadcastTimer = setTimeout(() => {
     statsBroadcastTimer = null;
     broadcast(buildStatsPayload());
-  }, 200);
+  }, STATS_BROADCAST_DEBOUNCE_MS);
 }
 
 function broadcastStatsImmediate() {
@@ -4756,10 +5150,12 @@ async function finalizeGameEnd(winnerRow) {
     }
 
     teamMemberKeys.clear();
+    synergyOnlineEpoch++;
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
     clearTerritoryIsolationState();
     pixels.clear();
+    invalidateTeamScoresAggCache();
     clearTeamEffectsMap();
     dynamicTeams = [];
     nextTeamId = 1;
@@ -4864,6 +5260,7 @@ async function advanceToDuelRound(winnerRow) {
     }
 
     teamMemberKeys.clear();
+    synergyOnlineEpoch++;
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
     clearTerritoryIsolationState();
@@ -4933,7 +5330,7 @@ async function runMaybeEndRound() {
   if (gamePaused) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
   if (Date.now() < getRoundBattleEndRealMs()) return;
-  /* Авторитетный итог: полный пересчёт очков по pixels внутри buildStatsPayload (recalculateAllTeamScores). */
+  /* Авторитетный итог: buildStatsPayload (кэш M×S + full scan при необходимости). */
   const stats = buildStatsPayload();
   const rows = stats.rows || [];
   if (rows.length === 0) {
@@ -5025,10 +5422,12 @@ async function runMaybeEndRound() {
     }
 
     teamMemberKeys.clear();
+    synergyOnlineEpoch++;
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
     clearTerritoryIsolationState();
     pixels.clear();
+    invalidateTeamScoresAggCache();
     clearTeamEffectsMap();
     dynamicTeams = [];
     nextTeamId = 1;
@@ -5115,7 +5514,7 @@ setInterval(() => {
   const next = computeTeamTerritoryCounts();
   notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
   lastTerritoryCountSnapshot = new Map(next);
-  scanAndEliminateTeamsWithNoTerritory();
+  scanAndEliminateTeamsWithNoTerritory(next);
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
   checkDuelInstantWin(st);
@@ -5136,8 +5535,9 @@ wss.on("connection", (ws, req) => {
 
   void (async () => {
     await sendConnectionMeta(ws);
-    safeSend(ws, fullPayload());
-    broadcastStatsImmediate();
+    safeSend(ws, fullPayloadObject());
+    /* Не broadcastStatsImmediate(): волна входов заставляла бы пересчёт stats и рассылку всем при каждом connect. */
+    safeSend(ws, buildStatsPayload());
   })();
 
   ws.on("message", (data) => {
@@ -5799,6 +6199,7 @@ wss.on("connection", (ws, req) => {
       for (let i = 0; i < cleared.length; i++) {
         pixels.delete(`${cleared[i][0]},${cleared[i][1]}`);
       }
+      invalidateTeamScoresAggCache();
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "nuke_bomb", { deferSave: true });
       await walletStore.save();
       afterTerritoryMutation();
@@ -6034,7 +6435,6 @@ wss.on("connection", (ws, req) => {
       const now = Date.now();
       const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
       if (now < u.lastActionAt + cd) {
-        await walletStore.save();
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "cooldown not ready" });
         safeSend(ws, { type: "pixelReject", reason: "cooldown not ready" });
         return;
@@ -6042,13 +6442,12 @@ wss.on("connection", (ws, req) => {
 
       const fc = tryFlagCaptureHit(teamId, x, y, now);
       if (fc && fc.rateLimited) {
-        await walletStore.save();
         safeSend(ws, { type: "pixelReject", reason: "flag_rate" });
         return;
       }
       if (fc && (fc.hit || fc.captured)) {
         u.lastActionAt = now;
-        await walletStore.save();
+        scheduleEconomyFlushForPlayer(pk);
         if (!fc.captured) {
           scheduleStatsBroadcast();
         }
@@ -6066,19 +6465,20 @@ wss.on("connection", (ws, req) => {
       }
 
       if (enemyFlagDef) {
-        await walletStore.save();
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "enemy_base" });
         safeSend(ws, { type: "pixelReject", reason: "enemy_base" });
         return;
       }
 
       u.lastActionAt = now;
-      await walletStore.save();
+      scheduleEconomyFlushForPlayer(pk);
 
       /* Обычная покраска: не якорь чужой базы (это только tryFlagCaptureHit / executeFlagCaptureSuccess). */
       const rec = { teamId, ownerPlayerKey: pk, shieldedUntil: 0 };
+      const prevCell = pixels.get(key);
       pixels.set(key, rec);
-      broadcast({ type: "pixel", x, y, t: teamId, ownerPlayerKey: pk, shieldedUntil: 0 });
+      tryApplyIncrementalTeamScoreForPixel(x, y, prevCell, rec);
+      queuePixelBroadcast(x, y, teamId, pk, 0);
       scheduleStatsBroadcast();
       afterTerritoryMutation();
 
@@ -6348,6 +6748,7 @@ function isLandCellUnclaimedPixel(x, y) {
  * @returns {number} сколько клеток закрашено
  */
 function paintAllFreeLandPixelsForTeam(teamId, ownerPlayerKey) {
+  invalidateTeamScoresAggCache();
   const tid = teamId | 0;
   const pk = sanitizePlayerKey(ownerPlayerKey);
   let n = 0;
@@ -6361,7 +6762,7 @@ function paintAllFreeLandPixelsForTeam(teamId, ownerPlayerKey) {
   }
   afterTerritoryMutation();
   scheduleStatsBroadcast();
-  broadcast(JSON.parse(fullPayload()));
+  broadcast(fullPayloadObject());
   return n;
 }
 
@@ -6964,12 +7365,32 @@ async function telegramPollLoop() {
   }
 }
 
+function shutdownPersistSync() {
+  try {
+    flushPixelBroadcastNow();
+    writePixelsSnapshotSyncForShutdown();
+  } catch (e) {
+    console.warn("[shutdown] persist:", e?.message || e);
+  }
+}
+process.on("SIGTERM", () => {
+  shutdownPersistSync();
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  shutdownPersistSync();
+  process.exit(0);
+});
+
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
   schedulePlayStartBroadcast();
   setInterval(() => {
     void tickQuantumFarmIncome();
   }, QUANTUM_FARM_TICK_MS);
+  setInterval(() => {
+    void writePixelsSnapshotFileAsync();
+  }, PIXELS_SNAPSHOT_INTERVAL_MS);
   if (REDIS_URL) {
     const ch = REDIS_GAME_CHANNEL;
     import("./lib/redis-game-bus.mjs")
@@ -6980,8 +7401,15 @@ server.listen(PORT, () => {
           onMessage: (raw) => {
             try {
               const msg = JSON.parse(raw);
+              if (msg && msg.type === "walletRefreshPlayer" && typeof msg.playerKey === "string") {
+                void pushWalletToPlayerKey(msg.playerKey);
+                return;
+              }
               applyClusterGameReplication(msg);
-              broadcastToWebSocketClients(raw);
+              /* Лидер уже отправил этот кадр локальным клиентам в publishGameRaw; иначе — двойная доставка. */
+              if (!isClusterLeader()) {
+                broadcastToWebSocketClients(raw);
+              }
             } catch (e) {
               console.warn("[redis game] inbound:", e.message);
             }

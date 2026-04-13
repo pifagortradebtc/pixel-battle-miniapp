@@ -13,12 +13,14 @@
     "stress": "node scripts/stress-concurrency-sim.mjs",
     "copy-music": "node scripts/copy-music-from-downloads.mjs",
     "import-bgm": "node scripts/import-bgm-novaya-papka.mjs",
-    "copy-sfx": "node scripts/copy-sfx-from-downloads.mjs"
+    "copy-sfx": "node scripts/copy-sfx-from-downloads.mjs",
+    "verify:scores": "node scripts/verify-team-score-incremental.mjs"
   },
   "devDependencies": {
     "sharp": "^0.33.5"
   },
   "dependencies": {
+    "dotenv": "^16.4.7",
     "pg": "^8.13.1",
     "redis": "^4.7.0",
     "sql.js": "^1.11.0",
