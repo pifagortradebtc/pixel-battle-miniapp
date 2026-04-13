@@ -3,6 +3,8 @@
  * Пустые списки в manifest → этап не использует стриминг (остаётся процедурная музыка).
  */
 
+import { resolvePublicAssetUrl } from "./asset-url.js";
+
 /** @typedef {{ url: string; loopStart?: number; loopEnd?: number }} ManifestTrack */
 
 export const BGM_PHASE = /** @type {const} */ ({
@@ -50,15 +52,6 @@ const DEFAULT_MANIFEST = /** @type {BgmManifest} */ ({
   },
 });
 
-function resolveManifestUrl(relativePath) {
-  const base = new URL(".", window.location.href).href;
-  try {
-    return new URL(relativePath, base).href;
-  } catch {
-    return relativePath;
-  }
-}
-
 function pickTrackExcluding(tracks, lastUrl) {
   if (!tracks?.length) return null;
   const candidates = tracks.filter((t) => t && t.url && t.url !== lastUrl);
@@ -102,8 +95,8 @@ export class StreamingBgmDirector {
     this.lastGameplaySwitchWallMs = 0;
     /** @type {boolean} */
     this.gameplayPaused = false;
-    /** @type {boolean} */
-    this.loadStarted = false;
+    /** @type {Promise<void> | null} */
+    this._manifestLoadPromise = null;
     /** @type {boolean} */
     this.muted = false;
     /** @type {number} */
@@ -149,10 +142,17 @@ export class StreamingBgmDirector {
   }
 
   async loadManifestAndBuffers() {
-    if (this.loadStarted) return;
-    this.loadStarted = true;
+    if (!this.ctx) return;
+    if (this._manifestLoadPromise) return this._manifestLoadPromise;
+    this._manifestLoadPromise = this._loadManifestAndBuffersInner().finally(() => {
+      this._manifestLoadPromise = null;
+    });
+    return this._manifestLoadPromise;
+  }
+
+  async _loadManifestAndBuffersInner() {
     try {
-      const res = await fetch(resolveManifestUrl("music/manifest.json"), { cache: "no-store" });
+      const res = await fetch(resolvePublicAssetUrl("music/manifest.json"), { cache: "no-store" });
       if (!res.ok) return;
       const j = await res.json();
       if (j && typeof j === "object") {
@@ -197,7 +197,7 @@ export class StreamingBgmDirector {
     for (const url of urls) {
       if (this.bufferByUrl.has(url)) continue;
       try {
-        const r = await fetch(resolveManifestUrl(url));
+        const r = await fetch(resolvePublicAssetUrl(url));
         if (!r.ok) continue;
         const ab = await r.arrayBuffer();
         const buf = await this.ctx.decodeAudioData(ab.slice(0));

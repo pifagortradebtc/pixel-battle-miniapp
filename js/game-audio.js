@@ -6,6 +6,7 @@
  */
 
 import { streamingBgm } from "./streaming-bgm.js";
+import { resolvePublicAssetUrl } from "./asset-url.js";
 
 const STORAGE_KEY = "pixelBattleAudioSettings";
 
@@ -76,7 +77,8 @@ let lowPrioritySfxCount = 0;
 /** Сэмплы событий из sfx/samples.json (при отсутствии файла — процедурный fallback). */
 /** @type {Map<string, AudioBuffer>} */
 const eventSfxBuffers = new Map();
-let eventSfxPreloadStarted = false;
+/** @type {Promise<void> | null} */
+let eventSfxPreloadPromise = null;
 
 const MUSIC_STATE = /** @type {const} */ ({
   CALM: 0,
@@ -157,6 +159,11 @@ export function getAudioContext() {
   return ctx;
 }
 
+function runAfterAudioContextRunning() {
+  void preloadEventSfxBuffers();
+  void streamingBgm.loadManifestAndBuffers();
+}
+
 export function resumeAudioContext() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -168,7 +175,10 @@ export function resumeAudioContext() {
       applyBusGains();
       applyMusicLayerTargets(true);
     }
-    if (ctx.state === "suspended") return ctx.resume();
+    if (ctx.state === "suspended") {
+      return ctx.resume().then(runAfterAudioContextRunning, runAfterAudioContextRunning);
+    }
+    runAfterAudioContextRunning();
   } catch {
     /* ignore */
   }
@@ -205,8 +215,7 @@ function buildGraph() {
     musicOscs = [];
 
     streamingBgm.attach(ctx, musicDuck);
-    void streamingBgm.loadManifestAndBuffers();
-    void preloadEventSfxBuffers();
+    /* sfx/music грузим после ctx.resume() — см. runAfterAudioContextRunning */
 }
 
 function ensureMusicOscs() {
@@ -548,37 +557,34 @@ function duckMusicForAlert(ms, deep = false) {
   musicDuck.gain.linearRampToValueAtTime(1, end);
 }
 
-function resolveSfxAssetUrl(relPath) {
-  try {
-    return new URL(relPath, window.location.href).href;
-  } catch {
-    return relPath;
-  }
-}
-
 async function preloadEventSfxBuffers() {
-  if (!ctx || eventSfxPreloadStarted) return;
-  eventSfxPreloadStarted = true;
-  try {
-    const res = await fetch(resolveSfxAssetUrl("sfx/samples.json"), { cache: "no-store" });
-    if (!res.ok) return;
-    const j = await res.json();
-    const files = j.files && typeof j.files === "object" ? j.files : {};
-    for (const [key, rel] of Object.entries(files)) {
-      if (eventSfxBuffers.has(key)) continue;
-      try {
-        const r = await fetch(resolveSfxAssetUrl(String(rel)));
-        if (!r.ok) continue;
-        const ab = await r.arrayBuffer();
-        const buf = await ctx.decodeAudioData(ab.slice(0));
-        eventSfxBuffers.set(key, buf);
-      } catch {
-        /* файл отсутствует или битый */
+  if (!ctx) return;
+  if (eventSfxPreloadPromise) return eventSfxPreloadPromise;
+  eventSfxPreloadPromise = (async () => {
+    try {
+      const res = await fetch(resolvePublicAssetUrl("sfx/samples.json"), { cache: "no-store" });
+      if (!res.ok) return;
+      const j = await res.json();
+      const files = j.files && typeof j.files === "object" ? j.files : {};
+      for (const [key, rel] of Object.entries(files)) {
+        if (eventSfxBuffers.has(key)) continue;
+        try {
+          const r = await fetch(resolvePublicAssetUrl(String(rel)));
+          if (!r.ok) continue;
+          const ab = await r.arrayBuffer();
+          const buf = await ctx.decodeAudioData(ab.slice(0));
+          eventSfxBuffers.set(key, buf);
+        } catch {
+          /* файл отсутствует или битый */
+        }
       }
+    } catch {
+      /* нет манифеста / сеть */
     }
-  } catch {
-    /* нет манифеста */
-  }
+  })().finally(() => {
+    eventSfxPreloadPromise = null;
+  });
+  return eventSfxPreloadPromise;
 }
 
 /**
