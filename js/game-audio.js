@@ -107,6 +107,11 @@ function loadSettings() {
     if (typeof o.music === "number") settings.music = Math.min(1, Math.max(0, o.music));
     if (typeof o.effects === "number") settings.effects = Math.min(1, Math.max(0, o.effects));
     if (typeof o.muted === "boolean") settings.muted = o.muted;
+    /* Сломанное состояние из UI: не mute, но все ползунки на0 — полная тишина. */
+    if (!settings.muted && settings.master === 0 && settings.music === 0 && settings.effects === 0) {
+      settings = { ...DEFAULT_SETTINGS };
+      saveSettings();
+    }
   } catch {
     /* ignore */
   }
@@ -161,13 +166,16 @@ export function getAudioContext() {
 }
 
 /**
- * После resume() обязательно дождаться прелоада sfx — иначе playEventSample видит пустые буферы и играет старый синтез.
+ * Фоновый прелоад sfx + музыки. Нельзя ждать его в цепочке resumeAudioContext():
+ * loadManifestAndBuffers последовательно тянет все треки — на слабом канале это
+ * минуты, и все play* в .then(() => …) так и не срабатывают (полная тишина).
  */
-function runAfterAudioContextRunning() {
-  return Promise.all([
-    preloadEventSfxBuffers(),
-    streamingBgm.loadManifestAndBuffers(),
-  ]).catch(() => {});
+function kickPostResumePreload() {
+  void Promise.all([preloadEventSfxBuffers(), streamingBgm.loadManifestAndBuffers()])
+    .catch(() => {})
+    .then(() => {
+      applyBusGains();
+    });
 }
 
 export function resumeAudioContext() {
@@ -180,13 +188,28 @@ export function resumeAudioContext() {
       loadSettings();
       applyBusGains();
       applyMusicLayerTargets(true);
+      /* Сразу в том же стеке вызова (жест пользователя) — иначе iOS/Telegram часто оставляют тишину. */
+      try {
+        if (ctx.state !== "running") void ctx.resume();
+      } catch {
+        /* ignore */
+      }
     }
-    if (ctx.state === "suspended") {
-      return ctx
-        .resume()
-        .then(() => runAfterAudioContextRunning(), () => runAfterAudioContextRunning());
+    if (ctx.state !== "running") {
+      const p = ctx.resume();
+      if (p && typeof p.then === "function") {
+        return p.then(
+          () => {
+            kickPostResumePreload();
+          },
+          () => {
+            kickPostResumePreload();
+          }
+        );
+      }
     }
-    return runAfterAudioContextRunning();
+    kickPostResumePreload();
+    return Promise.resolve();
   } catch {
     /* ignore */
   }
@@ -223,7 +246,7 @@ function buildGraph() {
     musicOscs = [];
 
     streamingBgm.attach(ctx, musicDuck);
-    /* sfx/music грузим после ctx.resume() — см. runAfterAudioContextRunning */
+    /* sfx/music — фоновый прелоад после resume, см. kickPostResumePreload */
 }
 
 function ensureMusicOscs() {
@@ -1544,9 +1567,15 @@ export function initGameAudio() {
   }
 
   const resumeOnGesture = () => {
+    try {
+      if (ctx && ctx.state !== "running") void ctx.resume();
+    } catch {
+      /* ignore */
+    }
     void resumeAudioContext();
   };
   document.body.addEventListener("pointerdown", resumeOnGesture, { passive: true });
+  document.body.addEventListener("touchstart", resumeOnGesture, { passive: true });
   document.body.addEventListener("keydown", resumeOnGesture, { passive: true });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void resumeAudioContext();
@@ -1554,6 +1583,13 @@ export function initGameAudio() {
   window.addEventListener("pageshow", (e) => {
     if (e.persisted) void resumeAudioContext();
   });
+  try {
+    window.Telegram?.WebApp?.onEvent?.("viewportChanged", () => {
+      void resumeAudioContext();
+    });
+  } catch {
+    /* ignore */
+  }
 
   const app = document.getElementById("app");
   if (app) {

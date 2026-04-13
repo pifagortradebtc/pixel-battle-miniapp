@@ -23,6 +23,23 @@ export function resolvePublicAssetUrl(relPath) {
     /* ниже — запасной вариант */
   }
 
+  if (typeof document !== "undefined") {
+    const scripts = document.querySelectorAll('script[type="module"][src]');
+    for (const s of scripts) {
+      const srcAttr = s.getAttribute("src");
+      if (!srcAttr) continue;
+      try {
+        const abs = new URL(srcAttr, window.location.href).href;
+        if (/\/js\/[^/]+\.js(\?|#|$)/i.test(abs)) {
+          const base = abs.replace(/\/js\/[^/]+\.js(\?.*|#.*)?$/i, "/");
+          return new URL(clean, base).href;
+        }
+      } catch {
+        /* next */
+      }
+    }
+  }
+
   let pathname = "/";
   try {
     pathname = new URL(window.location.href).pathname || "/";
