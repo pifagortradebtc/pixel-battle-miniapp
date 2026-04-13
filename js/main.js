@@ -43,6 +43,7 @@ import {
   playBuffPersonalSfx,
   playBuffTeamSfx,
   playTerritoryExpand,
+  playMenuChoiceSfx,
 } from "./game-audio.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
@@ -2587,6 +2588,7 @@ function rebuildTeamList() {
     btn.appendChild(left);
     btn.appendChild(meta);
     btn.addEventListener("click", () => {
+      playMenuChoiceSfx();
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (sessionRestorePending) {
         const tg = window.Telegram?.WebApp;
@@ -3019,6 +3021,7 @@ function setupWelcomeUi() {
     if (e.target === welcomeOverlay) welcomeOverlay.hidden = true;
   });
   btnWelcomeCreate?.addEventListener("click", () => {
+    playMenuChoiceSfx();
     if (myTeamId != null) {
       pendingLeaveToTeamList = false;
       pendingLeaveToCreate = true;
@@ -3038,6 +3041,7 @@ function setupWelcomeUi() {
       else alert(m);
       return;
     }
+    playMenuChoiceSfx();
     if (myTeamId != null) {
       pendingLeaveToTeamList = true;
       pendingLeaveToCreate = false;
@@ -3124,10 +3128,12 @@ function setupCreateTeamUi() {
     if (e.target === crisisOverlayEl) hideCrisisOverlay();
   });
   defeatBtnCreate?.addEventListener("click", () => {
+    playMenuChoiceSfx();
     hideDefeatOverlay();
     openCreateTeamOverlay(true);
   });
   defeatBtnJoin?.addEventListener("click", () => {
+    playMenuChoiceSfx();
     hideDefeatOverlay();
     if (teamOverlay) teamOverlay.hidden = false;
   });

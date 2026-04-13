@@ -21,6 +21,7 @@
     "alert_base_attack": "sfx/alert-base-attack.mp3",
     "alert_last_cells": "sfx/alert-last-cells.mp3",
     "alert_territory_cut": "sfx/alert-territory-cut.mp3",
-    "pixel_place": "sfx/pixel-place.mp3"
+    "pixel_place": "sfx/pixel-place.mp3",
+    "menu_select": "sfx/menu-select.mp3"
   }
 }

@@ -939,6 +939,17 @@ export function playUiClick() {
   });
 }
 
+/** Выбор в стартовом меню: создать / вступить / команда из списка (без лимита low-priority кликов). */
+export function playMenuChoiceSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || !uiBus || settings.muted) return;
+    if (playEventSample("menu_select", { bus: "ui", gainMul: 0.92 })) return;
+    const now = ctx.currentTime;
+    playFilteredNoiseBurst(uiBus, now, 0.02, 0.028, 560);
+    playOscThrough("sine", 220, 175, 0.022, 0.04, uiBus, now + 0.002);
+  });
+}
+
 export function playUiHover() {
   resumeAudioContext().then(() => {
     if (!ctx || !uiBus || settings.muted || !canPlayLowPrioritySfx()) return;
