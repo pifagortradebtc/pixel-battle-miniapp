@@ -22,9 +22,11 @@ import {
   PRICES_QUANT,
   REFERRAL_JOIN_INVITER_QUANT,
 } from "../lib/tournament-economy.js";
+import { computeNukeBombBlastCells } from "../lib/nuke-bomb-shape.js";
 import {
   flagCellFromSpawn,
   FLAG_BASE_MAX_HP,
+  FLAG_SPAWN_SIZE,
   FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
   FLAG_REGEN_DURATION_MS,
   FLAG_REGEN_IDLE_MS,
@@ -1156,6 +1158,35 @@ function triggerMapShake(ms = 560) {
   void stageWrapEl.offsetWidth;
   stageWrapEl.classList.add("map-shake");
   setTimeout(() => stageWrapEl.classList.remove("map-shake"), ms);
+}
+
+/** Красная вспышка + усиленная тряска (бомба). */
+function runNukeFlashPresentation() {
+  triggerMapShake(1850);
+  runBoardSeismicHitShake();
+  seismicAfterglowTremorUntilMs = Math.max(seismicAfterglowTremorUntilMs, Date.now() + 3200);
+  applySeismicTremorBodyOverride();
+  try {
+    const ov = document.createElement("div");
+    ov.className = "pb-nuke-flash-overlay";
+    ov.setAttribute("aria-hidden", "true");
+    document.body.appendChild(ov);
+    const done = () => {
+      ov.removeEventListener("animationend", done);
+      ov.remove();
+    };
+    ov.addEventListener("animationend", done, { once: true });
+    setTimeout(() => {
+      if (ov.parentNode) ov.remove();
+    }, 3200);
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
+  } catch {
+    /* ignore */
+  }
 }
 
 function stopBoardSeismicShake() {
@@ -3085,6 +3116,7 @@ function notifyReject(reason) {
       "Чужая база: бейте по клетке флага, чтобы снимать HP. Обычным пикселем базу не перекрасить.",
     not_leader:
       "Сервер занят (реплика кластера). Обновите страницу или подождите — ход обрабатывает основной инстанс.",
+    nuke_no_effect: "В зоне взрыва нет чужих закрашенных клеток (или только базы команд под защитой).",
   };
   const text = map[reason] || String(reason);
   const hard =
@@ -3259,6 +3291,8 @@ function notifyPurchaseError(reason) {
     team_eliminated: "Команда выбыла — эти покупки недоступны.",
     warmup: "Разминка: покупки и бусты после старта боя.",
     waiting_go: "Покупка сейчас недоступна (обновите клиент или дождитесь старта раунда).",
+    nuke_no_effect:
+      "Бомба не сработала: в зоне нет территории для очистки (или только защищённые базы 6×6).",
   };
   const text = m[reason] || String(reason);
   const severe =
@@ -3733,6 +3767,33 @@ function applyGlobalPurchaseVfx(msg) {
   const gy = Number(msg.gy);
   const hasGrid = Number.isFinite(gx) && Number.isFinite(gy);
 
+  if (kind === "nukeBomb") {
+    if (consumeDuplicatePurchaseVfx(msg)) {
+      /* optimistic снят — визуал ниже, как у остальных */
+    }
+    if (hasGrid) {
+      const sample = Array.isArray(msg.cellsSample) ? msg.cellsSample : [];
+      if (boardVfx) {
+        boardVfx.nukeExplosion(gx | 0, gy | 0, tr, sample);
+        flushBoardVfxFrame();
+        requestAnimationFrame(() => flushBoardVfxFrame());
+      }
+      runNukeFlashPresentation();
+      const pad = 9;
+      const gxi = gx | 0;
+      const gyi = gy | 0;
+      scheduleDraw({
+        dirty: {
+          gx0: Math.max(0, gxi - pad),
+          gy0: Math.max(0, gyi - pad),
+          gx1: Math.min(gridW - 1, gxi + pad),
+          gy1: Math.min(gridH - 1, gyi + pad),
+        },
+      });
+    }
+    return;
+  }
+
   if (
     (kind === "zoneCapture" || kind === "massCapture" || kind === "zone12Capture") &&
     consumeDuplicatePurchaseVfx(msg)
@@ -3839,6 +3900,9 @@ function handlePurchaseOk(msg) {
   if (kind === "zone12Capture") {
     spawnFloatingText(floatFxHost, "ЗОНА 12×12", { x: flo.x, y: flo.y - 10 }, "float-fx__pop--raid");
   }
+  if (kind === "nukeBomb") {
+    spawnFloatingText(floatFxHost, "☢ БОМБА", { x: flo.x, y: flo.y - 12 }, "float-fx__pop--raid");
+  }
   if (kind === "teamRecovery") {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
     spawnFloatingText(floatFxHost, `👥 КОМАНДА: ${s} С`, { x: flo.x, y: flo.y - 4 }, "float-fx__pop--gold");
@@ -3883,6 +3947,7 @@ function shopBtnMatchesPurchase(btn, msg) {
   if (kind === "zoneCapture") return action === "zoneCapture";
   if (kind === "massCapture") return action === "massCapture";
   if (kind === "zone12Capture") return action === "zone12Capture";
+  if (kind === "nukeBomb") return action === "nukeBomb";
   return false;
 }
 
@@ -3941,6 +4006,8 @@ function recordQuickBuyAfterPurchase(kind, msg) {
     pushQuickBuyHistory({ action: "massCapture" });
   } else if (kind === "zone12Capture") {
     pushQuickBuyHistory({ action: "zone12Capture" });
+  } else if (kind === "nukeBomb") {
+    pushQuickBuyHistory({ action: "nukeBomb" });
   }
 }
 
@@ -3950,6 +4017,7 @@ function getQuickBuyPriceQuant(entry) {
   if (entry.action === "zoneCapture") return PRICES_QUANT.zone4;
   if (entry.action === "massCapture") return PRICES_QUANT.zone6;
   if (entry.action === "zone12Capture") return PRICES_QUANT.zone12;
+  if (entry.action === "nukeBomb") return PRICES_QUANT.nukeBomb;
   return 0;
 }
 
@@ -3959,6 +4027,7 @@ function quickBuyShortLabel(entry) {
   if (entry.action === "zoneCapture") return "4×4";
   if (entry.action === "massCapture") return "6×6";
   if (entry.action === "zone12Capture") return "12×12";
+  if (entry.action === "nukeBomb") return "☢";
   return "?";
 }
 
@@ -3980,7 +4049,10 @@ function isQuickBuyEntryBlocked(entry) {
   }
   if (entry.action === "teamRecovery" && myTeamId == null) return true;
   if (
-    (entry.action === "zoneCapture" || entry.action === "massCapture" || entry.action === "zone12Capture") &&
+    (entry.action === "zoneCapture" ||
+      entry.action === "massCapture" ||
+      entry.action === "zone12Capture" ||
+      entry.action === "nukeBomb") &&
     myTeamId == null
   ) {
     return true;
@@ -4026,6 +4098,12 @@ function executeQuickBuy(entry) {
     if (shopOverlay) shopOverlay.hidden = true;
     return;
   }
+  if (entry.action === "nukeBomb") {
+    pendingMapAction = { type: "nukeBomb" };
+    setPendingHint();
+    if (shopOverlay) shopOverlay.hidden = true;
+    return;
+  }
 }
 
 const QUICK_BUY_RING_R = 14;
@@ -4060,7 +4138,12 @@ function renderQuickBuyRail() {
     const blocked = isQuickBuyEntryBlocked(entry);
     btn.disabled = blocked;
     const short = quickBuyShortLabel(entry);
-    if (entry.action === "zoneCapture" || entry.action === "massCapture" || entry.action === "zone12Capture") {
+    if (
+      entry.action === "zoneCapture" ||
+      entry.action === "massCapture" ||
+      entry.action === "zone12Capture" ||
+      entry.action === "nukeBomb"
+    ) {
       btn.title = `${short} · ${q} кв. — тап по карте, затем списание`;
     } else if (!playerCanAffordQuickBuy(entry)) {
       btn.title = `${short} · ${q} кв. — не хватает квантов`;
@@ -4149,7 +4232,7 @@ function syncQuickBuyRailMapPending() {
   const host = document.getElementById("quick-buy-list");
   if (!host) return;
   const t = pendingMapAction?.type;
-  const mapKinds = new Set(["zoneCapture", "massCapture", "zone12Capture"]);
+  const mapKinds = new Set(["zoneCapture", "massCapture", "zone12Capture", "nukeBomb"]);
   host.querySelectorAll(".quick-buy-rail__btn").forEach((btn) => {
     const a = btn.dataset.action || "";
     const armed = mapKinds.has(a) && t === a;
@@ -4562,6 +4645,12 @@ function setupEconomyUi() {
         if (shopOverlay) shopOverlay.hidden = true;
         return;
       }
+      if (action === "nukeBomb") {
+        pendingMapAction = { type: "nukeBomb" };
+        setPendingHint();
+        if (shopOverlay) shopOverlay.hidden = true;
+        return;
+      }
     });
   });
 
@@ -4592,6 +4681,8 @@ function setPendingHint() {
       return "Масс-захват 6×6: тап по центру — все 36 клеток перекрасятся";
     if (pendingMapAction.type === "zone12Capture")
       return "Зона 12×12: тап по центру — 144 клетки перекрасятся";
+    if (pendingMapAction.type === "nukeBomb")
+      return "Бомба: тап по эпицентру — хаотичный взрыв ~12×12, территория станет нейтральной";
     return "";
   })();
   /** Короткая строка в шапке — иначе длинный текст раздувает toolbar на пол-экрана */
@@ -4600,6 +4691,7 @@ function setPendingHint() {
     if (pendingMapAction.type === "zoneCapture") return "4×4 · тап по карте";
     if (pendingMapAction.type === "massCapture") return "6×6 · тап по центру";
     if (pendingMapAction.type === "zone12Capture") return "12×12 · тап по центру";
+    if (pendingMapAction.type === "nukeBomb") return "☢ бомба · тап по карте";
     return "";
   })();
   const text = short;
@@ -4991,6 +5083,18 @@ function connectWs() {
       runBoardSeismicHitShake();
       applySeismicTremorBodyOverride();
       syncEventBanner();
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "nukeBombImpact") {
+      const cells = Array.isArray(msg.cells) ? msg.cells : [];
+      for (let i = 0; i < cells.length; i++) {
+        const p = cells[i];
+        if (!Array.isArray(p) || p.length < 2) continue;
+        pixels.delete(`${p[0] | 0},${p[1] | 0}`);
+      }
+      seismicAfterglowTremorUntilMs = Math.max(seismicAfterglowTremorUntilMs, Date.now() + 2800);
+      applySeismicTremorBodyOverride();
       scheduleDraw({ full: true });
       return;
     }
@@ -5638,7 +5742,7 @@ function connectWs() {
       return;
     }
     if (msg.type === "purchaseError") {
-      const wk = optimisticWeaponPending?.keys;
+      const wk = optimisticWeaponPending?.blastKeys ?? optimisticWeaponPending?.keys;
       revertOptimisticWeapon();
       notifyPurchaseError(msg.reason || "");
       const dr = wk && wk.length ? dirtyRectFromKeys(wk) : null;
@@ -6204,6 +6308,68 @@ function clientShouldIgnoreTerritoryPixelOnEnemyFlagAnchor(x, y, newTeamId) {
   return false;
 }
 
+function clientCellNukeProtectedSpawn(gx, gy) {
+  if (!teamsMeta) return false;
+  for (const t of teamsMeta) {
+    if (t.solo || t.eliminated || !t.spawn) continue;
+    const x0 = t.spawn.x0 | 0;
+    const y0 = t.spawn.y0 | 0;
+    if (gx >= x0 && gx < x0 + FLAG_SPAWN_SIZE && gy >= y0 && gy < y0 + FLAG_SPAWN_SIZE) return true;
+  }
+  return false;
+}
+
+/** Ключи клеток в зоне бомбы — тот же алгоритм, что на сервере. */
+function planClientNukeBombKeys(cx, cy) {
+  const pairs = computeNukeBombBlastCells(
+    cx | 0,
+    cy | 0,
+    roundIndexMeta,
+    gridW,
+    gridH,
+    isClientPlayableCell,
+    clientCellNukeProtectedSpawn
+  );
+  return pairs.map(([x, y]) => `${x},${y}`);
+}
+
+function applyOptimisticNukeBomb(cx, cy) {
+  if (myTeamId == null) return false;
+  const blastKeys = planClientNukeBombKeys(cx, cy);
+  if (blastKeys.length === 0) {
+    notifyReject("water");
+    return false;
+  }
+  revertOptimisticWeapon();
+  const prev = new Map();
+  const clearedKeys = [];
+  for (const k of blastKeys) {
+    const cell = snapshotPixelCell(k);
+    if (cell === undefined) continue;
+    const tid = typeof cell === "number" ? cell | 0 : Number(cell.teamId) | 0;
+    if (tid === 0) continue;
+    prev.set(k, cell);
+    pixels.delete(k);
+    clearedKeys.push(k);
+  }
+  if (clearedKeys.length === 0) {
+    notifyReject("nuke_no_effect");
+    return false;
+  }
+  optimisticWeaponPending = {
+    kind: "nukeBomb",
+    gx: cx | 0,
+    gy: cy | 0,
+    size: 14,
+    keys: clearedKeys,
+    blastKeys,
+    prev,
+  };
+  const dr = dirtyRectFromKeys(blastKeys);
+  scheduleDraw(dr ? { dirty: dr } : { full: true });
+  return true;
+}
+
 /** Список клеток в прямоугольнике захвата — как на сервере (planCaptureRect). */
 function planClientCaptureCells(kind, cx, cy) {
   let x0;
@@ -6295,6 +6461,10 @@ function consumeDuplicatePurchaseVfx(msg) {
   if ((msg.teamId | 0) !== (myTeamId | 0)) return false;
   if (msg.kind !== o.kind) return false;
   if ((Number(msg.gx) | 0) !== o.gx || (Number(msg.gy) | 0) !== o.gy) return false;
+  if (msg.kind === "nukeBomb") {
+    optimisticWeaponPending = null;
+    return true;
+  }
   const sz = typeof msg.size === "number" && Number.isFinite(msg.size) ? msg.size | 0 : 0;
   if (sz !== o.size) return false;
   optimisticWeaponPending = null;
@@ -7170,6 +7340,17 @@ function placePixel(gx, gy) {
         return;
       }
       wsSendJson({ type: "purchaseZone12Capture", x: gx, y: gy });
+      pendingMapAction = null;
+      setPendingHint();
+      return;
+    }
+    if (pendingMapAction.type === "nukeBomb") {
+      if (!applyOptimisticNukeBomb(gx, gy)) {
+        pendingMapAction = null;
+        setPendingHint();
+        return;
+      }
+      wsSendJson({ type: "purchaseNukeBomb", x: gx, y: gy });
       pendingMapAction = null;
       setPendingHint();
       return;

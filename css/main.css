@@ -2586,3 +2586,40 @@ a.overlay__btn {
   background: linear-gradient(90deg, #6366f1, #8b5cf6);
   color: #fff;
 }
+
+/* Полноэкранная вспышка при бомбе (ядро + ударная волна в красном спектре) */
+@keyframes pb-nuke-flash-anim {
+  0% {
+    opacity: 0;
+    filter: brightness(1) saturate(1);
+  }
+  6% {
+    opacity: 1;
+    filter: brightness(2.4) saturate(0.35);
+  }
+  18% {
+    opacity: 0.88;
+    filter: brightness(1.5) saturate(0.5);
+  }
+  100% {
+    opacity: 0;
+    filter: brightness(1) saturate(1);
+  }
+}
+
+.pb-nuke-flash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  pointer-events: none;
+  animation: pb-nuke-flash-anim 2.1s ease-out forwards;
+  background: radial-gradient(
+    ellipse 95% 78% at 50% 42%,
+    rgba(255, 255, 245, 0.97) 0%,
+    rgba(255, 200, 80, 0.55) 12%,
+    rgba(255, 60, 20, 0.62) 32%,
+    rgba(160, 0, 0, 0.72) 58%,
+    rgba(20, 5, 8, 0.88) 100%
+  );
+  mix-blend-mode: screen;
+}

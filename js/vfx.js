@@ -298,6 +298,59 @@ export function createBoardVfx(canvas) {
   }
 
   /**
+   * «Ядерный» взрыв: ударная волна, жар, частицы по периметру очистки.
+   * @param {number} gcx
+   * @param {number} gcy
+   * @param {*} transform
+   * @param {[number, number][]} cells
+   */
+  function nukeExplosion(gcx, gcy, transform, cells) {
+    const gxi = gcx | 0;
+    const gyi = gcy | 0;
+    const t0 = performance.now();
+    shockwaves.push({
+      t0,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 4,
+      color: "#ff3a1a",
+    });
+    shockwaves.push({
+      t0: t0 + 60,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 9,
+      color: "rgba(255,120,40,0.75)",
+    });
+    shockwaves.push({
+      t0: t0 + 130,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 14,
+      color: "rgba(255,200,80,0.5)",
+    });
+    shockwaves.push({
+      t0: t0 + 220,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 20,
+      color: "rgba(255,240,200,0.28)",
+    });
+    burst(gxi, gyi, "#ffffff", transform, 14);
+    burst(gxi, gyi, "#ffcc22", transform, 22);
+    burst(gxi, gyi, "#ff4418", transform, 28);
+    const nCells = Array.isArray(cells) ? cells.length : 0;
+    const cap = Math.min(48, Math.max(14, (nCells >> 2) + 12));
+    for (let i = 0; i < cap; i++) {
+      const c = nCells > 0 ? cells[(Math.random() * nCells) | 0] : [gxi, gyi];
+      if (!Array.isArray(c) || c.length < 2) continue;
+      const col = i % 3 === 0 ? "#ff2200" : i % 3 === 1 ? "#ffaa33" : "#ffee99";
+      burst(c[0] | 0, c[1] | 0, col, transform, 5);
+    }
+    seismicCrackBurst(cells && cells.length ? cells : [[gxi, gyi]]);
+  }
+
+  /**
    * Обвал отрезанной территории: короткие всплески по случайным клеткам + трещины.
    * @param {[number, number][]} cells
    * @param {*} transform
@@ -342,7 +395,7 @@ export function createBoardVfx(canvas) {
     const RIPPLES = 100;
     const PARTICLES = 260;
     const BEAMS = 24;
-    const SHOCKS = 12;
+    const SHOCKS = 18;
     const BOLTS = 3;
     const SHIELDS = 8;
     const ZONES = 8;
@@ -601,6 +654,7 @@ export function createBoardVfx(canvas) {
     flagBaseHitImpact,
     flagCaptureExplosion,
     seismicCrackBurst,
+    nukeExplosion,
     territoryIsolationCollapseBurst,
     render,
     hasWork,

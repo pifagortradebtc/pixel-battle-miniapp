@@ -67,6 +67,7 @@ import {
 } from "./lib/territory-isolation.js";
 import { isWorldMapWaterPixel } from "./lib/world-map-water.js";
 import { buildRandomTreasureMap } from "./lib/map-treasures.js";
+import { computeNukeBombBlastCells } from "./lib/nuke-bomb-shape.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -2357,6 +2358,18 @@ function applyClusterGameReplication(msg) {
       }
       return;
     }
+    case "nukeBombImpact": {
+      const list = Array.isArray(msg.cells) ? msg.cells : [];
+      for (let i = 0; i < list.length; i++) {
+        const pair = list[i];
+        if (!Array.isArray(pair) || pair.length < 2) continue;
+        const x = pair[0] | 0;
+        const y = pair[1] | 0;
+        if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
+        pixels.delete(`${x},${y}`);
+      }
+      return;
+    }
     case "globalEvent":
       return;
     case "serverAnnouncement":
@@ -4599,6 +4612,104 @@ wss.on("connection", (ws, req) => {
       if (tr.total > 0 && tr.first) {
         safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
       }
+      scheduleBroadcastWalletDebounced();
+      return;
+    }
+
+    if (msg.type === "purchaseNukeBomb") {
+      if (!assertCanPlay(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      if (isTeamEliminated(ws.teamId)) {
+        safeSend(ws, { type: "purchaseError", reason: "team_eliminated" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!stageAllows(st)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const cx = msg.x | 0;
+      const cy = msg.y | 0;
+      if (cx < 0 || cx >= gridW || cy < 0 || cy >= gridH) {
+        safeSend(ws, { type: "purchaseError", reason: "out_of_bounds" });
+        return;
+      }
+      if (!cellAllowsPixelPlacement(cx, cy)) {
+        safeSend(ws, { type: "purchaseError", reason: "water" });
+        return;
+      }
+      const protectedMask = buildBattleProtectedMask();
+      const blast = computeNukeBombBlastCells(
+        cx,
+        cy,
+        roundIndex,
+        gridW,
+        gridH,
+        cellAllowsPixelPlacement,
+        (x, y) => protectedMask[y * gridW + x] === 1
+      );
+      if (blast.length === 0) {
+        safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
+        return;
+      }
+      /** @type {[number, number][]} */
+      const cleared = [];
+      for (let i = 0; i < blast.length; i++) {
+        const x = blast[i][0];
+        const y = blast[i][1];
+        const key = `${x},${y}`;
+        const v = pixels.get(key);
+        if (v == null) continue;
+        if ((pixelTeam(v) | 0) === 0) continue;
+        cleared.push([x, y]);
+      }
+      if (cleared.length === 0) {
+        safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
+        return;
+      }
+      const priceQuant = PRICES_QUANT.nukeBomb;
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      for (let i = 0; i < cleared.length; i++) {
+        pixels.delete(`${cleared[i][0]},${cleared[i][1]}`);
+      }
+      if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "nuke_bomb", { deferSave: true });
+      await walletStore.save();
+      afterTerritoryMutation();
+      scheduleStatsBroadcast();
+      broadcast({
+        type: "purchaseVfx",
+        kind: "nukeBomb",
+        teamId: ws.teamId | 0,
+        gx: cx,
+        gy: cy,
+        size: 14,
+        cellsCleared: cleared.length,
+        cellsSample: cleared.slice(0, 72),
+      });
+      broadcast({
+        type: "nukeBombImpact",
+        cx,
+        cy,
+        cells: cleared,
+      });
+      safeSend(ws, { type: "purchaseOk", kind: "nukeBomb", cells: cleared.length, x: cx, y: cy });
+      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
     }
