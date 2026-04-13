@@ -304,50 +304,163 @@ export function createBoardVfx(canvas) {
    * @param {*} transform
    * @param {[number, number][]} cells
    */
+  /**
+   * Премиум-развёртывание передовой базы 6×6: удар с «орбиты», волны, периметр, трещины по клеткам.
+   * @param {number} gx0 левый верх 6×6
+   * @param {number} gy0
+   * @param {string} teamHex цвет команды #rrggbb
+   * @param {*} transform
+   */
+  function militaryBaseDeploy(gx0, gy0, teamHex, transform) {
+    const x0 = gx0 | 0;
+    const y0 = gy0 | 0;
+    const col = typeof teamHex === "string" && teamHex.startsWith("#") ? teamHex : "#a5b4fc";
+    const t0 = performance.now();
+    const gcx = x0 + 3;
+    const gcy = y0 + 3;
+    shockwaves.push({
+      t0,
+      gcx,
+      gcy,
+      radiusCells: 2.4,
+      color: "#fffbeb",
+    });
+    shockwaves.push({
+      t0: t0 + 55,
+      gcx,
+      gcy,
+      radiusCells: 4.2,
+      color: "#fde68a",
+    });
+    shockwaves.push({
+      t0: t0 + 115,
+      gcx,
+      gcy,
+      radiusCells: 6.5,
+      color: col,
+    });
+    shockwaves.push({
+      t0: t0 + 190,
+      gcx,
+      gcy,
+      radiusCells: 9,
+      color: "rgba(255,255,255,0.42)",
+    });
+    shockwaves.push({
+      t0: t0 + 280,
+      gcx,
+      gcy,
+      radiusCells: 12,
+      color: "rgba(129, 140, 248, 0.22)",
+    });
+    zoneFlash(x0, y0, col, transform, 6);
+    burst(x0 + 2, y0 + 2, "#ffffff", transform, 22);
+    burst(x0 + 2, y0 + 2, "#fde68a", transform, 26);
+    burst(x0 + 2, y0 + 2, col, transform, 34);
+    const corners = [
+      [x0, y0],
+      [x0 + 5, y0],
+      [x0, y0 + 5],
+      [x0 + 5, y0 + 5],
+    ];
+    for (let i = 0; i < corners.length; i++) {
+      burst(corners[i][0], corners[i][1], "#fff7d6", transform, 12);
+      burst(corners[i][0], corners[i][1], col, transform, 14);
+    }
+    lineBeam(x0 + 2, y0 + 2, "up", "#fde68a", transform, 8);
+    for (let d = 1; d < 8; d += 2) {
+      lineBeam(x0 + 2, y0 + 2, d, col, transform, 5);
+    }
+    /** @type {[number, number][]} */
+    const cells36 = [];
+    for (let yy = y0; yy < y0 + 6; yy++) {
+      for (let xx = x0; xx < x0 + 6; xx++) {
+        cells36.push([xx, yy]);
+      }
+    }
+    seismicCrackBurst(cells36);
+    for (let i = 0; i < cells36.length; i += 7) {
+      const c = cells36[i];
+      ripple(c[0], c[1], col, transform);
+    }
+  }
+
   function nukeExplosion(gcx, gcy, transform, cells) {
     const gxi = gcx | 0;
     const gyi = gcy | 0;
     const t0 = performance.now();
-    shockwaves.push({
-      t0,
-      gcx: gxi + 0.5,
-      gcy: gyi + 0.5,
-      radiusCells: 4,
-      color: "#ff3a1a",
-    });
-    shockwaves.push({
-      t0: t0 + 60,
-      gcx: gxi + 0.5,
-      gcy: gyi + 0.5,
-      radiusCells: 9,
-      color: "rgba(255,120,40,0.75)",
-    });
-    shockwaves.push({
-      t0: t0 + 130,
-      gcx: gxi + 0.5,
-      gcy: gyi + 0.5,
-      radiusCells: 14,
-      color: "rgba(255,200,80,0.5)",
-    });
-    shockwaves.push({
-      t0: t0 + 220,
-      gcx: gxi + 0.5,
-      gcy: gyi + 0.5,
-      radiusCells: 20,
-      color: "rgba(255,240,200,0.28)",
-    });
-    burst(gxi, gyi, "#ffffff", transform, 14);
-    burst(gxi, gyi, "#ffcc22", transform, 22);
-    burst(gxi, gyi, "#ff4418", transform, 28);
+    const cx = gxi + 0.5;
+    const cy = gyi + 0.5;
     const nCells = Array.isArray(cells) ? cells.length : 0;
-    const cap = Math.min(48, Math.max(14, (nCells >> 2) + 12));
+    const waveSpecs = [
+      [0, 2.4, "rgba(255,255,255,0.96)", 0, 0, 1],
+      [32, 5.2, "#ff1a00", 0.35, -0.22, 1.04],
+      [78, 9.5, "rgba(255,75,25,0.9)", -0.28, 0.31, 0.97],
+      [142, 13.5, "rgba(255,145,45,0.68)", 0.42, 0.18, 1.08],
+      [215, 17.8, "rgba(255,205,95,0.45)", -0.2, -0.38, 0.94],
+      [295, 22.5, "rgba(255,230,180,0.3)", 0.31, 0.27, 1.02],
+      [385, 28, "rgba(200,200,220,0.15)", -0.45, 0.12, 1.06],
+    ];
+    for (let w = 0; w < waveSpecs.length; w++) {
+      const [dt, baseR, col, jx, jy, rs] = waveSpecs[w];
+      shockwaves.push({
+        t0: t0 + dt,
+        gcx: cx + jx + (Math.random() - 0.5) * 0.55,
+        gcy: cy + jy + (Math.random() - 0.5) * 0.55,
+        radiusCells: baseR * rs * (0.94 + Math.random() * 0.1),
+        color: col,
+      });
+    }
+    ripple(gxi, gyi, "#ffffff", transform);
+    ripple(gxi, gyi, "#ffaa44", transform);
+    burst(gxi, gyi, "#ffffff", transform, 18);
+    burst(gxi, gyi, "#ffcc22", transform, 26);
+    burst(gxi, gyi, "#ff4418", transform, 34);
+    const cell = transform.BASE_CELL * transform.scale;
+    const seenRipple = new Set();
+    const organicFlashes = Math.min(48, Math.max(16, 12 + (nCells >> 1)));
+    for (let i = 0; i < organicFlashes; i++) {
+      const c = nCells > 0 ? cells[(Math.random() * nCells) | 0] : [gxi, gyi];
+      if (!Array.isArray(c) || c.length < 2) continue;
+      const bx = c[0] | 0;
+      const by = c[1] | 0;
+      const k = `${bx},${by}`;
+      if (seenRipple.has(k)) continue;
+      seenRipple.add(k);
+      const hue = i % 4;
+      const rc =
+        hue === 0 ? "#ff5500" : hue === 1 ? "#ffcc44" : hue === 2 ? "#ff2200" : "#fff4cc";
+      ripple(bx, by, rc, transform);
+      if (i % 5 === 0) burst(bx, by, "#ffffff", transform, 5);
+    }
+    const smokeN = Math.min(52, Math.max(18, 12 + (nCells >> 2)));
+    for (let i = 0; i < smokeN; i++) {
+      const c = nCells > 0 ? cells[(Math.random() * nCells) | 0] : [gxi, gyi];
+      if (!Array.isArray(c) || c.length < 2) continue;
+      const fx0 = (c[0] | 0) + 0.5 + (Math.random() - 0.5) * 0.65;
+      const fy0 = (c[1] | 0) + 0.5 + (Math.random() - 0.5) * 0.65;
+      const a = Math.random() * Math.PI * 2;
+      const sp = (0.28 + Math.random() * 0.62) * cell * 0.12;
+      particles.push({
+        fx: fx0,
+        fy: fy0,
+        vx: Math.cos(a) * sp * 0.92,
+        vy: Math.sin(a) * sp * 0.78 - cell * 0.07,
+        life: 1,
+        max: 480 + Math.random() * 460,
+        color: `rgba(${85 + (Math.random() * 75) | 0},${65 + (Math.random() * 55) | 0},${55 + (Math.random() * 45) | 0},0.78)`,
+        sizeCells: Math.max(0.09, 0.17 * (0.65 + Math.random() * 0.7)),
+      });
+    }
+    const cap = Math.min(72, Math.max(22, (nCells >> 2) + 20));
     for (let i = 0; i < cap; i++) {
       const c = nCells > 0 ? cells[(Math.random() * nCells) | 0] : [gxi, gyi];
       if (!Array.isArray(c) || c.length < 2) continue;
       const col = i % 3 === 0 ? "#ff2200" : i % 3 === 1 ? "#ffaa33" : "#ffee99";
-      burst(c[0] | 0, c[1] | 0, col, transform, 5);
+      burst(c[0] | 0, c[1] | 0, col, transform, 7);
     }
     seismicCrackBurst(cells && cells.length ? cells : [[gxi, gyi]]);
+    lightningBurst(transform);
   }
 
   /**
@@ -395,7 +508,7 @@ export function createBoardVfx(canvas) {
     const RIPPLES = 100;
     const PARTICLES = 260;
     const BEAMS = 24;
-    const SHOCKS = 18;
+    const SHOCKS = 26;
     const BOLTS = 3;
     const SHIELDS = 8;
     const ZONES = 8;
@@ -655,6 +768,7 @@ export function createBoardVfx(canvas) {
     flagCaptureExplosion,
     seismicCrackBurst,
     nukeExplosion,
+    militaryBaseDeploy,
     territoryIsolationCollapseBurst,
     render,
     hasWork,

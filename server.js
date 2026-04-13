@@ -68,6 +68,12 @@ import {
 import { isWorldMapWaterPixel } from "./lib/world-map-water.js";
 import { buildRandomTreasureMap } from "./lib/map-treasures.js";
 import { computeNukeBombBlastCells } from "./lib/nuke-bomb-shape.js";
+import {
+  QUANTUM_FARM_TICK_MS,
+  computeQuantumFarmLayouts,
+  scoreTeamsAroundFarm,
+  resolveFarmControl,
+} from "./lib/quantum-farms.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -810,6 +816,14 @@ function pickAutoTeamColor(name, emoji, salt) {
 const TEAM_SPAWN_SIZE = 6;
 const TEAM_SPAWN_GAP = 1;
 
+/** Премиум «военная база»: макс. на команду, кулдаун между развёртываниями. */
+const MAX_MILITARY_BASES_PER_TEAM = 2;
+const MILITARY_BASE_COOLDOWN_MS = 120_000;
+/** Мин. зазор (Chebyshev между границами 6×6) от своей главной базы. */
+const MILITARY_MIN_EDGE_GAP_OWN_MAIN = 4;
+/** Мин. зазор от чужой главной базы (только спавн 6×6, не от их передовых баз). */
+const MILITARY_MIN_EDGE_GAP_ENEMY_MAIN = 6;
+
 /** Сохранённые одноразовые шаги событий (сейсмика / предупреждение). */
 let battleEventsApplied = {};
 
@@ -958,10 +972,18 @@ function buildBattleProtectedMask() {
   const mask = new Uint8Array(gridW * gridH);
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
-    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
-    for (let yy = t.spawnY0; yy < t.spawnY0 + TEAM_SPAWN_SIZE; yy++) {
-      for (let xx = t.spawnX0; xx < t.spawnX0 + TEAM_SPAWN_SIZE; xx++) {
-        if (xx >= 0 && xx < gridW && yy >= 0 && yy < gridH) mask[yy * gridW + xx] = 1;
+    if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
+      for (let yy = t.spawnY0; yy < t.spawnY0 + TEAM_SPAWN_SIZE; yy++) {
+        for (let xx = t.spawnX0; xx < t.spawnX0 + TEAM_SPAWN_SIZE; xx++) {
+          if (xx >= 0 && xx < gridW && yy >= 0 && yy < gridH) mask[yy * gridW + xx] = 1;
+        }
+      }
+    }
+    for (const o of getTeamMilitaryOutposts(t)) {
+      for (let yy = o.y0; yy < o.y0 + TEAM_SPAWN_SIZE; yy++) {
+        for (let xx = o.x0; xx < o.x0 + TEAM_SPAWN_SIZE; xx++) {
+          if (xx >= 0 && xx < gridW && yy >= 0 && yy < gridH) mask[yy * gridW + xx] = 1;
+        }
       }
     }
   }
@@ -1119,6 +1141,35 @@ function resetBattleEventsStateForNewBattleRound() {
   clearPendingManualSeismicSchedule();
 }
 
+/** Нормализованный список передовых баз 6×6 команды (из `dynamicTeams`). */
+function getTeamMilitaryOutposts(t) {
+  if (!t || !Array.isArray(t.militaryOutposts)) return [];
+  const out = [];
+  for (let i = 0; i < t.militaryOutposts.length; i++) {
+    const o = t.militaryOutposts[i];
+    if (o && typeof o.x0 === "number" && typeof o.y0 === "number") {
+      out.push({ x0: o.x0 | 0, y0: o.y0 | 0 });
+    }
+  }
+  return out;
+}
+
+/** Углы 6×6 всех главных баз и передовых баз (для коллизий при спавне и размещении). */
+function allSpawnLikeRectsForConflict() {
+  /** @type {{ x0: number, y0: number }[]} */
+  const out = [];
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
+      out.push({ x0: t.spawnX0, y0: t.spawnY0 });
+    }
+    for (const o of getTeamMilitaryOutposts(t)) {
+      out.push({ x0: o.x0, y0: o.y0 });
+    }
+  }
+  return out;
+}
+
 function teamsForMeta() {
   return dynamicTeams.map((t) => ({
     id: t.id,
@@ -1131,12 +1182,20 @@ function teamsForMeta() {
       !t.solo && typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number"
         ? { x0: t.spawnX0, y0: t.spawnY0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE }
         : null,
+    militaryOutposts: !t.solo
+      ? getTeamMilitaryOutposts(t).map((o) => ({
+          x0: o.x0,
+          y0: o.y0,
+          w: TEAM_SPAWN_SIZE,
+          h: TEAM_SPAWN_SIZE,
+        }))
+      : [],
   }));
 }
 
 const DYNAMIC_TEAMS_PATH = path.join(ROOT, "data", "dynamic-teams.json");
 
-/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, eliminated?: boolean, createdByPlayerKey?: string }[]} */
+/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, eliminated?: boolean, createdByPlayerKey?: string, militaryOutposts?: { x0: number, y0: number }[], lastMilitaryBaseAt?: number }[]} */
 let dynamicTeams = [];
 let nextTeamId = 1;
 
@@ -1153,12 +1212,20 @@ function loadDynamicTeams() {
         const raw = typeof t.color === "string" ? t.color.trim() : "";
         const hex = raw ? sanitizeHexColor(raw) : "";
         const color = hex || (raw || "#888888");
+        const mo = Array.isArray(t.militaryOutposts)
+          ? t.militaryOutposts
+              .filter((o) => o && typeof o.x0 === "number" && typeof o.y0 === "number")
+              .map((o) => ({ x0: o.x0 | 0, y0: o.y0 | 0 }))
+          : [];
+        const lastMb = Number(t.lastMilitaryBaseAt);
         return {
           ...t,
           id: Number(t.id) | 0,
           color,
           solo: !!t.solo,
           eliminated: !!t.eliminated,
+          militaryOutposts: mo,
+          lastMilitaryBaseAt: Number.isFinite(lastMb) && lastMb > 0 ? lastMb : 0,
         };
       });
       if (typeof j.nextId === "number" && j.nextId >= 1) {
@@ -1446,6 +1513,7 @@ function rebuildLandFromRound(ri) {
   const h = w;
   gridW = w;
   gridH = h;
+  nukeBombUsesByPlayerThisRound.clear();
 
   if (!baseRegion360 || baseRegion360.length !== BASE_GRID * BASE_GRID) {
     landGrid = null;
@@ -1514,6 +1582,16 @@ function rebuildLandFromRound(ri) {
     }
   }
   clearAllFlagCaptureState();
+  quantumFarmLayouts = computeQuantumFarmLayouts(playableGrid, gridW, gridH);
+  quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
+  if (quantumFarmLayouts.length) {
+    broadcast({
+      type: "quantumFarmsInit",
+      farms: quantumFarmLayouts.map(({ id, x0, y0, w, h }) => ({ id, x0, y0, w, h })),
+    });
+  } else {
+    broadcast({ type: "quantumFarmsInit", farms: [] });
+  }
   afterTerritoryMutation();
   applyTreasuresAfterLandRebuild();
 }
@@ -1833,6 +1911,18 @@ let lastTerritoryIsolationSyncJson = "[]";
 
 /** @type {Map<number, { teamRecoveryUntil: number, teamRecoverySec: number }>} */
 const teamEffects = new Map();
+
+/** Квантовые фермы 2×2 у центра: позиции пересчитываются при rebuildLandFromRound. */
+/** @type {{ id: number, x0: number, y0: number, w: number, h: number }[]} */
+let quantumFarmLayouts = [];
+/** @type {number[]} владельцы по индексу (для детекта смены и тика дохода). */
+let quantumFarmOwnerPrev = [];
+let quantumFarmIncomeTickSeq = 0;
+
+/** Тактическая бомба: не больше N на игрока за текущую карту (сброс при rebuildLandFromRound). */
+const NUKE_BOMB_MAX_PER_PLAYER_PER_MAP = 2;
+/** @type {Map<string, number>} */
+let nukeBombUsesByPlayerThisRound = new Map();
 
 /** Всегда число (0 = пусто/битые данные), чтобы не ломать повторные удары по флагу из‑за string vs number в JSON/Redis. */
 function pixelTeam(val) {
@@ -2230,9 +2320,11 @@ async function buildWalletPayload(ws) {
   const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, now) : BASE_ACTION_COOLDOWN_SEC * 1000;
   const ref = u.invitedByPlayerKey ? sanitizePlayerKey(u.invitedByPlayerKey) : "";
   const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, now) : BASE_ACTION_COOLDOWN_SEC;
+  const farmQ5 = tid && quantumFarmLayouts.length ? getQuantumFarmIncomeQuantsForTeam(tid) : 0;
   return {
     type: "wallet",
     balanceUSDT: devUnl ? 999999999 : u.balanceUSDT,
+    quantFarmIncomeQuantsPer5s: farmQ5,
     cooldownMs: cd,
     effectiveRecoverySec,
     personalRecoveryUntil: u.personalRecoveryUntil,
@@ -2266,6 +2358,107 @@ function safeSend(ws, data) {
   } catch {
     return false;
   }
+}
+
+function quantumPixelTeamAtKey(key) {
+  const v = pixels.get(key);
+  return v == null ? 0 : pixelTeam(v);
+}
+
+function computeQuantumFarmOwnersNow() {
+  /** @type {number[]} */
+  const out = [];
+  for (let i = 0; i < quantumFarmLayouts.length; i++) {
+    const f = quantumFarmLayouts[i];
+    const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, quantumPixelTeamAtKey);
+    out.push(resolveFarmControl(scores).owner | 0);
+  }
+  return out;
+}
+
+function getQuantumFarmIncomeQuantsForTeam(teamId) {
+  const tid = teamId | 0;
+  if (!tid || !quantumFarmLayouts.length) return 0;
+  const owners = computeQuantumFarmOwnersNow();
+  let n = 0;
+  for (let i = 0; i < owners.length; i++) {
+    if ((owners[i] | 0) === tid) n++;
+  }
+  return n;
+}
+
+function broadcastQuantumFarmTeamNotice(teamId, payload) {
+  const tid = teamId | 0;
+  broadcast({ ...payload, teamId: tid });
+}
+
+function syncQuantumFarmStateAfterTerritoryChange() {
+  if (gameFinished || !quantumFarmLayouts.length) return;
+  if (REDIS_URL && !isClusterLeader()) return;
+  const next = computeQuantumFarmOwnersNow();
+  if (quantumFarmOwnerPrev.length !== next.length) {
+    quantumFarmOwnerPrev = next;
+    return;
+  }
+  for (let i = 0; i < next.length; i++) {
+    const a = quantumFarmOwnerPrev[i] | 0;
+    const b = next[i] | 0;
+    if (a === b) continue;
+    const farmId = quantumFarmLayouts[i].id;
+    if (a && !b) {
+      broadcastQuantumFarmTeamNotice(a, { type: "quantumFarmNotice", kind: "disconnected", farmId });
+    } else if (!a && b) {
+      broadcastQuantumFarmTeamNotice(b, {
+        type: "quantumFarmNotice",
+        kind: "connected",
+        farmId,
+      });
+    } else if (a && b && a !== b) {
+      broadcastQuantumFarmTeamNotice(a, { type: "quantumFarmNotice", kind: "lost", farmId, capturedByTeamId: b });
+      broadcastQuantumFarmTeamNotice(b, {
+        type: "quantumFarmNotice",
+        kind: "captured_from",
+        farmId,
+        prevTeamId: a,
+      });
+    }
+  }
+  quantumFarmOwnerPrev = next;
+}
+
+async function tickQuantumFarmIncome() {
+  if (REDIS_URL && !isClusterLeader()) return;
+  if (gameFinished || !quantumFarmLayouts.length) return;
+  const owners = computeQuantumFarmOwnersNow();
+  /** @type {Map<number, number>} */
+  const farmsPerTeam = new Map();
+  for (let i = 0; i < owners.length; i++) {
+    const t = owners[i] | 0;
+    if (!t) continue;
+    farmsPerTeam.set(t, (farmsPerTeam.get(t) | 0) + 1);
+  }
+  if (farmsPerTeam.size === 0) return;
+  quantumFarmIncomeTickSeq += 1;
+  const tickTag = `${roundIndex}_${quantumFarmIncomeTickSeq}_${Date.now()}`;
+  /** @type {Map<string, number>} */
+  const quantByPk = new Map();
+  for (const [tid, nf] of farmsPerTeam) {
+    const nFarm = nf | 0;
+    if (nFarm < 1) continue;
+    const playerKeys = collectWinnerTeamPlayerKeys(tid);
+    for (const pk of playerKeys) {
+      if (!pk || isDevUnlimitedWallet(pk)) continue;
+      quantByPk.set(pk, (quantByPk.get(pk) | 0) + nFarm);
+    }
+  }
+  if (quantByPk.size === 0) return;
+  for (const [pk, q] of quantByPk) {
+    const qq = q | 0;
+    if (qq < 1) continue;
+    await walletStore.credit(pk, quantToUsdt(qq), { txHash: `quantum_farms:${tickTag}:${pk.slice(0, 24)}` });
+  }
+  await walletStore.save();
+  await broadcastWalletPayloadToAllClients();
 }
 
 function applyFullMessageToPixelsCluster(msg) {
@@ -2583,6 +2776,21 @@ function applyClusterGameReplication(msg) {
       mstimAltSeasonBurstUntilMs = Number.isFinite(u) && u > 0 ? u | 0 : 0;
       return;
     }
+    case "quantumFarmsInit": {
+      if (Array.isArray(msg.farms)) {
+        quantumFarmLayouts = msg.farms
+          .filter((f) => f && typeof f.x0 === "number" && typeof f.y0 === "number")
+          .map((f) => ({
+            id: Number(f.id) | 0,
+            x0: f.x0 | 0,
+            y0: f.y0 | 0,
+            w: typeof f.w === "number" ? f.w | 0 : 2,
+            h: typeof f.h === "number" ? f.h | 0 : 2,
+          }));
+        quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
+      }
+      return;
+    }
     default:
       return;
   }
@@ -2640,6 +2848,25 @@ function cellTouchesTeamTerritory(x, y, teamId) {
       const v = pixels.get(`${nx},${ny}`);
       if (v != null && pixelTeam(v) === tid) return true;
       if (t && cellInsideTeamSpawnRect(nx, ny, t)) return true;
+      if (t && cellInsideAnyMilitaryOutpostRect(nx, ny, tid)) return true;
+    }
+  }
+  return false;
+}
+
+/** Клетка внутри прямоугольника передовой базы команды (6×6). */
+function cellInsideAnyMilitaryOutpostRect(x, y, teamId) {
+  const tid = teamId | 0;
+  const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
+  if (!t) return false;
+  for (const o of getTeamMilitaryOutposts(t)) {
+    if (
+      x >= o.x0 &&
+      x < o.x0 + TEAM_SPAWN_SIZE &&
+      y >= o.y0 &&
+      y < o.y0 + TEAM_SPAWN_SIZE
+    ) {
+      return true;
     }
   }
   return false;
@@ -2951,6 +3178,77 @@ function spawnRectsConflict(x0, y0, ox0, oy0) {
   return !(ax1 < bx0 || bx1 < ax0 || ay1 < by0 || by1 < ay0);
 }
 
+/** Chebyshev-зазор между границами двух осевых прямоугольников (клетки между краями). */
+function rectChebyshevEdgeGap(x0, y0, w, h, ox0, oy0, ow, oh) {
+  const dx = Math.max(0, Math.max(ox0 - (x0 + w), x0 - (ox0 + ow)));
+  const dy = Math.max(0, Math.max(oy0 - (y0 + h), y0 - (oy0 + oh)));
+  return Math.max(dx, dy);
+}
+
+/**
+ * Проверка размещения передовой базы (левый верх 6×6).
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+function validateMilitaryBasePlacement(teamId, x0, y0) {
+  const tid = teamId | 0;
+  if (x0 < 0 || y0 < 0 || x0 + TEAM_SPAWN_SIZE > gridW || y0 + TEAM_SPAWN_SIZE > gridH) {
+    return { ok: false, reason: "military_bounds" };
+  }
+  if (!rectAllLandSpan(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) {
+    return { ok: false, reason: "military_water" };
+  }
+  if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) {
+    return { ok: false, reason: "military_occupied" };
+  }
+  const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
+  if (!t) return { ok: false, reason: "no_team" };
+  const existing = getTeamMilitaryOutposts(t);
+  if (existing.length >= MAX_MILITARY_BASES_PER_TEAM) {
+    return { ok: false, reason: "military_max" };
+  }
+  const reserved = allSpawnLikeRectsForConflict();
+  for (let i = 0; i < reserved.length; i++) {
+    const o = reserved[i];
+    if (spawnRectsConflict(x0, y0, o.x0, o.y0)) {
+      return { ok: false, reason: "military_conflict" };
+    }
+  }
+  if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
+    const gOwn = rectChebyshevEdgeGap(
+      x0,
+      y0,
+      TEAM_SPAWN_SIZE,
+      TEAM_SPAWN_SIZE,
+      t.spawnX0,
+      t.spawnY0,
+      TEAM_SPAWN_SIZE,
+      TEAM_SPAWN_SIZE
+    );
+    if (gOwn < MILITARY_MIN_EDGE_GAP_OWN_MAIN) {
+      return { ok: false, reason: "military_too_close_own_main" };
+    }
+  }
+  for (const ot of dynamicTeams) {
+    if (ot.solo || ot.eliminated) continue;
+    if ((ot.id | 0) === tid) continue;
+    if (typeof ot.spawnX0 !== "number" || typeof ot.spawnY0 !== "number") continue;
+    const gEn = rectChebyshevEdgeGap(
+      x0,
+      y0,
+      TEAM_SPAWN_SIZE,
+      TEAM_SPAWN_SIZE,
+      ot.spawnX0,
+      ot.spawnY0,
+      TEAM_SPAWN_SIZE,
+      TEAM_SPAWN_SIZE
+    );
+    if (gEn < MILITARY_MIN_EDGE_GAP_ENEMY_MAIN) {
+      return { ok: false, reason: "military_too_close_enemy_main" };
+    }
+  }
+  return { ok: true };
+}
+
 function rectAllLandSpan(x0, y0, w, h) {
   for (let y = y0; y < y0 + h; y++) {
     for (let x = x0; x < x0 + w; x++) {
@@ -2985,7 +3283,7 @@ function findValidSpawnRect6() {
   const maxX = gridW - TEAM_SPAWN_SIZE;
   const maxY = gridH - TEAM_SPAWN_SIZE;
   if (maxX < 0 || maxY < 0) return null;
-  const others = existingSpawnPositions();
+  const others = allSpawnLikeRectsForConflict();
   let seed = (Date.now() ^ (nextTeamId * 0x9e3779b9)) >>> 0;
   const rand = () => {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -3086,7 +3384,35 @@ function ensureAllTeamSpawnsAfterLoad() {
     }
   }
   if (changed) saveDynamicTeams();
+  ensureMilitaryOutpostPixelsAfterLoad();
   afterTerritoryMutation();
+}
+
+/** Восстановить заливку 6×6 для сохранённых передовых баз после загрузки состояния. */
+function ensureMilitaryOutpostPixelsAfterLoad() {
+  if (!landGrid) return;
+  let changed = false;
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    for (const o of getTeamMilitaryOutposts(t)) {
+      let missing = false;
+      for (let y = o.y0; y < o.y0 + TEAM_SPAWN_SIZE && !missing; y++) {
+        for (let x = o.x0; x < o.x0 + TEAM_SPAWN_SIZE; x++) {
+          const p = pixels.get(`${x},${y}`);
+          if (!p || (pixelTeam(p) | 0) !== tid) {
+            missing = true;
+            break;
+          }
+        }
+      }
+      if (missing) {
+        fillTeamSpawnAreaSilent(tid, o.x0, o.y0, "");
+        changed = true;
+      }
+    }
+  }
+  if (changed) afterTerritoryMutation();
 }
 
 /** Подсчёт пикселей по teamId на суше (как в stats). */
@@ -3144,6 +3470,7 @@ function afterTerritoryMutation() {
   notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
   lastTerritoryCountSnapshot = new Map(next);
   scanAndEliminateTeamsWithNoTerritory();
+  syncQuantumFarmStateAfterTerritoryChange();
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
   checkDuelInstantWin(st);
@@ -3171,6 +3498,8 @@ function eliminateTeamByTerritoryLoss(teamId) {
     broadcastTerritoryIsolationSyncIfChanged(Date.now());
   }
   dt.eliminated = true;
+  dt.militaryOutposts = [];
+  dt.lastMilitaryBaseAt = 0;
   saveDynamicTeams();
   teamEffects.delete(teamId);
   teamMemberKeys.delete(teamId);
@@ -3674,6 +4003,7 @@ async function sendConnectionMeta(ws) {
     tournamentTimeScale: getTournamentTimeScale(),
     territoryIsolation: buildTerritoryIsolationGroupsPayload(isoNow),
     treasureSpots: buildTreasureSpotsForMeta(),
+    quantumFarms: quantumFarmLayouts.map(({ id, x0, y0, w, h }) => ({ id, x0, y0, w, h })),
   });
   safeSend(ws, await buildWalletPayload(ws));
 }
@@ -4258,6 +4588,8 @@ wss.on("connection", (ws, req) => {
         spawnX0: spawn.x0,
         spawnY0: spawn.y0,
         createdByPlayerKey: pkForColor || "",
+        militaryOutposts: [],
+        lastMilitaryBaseAt: 0,
       });
       saveDynamicTeams();
       paintTeamSpawnArea(id, spawn.x0, spawn.y0, pkForColor || "");
@@ -4650,6 +4982,11 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "water" });
         return;
       }
+      const used = pk ? nukeBombUsesByPlayerThisRound.get(pk) | 0 : 0;
+      if (used >= NUKE_BOMB_MAX_PER_PLAYER_PER_MAP) {
+        safeSend(ws, { type: "purchaseError", reason: "nuke_limit_round" });
+        return;
+      }
       const protectedMask = buildBattleProtectedMask();
       const blast = computeNukeBombBlastCells(
         cx,
@@ -4688,6 +5025,7 @@ wss.on("connection", (ws, req) => {
       for (let i = 0; i < cleared.length; i++) {
         pixels.delete(`${cleared[i][0]},${cleared[i][1]}`);
       }
+      if (pk) nukeBombUsesByPlayerThisRound.set(pk, used + 1);
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "nuke_bomb", { deferSave: true });
       await walletStore.save();
       afterTerritoryMutation();
@@ -4700,7 +5038,7 @@ wss.on("connection", (ws, req) => {
         gy: cy,
         size: 14,
         cellsCleared: cleared.length,
-        cellsSample: cleared.slice(0, 72),
+        cellsSample: cleared.slice(0, 120),
       });
       broadcast({
         type: "nukeBombImpact",
@@ -4709,6 +5047,87 @@ wss.on("connection", (ws, req) => {
         cells: cleared,
       });
       safeSend(ws, { type: "purchaseOk", kind: "nukeBomb", cells: cleared.length, x: cx, y: cy });
+      safeSend(ws, await buildWalletPayload(ws));
+      scheduleBroadcastWalletDebounced();
+      return;
+    }
+
+    if (msg.type === "purchaseMilitaryBase") {
+      if (!assertCanPlay(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      if (isTeamEliminated(ws.teamId)) {
+        safeSend(ws, { type: "purchaseError", reason: "team_eliminated" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!stageAllows(st)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      const tid = ws.teamId | 0;
+      const dt = dynamicTeams.find((t) => !t.solo && !t.eliminated && (t.id | 0) === tid);
+      if (!dt) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      const now = Date.now();
+      const lastMb = Number(dt.lastMilitaryBaseAt) | 0;
+      if (lastMb > 0 && now - lastMb < MILITARY_BASE_COOLDOWN_MS) {
+        safeSend(ws, { type: "purchaseError", reason: "military_cooldown" });
+        return;
+      }
+      const cx = msg.x | 0;
+      const cy = msg.y | 0;
+      const x0 = cx - 2;
+      const y0 = cy - 2;
+      const val = validateMilitaryBasePlacement(tid, x0, y0);
+      if (!val.ok) {
+        safeSend(ws, { type: "purchaseError", reason: val.reason || "military_invalid" });
+        return;
+      }
+      const priceQuant = PRICES_QUANT.militaryBase;
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      if (!Array.isArray(dt.militaryOutposts)) dt.militaryOutposts = [];
+      dt.militaryOutposts.push({ x0, y0 });
+      dt.lastMilitaryBaseAt = now;
+      saveDynamicTeams();
+      if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "military_base", { deferSave: true });
+      await walletStore.save();
+      paintTeamSpawnArea(tid, x0, y0, pk);
+      scheduleStatsBroadcast();
+      broadcast({
+        type: "purchaseVfx",
+        kind: "militaryBase",
+        teamId: tid,
+        gx: x0,
+        gy: y0,
+        size: TEAM_SPAWN_SIZE,
+      });
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
+      safeSend(ws, {
+        type: "purchaseOk",
+        kind: "militaryBase",
+        x0,
+        y0,
+        size: TEAM_SPAWN_SIZE,
+        total: getTeamMilitaryOutposts(dt).length,
+      });
       safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
       return;
@@ -5659,6 +6078,9 @@ async function telegramPollLoop() {
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
   schedulePlayStartBroadcast();
+  setInterval(() => {
+    void tickQuantumFarmIncome();
+  }, QUANTUM_FARM_TICK_MS);
   if (REDIS_URL) {
     const ch = REDIS_GAME_CHANNEL;
     import("./lib/redis-game-bus.mjs")

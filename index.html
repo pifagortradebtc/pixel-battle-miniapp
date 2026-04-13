@@ -530,17 +530,45 @@
               <div class="game-shop__card-head">
                 <div class="game-shop__icon">☢</div>
                 <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title">Бомба</h3>
+                  <h3 class="game-shop__card-title">Тактическая бомба</h3>
                   <p class="game-shop__card-desc">
-                    Ядерный удар: тап по любой точке карты. Хаотичная зона ~12×12 очищает территорию (нейтральные клетки). Базы команд 6×6 под защитой.
+                    Удар по карте: органическая волна ~12×12 с рваным краем сносит закраску в нейтраль — рвёт коридоры, изоляцию и оборону. Базы 6×6 не задеты. Дорого, максимум 2 бомбы на игрока за карту.
                   </p>
                 </div>
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">240 квантов</span>
+                  <span class="game-shop__price">340 квантов</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-nuke-bomb" data-action="nukeBomb">Выбрать</button>
+              </div>
+            </article>
+            <article
+              class="game-shop__card game-shop__card--premium game-shop__card--elite game-shop__card--military-supreme"
+            >
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--hot">Топ</span>
+                <span class="game-shop__badge game-shop__badge--best">FOB</span>
+              </div>
+              <div class="game-shop__card-head game-shop__card-head--wide">
+                <div class="game-shop__icon game-shop__icon--xl" aria-hidden="true">🎖️</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title game-shop__card-title--glow">Военная база</h3>
+                  <p class="game-shop__card-desc">
+                    <strong>Премиум-способность:</strong> удар с воздуха — закрепите плацдарм 6×6 в ключевой точке карты. Команда
+                    получает <strong>второй вектор наступления</strong>; линия снабжения и изоляция по-прежнему идут от
+                    <strong>главной</strong> базы — играйте умно.
+                  </p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price game-shop__price--xl">420 квантов</span>
+                  <span class="game-shop__price-sub">~60 USDT · до 2 баз · кулдаун ~2 мин</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn shop-btn--supreme" id="shop-military-base" data-action="militaryBase">
+                  Развернуть
+                </button>
               </div>
             </article>
           </div>
@@ -643,6 +671,12 @@
             —
           </div>
           <span id="wallet-balance" class="toolbar__wallet toolbar__wallet--lead" hidden title="Игровая валюта — кванты">💰 0 квантов</span>
+          <span
+            id="toolbar-quantum-objective"
+            class="toolbar__quantum-objective"
+            hidden
+            title="Квантовые фермы у центра карты — главные контрольные точки"
+          ></span>
         </div>
         <div class="toolbar__actions">
           <button type="button" id="btn-deposit" class="toolbar__btn" hidden title="Пополнить кванты (оплата USDT)">Кванты +</button>

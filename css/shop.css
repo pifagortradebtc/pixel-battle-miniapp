@@ -1111,6 +1111,85 @@
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45), 0 0 48px rgba(168, 85, 247, 0.12);
 }
 
+/* Премиум: военная база (FOB) — крупнее и заметнее остальных карточек */
+.game-shop__card--military-supreme {
+  grid-column: 1 / -1;
+  padding: 18px 16px 16px;
+  border-width: 2px;
+  border-color: rgba(251, 191, 36, 0.55);
+  background: linear-gradient(
+    148deg,
+    rgba(251, 191, 36, 0.16) 0%,
+    rgba(245, 158, 11, 0.08) 28%,
+    rgba(12, 14, 28, 0.96) 62%
+  );
+  box-shadow:
+    0 10px 48px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    0 0 64px rgba(251, 191, 36, 0.18);
+  position: relative;
+  overflow: hidden;
+}
+
+.game-shop__card--military-supreme::before {
+  content: "";
+  position: absolute;
+  inset: -40%;
+  background: conic-gradient(from 120deg, transparent 0%, rgba(251, 191, 36, 0.07) 35%, transparent 55%);
+  animation: game-shop-mil-glow 8s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes game-shop-mil-glow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.game-shop__card-head--wide {
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.game-shop__icon--xl {
+  font-size: 2.35rem;
+  filter: drop-shadow(0 0 12px rgba(251, 191, 36, 0.45));
+}
+
+.game-shop__card-title--glow {
+  font-size: 1.12rem;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 24px rgba(251, 191, 36, 0.35);
+}
+
+.game-shop__price--xl {
+  font-size: 1.05rem;
+  font-weight: 900;
+  color: #fde68a;
+}
+
+.game-shop__price-sub {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--shop-muted);
+  line-height: 1.35;
+}
+
+.game-shop__badge--best {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.95), rgba(245, 158, 11, 0.88));
+  color: #1a1204;
+  font-weight: 900;
+}
+
+.shop-btn--supreme {
+  min-width: 118px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  box-shadow: 0 0 24px rgba(251, 191, 36, 0.22);
+}
+
 .game-shop__topup-intro {
   margin: 0 0 12px;
   font-size: 0.72rem;

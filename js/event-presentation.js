@@ -246,6 +246,16 @@ function playSting(kind) {
 
     const now = audioCtx.currentTime;
     const master = audioCtx.createGain();
+    if (kind === "nuke-bomb") {
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.34, now + 0.032);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.78);
+      master.connect(audioCtx.destination);
+      playOscThrough("triangle", 44, 15, 0.21, 0.64, master, now);
+      playOscThrough("sine", 102, 38, 0.11, 0.52, master, now + 0.035);
+      playOscThrough("square", 228, 88, 0.052, 0.3, master, now + 0.1);
+      return;
+    }
     const epic = kind === "base_captured" || kind === "final-ten";
     const tail = epic ? 0.58 : 0.44;
     master.gain.setValueAtTime(0.0001, now);
@@ -558,7 +568,7 @@ export function enqueueBaseCapturedPresentation(attackerLabel, defenderLabel) {
 
 /**
  * Магазинный захват зоны на карте (broadcast purchaseVfx).
- * @param {"zoneCapture"|"massCapture"|"zone12Capture"} kind
+ * @param {"zoneCapture"|"massCapture"|"zone12Capture"|"militaryBase"} kind
  * @param {string} teamName
  * @param {number} size сторона квадрата
  */
@@ -567,6 +577,7 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size) {
   const s = size | 0;
   let title = "Захват территории";
   let subtitle = `Команда «${name}»`;
+  let holdMs = 2100;
   if (kind === "zoneCapture") {
     title = `Захват зоны ${s}×${s}`;
     subtitle = `«${name}» закрепляет блок ${s}×${s}`;
@@ -576,13 +587,17 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size) {
   } else if (kind === "zone12Capture") {
     title = `Штурм ${s}×${s}`;
     subtitle = `«${name}» забирает крупный сектор`;
+  } else if (kind === "militaryBase") {
+    title = "ПЕРЕДОВАЯ БАЗА";
+    subtitle = `«${name}» — стратегический плацдарм 6×6. Новый фронт на карте.`;
+    holdMs = 2800;
   }
   enqueueBattleCinematic({
     title,
     subtitle,
     theme: "gold",
     sound: "gold",
-    holdMs: 2100,
+    holdMs,
   });
 }
 
@@ -789,4 +804,9 @@ export function syncPremiumBattlePresentation(opts) {
   }
 
   return false;
+}
+
+/** Низкий удар тактической бомбы (Web Audio, если доступен в браузере / WebView). */
+export function playNukeBombImpactSound() {
+  playSting("nuke-bomb");
 }

@@ -14,6 +14,7 @@ import {
   notifySeismicPreview,
   enqueueBaseCapturedPresentation,
   enqueueTerritoryCapturePresentation,
+  playNukeBombImpactSound,
 } from "./event-presentation.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
@@ -37,6 +38,7 @@ import {
 import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
 import { TERRITORY_ISOLATION_GRACE_MS } from "../lib/territory-isolation.js";
+import { scoreTeamsAroundFarm, resolveFarmControl } from "../lib/quantum-farms.js";
 
 let gridW = 360;
 let gridH = 360;
@@ -279,6 +281,7 @@ const leaderboardExpandBtn = document.getElementById("leaderboard-expand-btn");
 const roundTimerEl = document.getElementById("round-timer");
 const spectatorBadgeEl = document.getElementById("spectator-badge");
 const walletBalanceEl = document.getElementById("wallet-balance");
+const toolbarQuantumObjectiveEl = document.getElementById("toolbar-quantum-objective");
 const toolbarPixelTimerEl = document.getElementById("toolbar-pixel-timer");
 const toolbarBuffsEl = document.getElementById("toolbar-buffs");
 const toolbarBuffPersonalEl = document.getElementById("toolbar-buff-personal");
@@ -765,11 +768,24 @@ let pendingLeaveToCreate = false;
 
 /** Экономика с сервера */
 let walletState = null;
+
+/** Позиции квантовых ферм с сервера (2×2 якоря). */
+/** @type {{ id: number, x0: number, y0: number, w: number, h: number }[]} */
+let quantumFarmsMeta = [];
 let lastStatsGlobalEvent = null;
 /** Предупреждение сейсмики: подсветка зон до удара. */
 let seismicPreviewClient = null;
 /** Визуальный «хвост» после удара (пыль / трещины). */
 let seismicAftermathUntilMs = 0;
+/** Кратковременный «ожог» зоны после тактической бомбы (сеточные координаты, пока gx1 >= gx0). */
+let nukeAftermathUntilMs = 0;
+let nukeAftermathGx0 = 0;
+let nukeAftermathGy0 = 0;
+let nukeAftermathGx1 = -1;
+let nukeAftermathGy1 = -1;
+/** Точная органическая маска взрыва для ожога (не заливка прямоугольником). */
+/** @type {Set<string> | null} */
+let nukeAftermathBlastKeys = null;
 /** Тремор body.pb-seismic-tremor: превью + несколько секунд после удара (vfxLoop подстраховывает класс). */
 let seismicAfterglowTremorUntilMs = 0;
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -785,6 +801,15 @@ let myFlagCriticalUntil = 0;
 let crisisCooldownUntil = 0;
 /** Ожидание тапа по карте: зона 4×4 или 6×6 */
 let pendingMapAction = null;
+
+/** Сетка под курсором для превью размещения передовой базы (-1 = нет). */
+let mapHoverGx = -1;
+let mapHoverGy = -1;
+
+const CLIENT_MILITARY_MAX_BASES = 2;
+const CLIENT_MILITARY_GAP_OWN_MAIN = 4;
+const CLIENT_MILITARY_GAP_ENEMY_MAIN = 6;
+const CLIENT_SPAWN_RECT_GAP = 1;
 /** Бонус квантов к депозиту (см. пакеты на сервере) */
 let depositBonusQuant = 0;
 
@@ -874,6 +899,32 @@ function clientCellInsideSpawnRect(x, y, sp) {
   return x >= sp.x0 && x < sp.x0 + sp.w && y >= sp.y0 && y < sp.y0 + sp.h;
 }
 
+/** Прямоугольники передовых баз команды из meta (как на сервере 6×6). */
+function clientMilitaryOutpostRects(teamId) {
+  if (teamId == null || !teamsMeta) return [];
+  const t = teamsMeta.find((x) => (x.id | 0) === (teamId | 0));
+  const arr = t?.militaryOutposts;
+  if (!Array.isArray(arr)) return [];
+  /** @type {{ x0: number, y0: number, w: number, h: number }[]} */
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const r = arr[i];
+    if (!r || typeof r.x0 !== "number" || typeof r.y0 !== "number") continue;
+    const w = typeof r.w === "number" ? r.w : FLAG_SPAWN_SIZE;
+    const h = typeof r.h === "number" ? r.h : FLAG_SPAWN_SIZE;
+    out.push({ x0: r.x0 | 0, y0: r.y0 | 0, w, h });
+  }
+  return out;
+}
+
+function clientCellInsideAnyMilitaryOutpost(x, y, teamId) {
+  const rects = clientMilitaryOutpostRects(teamId);
+  for (let i = 0; i < rects.length; i++) {
+    if (clientCellInsideSpawnRect(x, y, rects[i])) return true;
+  }
+  return false;
+}
+
 /**
  * 8-соседство со своей закрашенной клеткой ИЛИ с клеткой внутри прямоугольника базы (даже без пикселя в карте).
  * Совпадает с cellTouchesTeamTerritory на сервере — иначе после смены раунда «база есть в UI, а поставить нельзя».
@@ -891,6 +942,7 @@ function cellTouchesTeamTerritoryClient(x, y, teamId) {
       const o = clientPixelTeamIdAt(nx, ny);
       if (o != null && o === tid) return true;
       if (sp && clientCellInsideSpawnRect(nx, ny, sp)) return true;
+      if (clientCellInsideAnyMilitaryOutpost(nx, ny, tid)) return true;
     }
   }
   return false;
@@ -1152,19 +1204,117 @@ function showPlacementFeedback(text, severity, opts = {}) {
   }
 }
 
-function triggerMapShake(ms = 560) {
+function triggerMapShake(ms = 560, mode = "default") {
   if (!stageWrapEl) return;
-  stageWrapEl.classList.remove("map-shake");
+  stageWrapEl.classList.remove("map-shake", "map-shake--nuke");
   void stageWrapEl.offsetWidth;
-  stageWrapEl.classList.add("map-shake");
-  setTimeout(() => stageWrapEl.classList.remove("map-shake"), ms);
+  if (mode === "nuke") stageWrapEl.classList.add("map-shake--nuke");
+  else stageWrapEl.classList.add("map-shake");
+  setTimeout(() => {
+    stageWrapEl.classList.remove("map-shake", "map-shake--nuke");
+  }, ms);
 }
 
-/** Красная вспышка + усиленная тряска (бомба). */
-function runNukeFlashPresentation() {
-  triggerMapShake(1850);
+/** Детерминированный «шум» для силы ожога по клетке (хаотично, но стабильно на кадрах). */
+function nukeScorchHash01(gx, gy) {
+  let h = ((gx | 0) * 374761393 + (gy | 0) * 668265263) >>> 0;
+  h = (h ^ (h >>> 13) ^ (gx * 31 + gy)) >>> 0;
+  return (h & 4095) / 4096;
+}
+
+/** «Ожог» только по клеткам реальной формы взрыва (как computeNukeBombBlastCells на сервере). */
+function applyNukeAftermathFromEpicenter(gxi, gyi) {
+  if (!Number.isFinite(gxi) || !Number.isFinite(gyi)) return;
+  const xi = gxi | 0;
+  const yi = gyi | 0;
+  nukeAftermathUntilMs = Math.max(nukeAftermathUntilMs, Date.now() + 5200);
+  const pairs = computeNukeBombBlastCells(
+    xi,
+    yi,
+    roundIndexMeta,
+    gridW,
+    gridH,
+    isClientPlayableCell,
+    clientCellNukeProtectedSpawn
+  );
+  if (pairs.length === 0) {
+    nukeAftermathBlastKeys = null;
+    nukeAftermathGx1 = -1;
+    return;
+  }
+  nukeAftermathBlastKeys = new Set();
+  let mnX = Infinity;
+  let mnY = Infinity;
+  let mxX = -1;
+  let mxY = -1;
+  for (let i = 0; i < pairs.length; i++) {
+    const x = pairs[i][0] | 0;
+    const y = pairs[i][1] | 0;
+    nukeAftermathBlastKeys.add(`${x},${y}`);
+    mnX = Math.min(mnX, x);
+    mnY = Math.min(mnY, y);
+    mxX = Math.max(mxX, x);
+    mxY = Math.max(mxY, y);
+  }
+  const margin = 1;
+  nukeAftermathGx0 = Math.max(0, mnX - margin);
+  nukeAftermathGy0 = Math.max(0, mnY - margin);
+  nukeAftermathGx1 = Math.min(gridW - 1, mxX + margin);
+  nukeAftermathGy1 = Math.min(gridH - 1, mxY + margin);
+}
+
+/** Центр клетки в клиентских координатах (для всплывающего текста над взрывом). */
+function gridBlastCenterClientPx(gxi, gyi) {
+  if (!canvas) return { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
+  const cellPx = BASE_CELL * scale;
+  const lx = offsetX + (gxi | 0) * cellPx + cellPx * 0.5;
+  const ly = offsetY + (gyi | 0) * cellPx + cellPx * 0.5;
+  const r = canvas.getBoundingClientRect();
+  return { x: r.left + lx, y: r.top + ly };
+}
+
+/** Есть ли в органической зоне бомбы закрашенные клетки (для превью зелёный / красный). */
+function clientNukeBlastWouldClearTerritory(cx, cy) {
+  const pairs = computeNukeBombBlastCells(
+    cx | 0,
+    cy | 0,
+    roundIndexMeta,
+    gridW,
+    gridH,
+    isClientPlayableCell,
+    clientCellNukeProtectedSpawn
+  );
+  for (let i = 0; i < pairs.length; i++) {
+    const x = pairs[i][0];
+    const y = pairs[i][1];
+    const v = pixels.get(`${x},${y}`);
+    if (v == null) continue;
+    const tid = typeof v === "number" ? v | 0 : Number(v.teamId) | 0;
+    if (tid !== 0) return true;
+  }
+  return false;
+}
+
+/** Красная вспышка + тряска силой по близости эпицентра к центру экрана. */
+function runNukeFlashPresentation(epicGx, epicGy) {
+  let closeness = 1;
+  if (canvas && Number.isFinite(epicGx) && Number.isFinite(epicGy)) {
+    const cellPx = BASE_CELL * scale;
+    const scrCx = offsetX + (epicGx | 0) * cellPx + cellPx * 0.5;
+    const scrCy = offsetY + (epicGy | 0) * cellPx + cellPx * 0.5;
+    const mcx = canvas.clientWidth * 0.5;
+    const mcy = canvas.clientHeight * 0.5;
+    const d = Math.hypot(scrCx - mcx, scrCy - mcy);
+    const ref = Math.max(130, Math.min(canvas.clientWidth, canvas.clientHeight) * 0.36);
+    closeness = Math.max(0.12, 1 - Math.min(1, d / ref) * 0.94);
+  }
+  const shakeMs = Math.round(400 + closeness * 520);
+  triggerMapShake(shakeMs, "nuke");
   runBoardSeismicHitShake();
-  seismicAfterglowTremorUntilMs = Math.max(seismicAfterglowTremorUntilMs, Date.now() + 3200);
+  seismicAfterglowTremorUntilMs = Math.max(
+    seismicAfterglowTremorUntilMs,
+    Date.now() + 2400 + closeness * 900
+  );
   applySeismicTremorBodyOverride();
   try {
     const ov = document.createElement("div");
@@ -1186,6 +1336,44 @@ function runNukeFlashPresentation() {
     window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
   } catch {
     /* ignore */
+  }
+}
+
+/**
+ * Золотая вспышка + тряска: премиум-развёртывание передовой базы (все игроки).
+ * Тяжёлая вибрация — только у игроков этой команды, чтобы не спамить зрителям.
+ */
+function runMilitaryBaseDeployPresentation(deployerTeamId) {
+  triggerMapShake(1050);
+  startBoardSeismicPreviewShake(820);
+  const appEl = document.getElementById("app");
+  if (appEl) {
+    appEl.classList.add("fx-military-deploy-moment");
+    setTimeout(() => appEl.classList.remove("fx-military-deploy-moment"), 1500);
+  }
+  try {
+    const ov = document.createElement("div");
+    ov.className = "pb-military-deploy-overlay";
+    ov.setAttribute("aria-hidden", "true");
+    document.body.appendChild(ov);
+    const done = () => {
+      ov.removeEventListener("animationend", done);
+      ov.remove();
+    };
+    ov.addEventListener("animationend", done, { once: true });
+    setTimeout(() => {
+      if (ov.parentNode) ov.remove();
+    }, 2400);
+  } catch {
+    /* ignore */
+  }
+  const tid = deployerTeamId | 0;
+  if (myTeamId != null && tid && (myTeamId | 0) === tid) {
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("heavy");
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -3028,6 +3216,19 @@ function onMeta(msg) {
   const gw = typeof msg.grid?.w === "number" ? msg.grid.w : gridW;
   const gh = typeof msg.grid?.h === "number" ? msg.grid.h : gridH;
 
+  if (Array.isArray(msg.quantumFarms)) {
+    quantumFarmsMeta = msg.quantumFarms
+      .filter((f) => f && typeof f.x0 === "number" && typeof f.y0 === "number")
+      .map((f) => ({
+        id: Number(f.id) | 0,
+        x0: f.x0 | 0,
+        y0: f.y0 | 0,
+        w: typeof f.w === "number" ? f.w | 0 : 2,
+        h: typeof f.h === "number" ? f.h | 0 : 2,
+      }));
+    syncToolbarQuantumObjective();
+  }
+
   applyGridFromServer(gw, gh).then(() => {
     try {
       rebuildTeamList();
@@ -3293,6 +3494,17 @@ function notifyPurchaseError(reason) {
     waiting_go: "Покупка сейчас недоступна (обновите клиент или дождитесь старта раунда).",
     nuke_no_effect:
       "Бомба не сработала: в зоне нет территории для очистки (или только защищённые базы 6×6).",
+    nuke_limit_round:
+      "Лимит тактических бомб на эту карту исчерпан (максимум 2 на игрока за раунд).",
+    military_max: "Лимит передовых баз для команды уже достигнут.",
+    military_cooldown: "Перед следующим развёртыванием подождите (~2 мин).",
+    military_occupied: "Нужна полностью свободная суша 6×6 без чужих пикселей.",
+    military_water: "Нельзя разместить на воде.",
+    military_bounds: "Слишком близко к краю карты (нужен полный квадрат 6×6).",
+    military_conflict: "Пересечение с базой, передовой базой или запретной зоной.",
+    military_too_close_own_main: "Слишком близко к вашей главной базе.",
+    military_too_close_enemy_main: "Слишком близко к чужой главной базе.",
+    military_invalid: "Нельзя разместить здесь.",
   };
   const text = m[reason] || String(reason);
   const severe =
@@ -3467,6 +3679,72 @@ function getOnlineLastPixelActionAt() {
   return Math.max(w, lastPlaceAt);
 }
 
+/** Сколько ферм визуально контролирует наша команда (1 ферма = +1 квант / 5 с на команду). */
+function computeClientQuantumFarmIncomePer5s() {
+  const tid = myTeamId | 0;
+  if (!tid || !quantumFarmsMeta.length || gridW < 1 || gridH < 1) return 0;
+  let n = 0;
+  for (let i = 0; i < quantumFarmsMeta.length; i++) {
+    const f = quantumFarmsMeta[i];
+    const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
+      const parts = key.split(",");
+      const x = Number(parts[0]);
+      const y = Number(parts[1]);
+      const v = clientPixelTeamIdAt(x, y);
+      return v == null ? 0 : v | 0;
+    });
+    if ((resolveFarmControl(scores).owner | 0) === tid) n++;
+  }
+  return n;
+}
+
+/** Бейдж «квантоцентр» в шапке: подчёркивает главную цель раунда. */
+function syncToolbarQuantumObjective() {
+  if (!toolbarQuantumObjectiveEl) return;
+  const online = wantOnline && getWsUrl();
+  if (!online || !quantumFarmsMeta.length) {
+    toolbarQuantumObjectiveEl.hidden = true;
+    toolbarQuantumObjectiveEl.classList.remove(
+      "toolbar__quantum-objective--held",
+      "toolbar__quantum-objective--contested"
+    );
+    return;
+  }
+  toolbarQuantumObjectiveEl.hidden = false;
+  const total = quantumFarmsMeta.length;
+  if (spectatorMode || myTeamId == null) {
+    toolbarQuantumObjectiveEl.textContent = `⚛ Квантоцентр · ${total}`;
+    toolbarQuantumObjectiveEl.title = `${total} квантовых ферм у центра карты — главный источник квантов; бой за центр решает экономику и магазин.`;
+    toolbarQuantumObjectiveEl.classList.remove(
+      "toolbar__quantum-objective--held",
+      "toolbar__quantum-objective--contested"
+    );
+    return;
+  }
+  const tid = myTeamId | 0;
+  let held = 0;
+  let contestedNearUs = 0;
+  for (let i = 0; i < quantumFarmsMeta.length; i++) {
+    const f = quantumFarmsMeta[i];
+    const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
+      const p = key.split(",");
+      const v = clientPixelTeamIdAt(Number(p[0]), Number(p[1]));
+      return v == null ? 0 : v | 0;
+    });
+    const st = resolveFarmControl(scores);
+    if ((st.owner | 0) === tid) held++;
+    if (st.contested && (scores.get(tid) | 0) > 0) contestedNearUs++;
+  }
+  toolbarQuantumObjectiveEl.textContent =
+    held > 0 ? `⚛ Удерживаем ${held}/${total}` : `⚛ Штурм центра 0/${total}`;
+  toolbarQuantumObjectiveEl.title = `Квантовые фермы — ключ к победе в экономике: каждая удержанная ферма даёт всей команде +1 квант / 5 с. Сейчас ваших: ${held} из ${total}. Больше клеток команды вокруг фермы, чем у врагов — точка ваша; равенство — спор без дохода.`;
+  toolbarQuantumObjectiveEl.classList.toggle("toolbar__quantum-objective--held", held > 0);
+  toolbarQuantumObjectiveEl.classList.toggle(
+    "toolbar__quantum-objective--contested",
+    contestedNearUs > 0 && held < total
+  );
+}
+
 function applyWalletFromServer(msg) {
   walletState = msg;
   syncClientCooldownFromWalletFields();
@@ -3507,9 +3785,21 @@ function syncShopHeaderBalance() {
   const t = usdtToQuant(b);
   el.textContent = String(t);
   if (unitEl) unitEl.textContent = quantWord(t);
+  const qFarmRaw = walletState?.quantFarmIncomeQuantsPer5s;
+  const qFarm =
+    typeof qFarmRaw === "number" && Number.isFinite(qFarmRaw)
+      ? Math.max(0, qFarmRaw | 0)
+      : myTeamId != null
+        ? computeClientQuantumFarmIncomePer5s()
+        : 0;
   if (subEl) {
-    subEl.textContent = "";
-    subEl.hidden = true;
+    if (qFarm > 0) {
+      subEl.textContent = `+${qFarm} / 5 с с квантовых ферм (команда)`;
+      subEl.hidden = false;
+    } else {
+      subEl.textContent = "";
+      subEl.hidden = true;
+    }
   }
   syncDevUnlimitedShopHints();
 }
@@ -3685,6 +3975,7 @@ function updateToolbarPixelTimer() {
 
 function updateWalletBar() {
   if (!walletBalanceEl) {
+    syncToolbarQuantumObjective();
     updateToolbarHud();
     return;
   }
@@ -3698,6 +3989,7 @@ function updateWalletBar() {
     syncShopDepositButton();
     syncEventBanner();
     syncTeamBuffBanner();
+    syncToolbarQuantumObjective();
     updateToolbarHud();
     return;
   }
@@ -3712,6 +4004,7 @@ function updateWalletBar() {
     syncShopDepositButton();
     syncEventBanner();
     syncTeamBuffBanner();
+    syncToolbarQuantumObjective();
     updateToolbarHud();
     return;
   }
@@ -3719,9 +4012,13 @@ function updateWalletBar() {
   if (btnShop) btnShop.hidden = spectatorMode;
   if (walletState.devUnlimited) {
     prevWalletQuant = null;
-    walletBalanceEl.textContent = "💰 ∞ квантов (тест)";
+    const qFarmDev =
+      !spectatorMode && myTeamId != null ? computeClientQuantumFarmIncomePer5s() : 0;
+    const farmDev = qFarmDev > 0 ? ` · фермы +${qFarmDev}/5 с` : "";
+    walletBalanceEl.textContent = `💰 ∞ квантов (тест)${farmDev}`;
     walletBalanceEl.title =
-      "Режим теста: бесконечные кванты. Интервал между пикселями — как у всех (таймер слева).";
+      "Режим теста: бесконечные кванты. Интервал между пикселями — как у всех (таймер слева)." +
+      (qFarmDev > 0 ? ` Квантовые фермы команды: ${qFarmDev}.` : "");
   } else {
     const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
     const t = usdtToQuant(b);
@@ -3730,13 +4027,25 @@ function updateWalletBar() {
       setTimeout(() => walletBalanceEl.classList.remove("toolbar__wallet--pulse"), 700);
     }
     prevWalletQuant = t;
-    walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}`;
-    walletBalanceEl.title = "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
+    const qFarmRaw = walletState?.quantFarmIncomeQuantsPer5s;
+    const qFarm =
+      typeof qFarmRaw === "number" && Number.isFinite(qFarmRaw)
+        ? Math.max(0, qFarmRaw | 0)
+        : !spectatorMode && myTeamId != null
+          ? computeClientQuantumFarmIncomePer5s()
+          : 0;
+    const farmSuffix = qFarm > 0 ? ` (+${qFarm} / 5 с)` : "";
+    walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}${farmSuffix}`;
+    walletBalanceEl.title =
+      qFarm > 0
+        ? `Баланс в квантах. Квантовые фермы под контролем команды: ${qFarm} (+${qFarm} квант / 5 с на всю команду). Таймер пикселя — слева.`
+        : "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
   }
   syncShopHeaderBalance();
   syncShopDepositButton();
   syncEventBanner();
   syncTeamBuffBanner();
+  syncToolbarQuantumObjective();
   updateToolbarHud();
 }
 
@@ -3773,15 +4082,33 @@ function applyGlobalPurchaseVfx(msg) {
     }
     if (hasGrid) {
       const sample = Array.isArray(msg.cellsSample) ? msg.cellsSample : [];
+      const nCleared =
+        typeof msg.cellsCleared === "number" && Number.isFinite(msg.cellsCleared)
+          ? msg.cellsCleared | 0
+          : sample.length;
       if (boardVfx) {
         boardVfx.nukeExplosion(gx | 0, gy | 0, tr, sample);
         flushBoardVfxFrame();
         requestAnimationFrame(() => flushBoardVfxFrame());
       }
-      runNukeFlashPresentation();
-      const pad = 9;
       const gxi = gx | 0;
       const gyi = gy | 0;
+      runNukeFlashPresentation(gxi, gyi);
+      playNukeBombImpactSound();
+      applyNukeAftermathFromEpicenter(gxi, gyi);
+      const pos = gridBlastCenterClientPx(gxi, gyi);
+      spawnFloatingText(floatFxHost, "УДАР!", pos, "float-fx__pop--raid");
+      if (nCleared >= 48) {
+        setTimeout(() => {
+          spawnFloatingText(
+            floatFxHost,
+            "Массовое поражение!",
+            { x: pos.x, y: pos.y - 30 },
+            "float-fx__pop--raid"
+          );
+        }, 240);
+      }
+      const pad = 10;
       scheduleDraw({
         dirty: {
           gx0: Math.max(0, gxi - pad),
@@ -3873,6 +4200,25 @@ function applyGlobalPurchaseVfx(msg) {
     }
     return;
   }
+  if (kind === "militaryBase" && hasGrid) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const col = teamColor(msg.teamId | 0);
+    enqueueTerritoryCapturePresentation("militaryBase", teamNameForPresentation(msg.teamId), FLAG_SPAWN_SIZE);
+    runMilitaryBaseDeployPresentation(msg.teamId | 0);
+    if (boardVfx) {
+      boardVfx.militaryBaseDeploy(gxi, gyi, col, tr);
+      flushBoardVfxFrame();
+      requestAnimationFrame(() => flushBoardVfxFrame());
+      requestAnimationFrame(() => {
+        flushBoardVfxFrame();
+      });
+    }
+    scheduleDraw({
+      dirty: { gx0: gxi, gy0: gyi, gx1: gxi + FLAG_SPAWN_SIZE - 1, gy1: gyi + FLAG_SPAWN_SIZE - 1 },
+    });
+    return;
+  }
   if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
@@ -3901,7 +4247,26 @@ function handlePurchaseOk(msg) {
     spawnFloatingText(floatFxHost, "ЗОНА 12×12", { x: flo.x, y: flo.y - 10 }, "float-fx__pop--raid");
   }
   if (kind === "nukeBomb") {
-    spawnFloatingText(floatFxHost, "☢ БОМБА", { x: flo.x, y: flo.y - 12 }, "float-fx__pop--raid");
+    spawnFloatingText(floatFxHost, "☢ БОМБА ЗАПУЩЕНА", { x: flo.x, y: flo.y - 14 }, "float-fx__pop--raid");
+    setTimeout(() => {
+      spawnFloatingText(floatFxHost, "Списаны кванты — ждите эффект на карте", { x: flo.x, y: flo.y + 8 }, "float-fx__pop--raid");
+    }, 280);
+  }
+  if (kind === "militaryBase") {
+    spawnFloatingText(floatFxHost, "ПЛАЦДАРМ ЗАКРЕПЛЁН", { x: flo.x, y: flo.y - 18 }, "float-fx__pop--military");
+    setTimeout(() => {
+      spawnFloatingText(floatFxHost, "НОВЫЙ ВЕКТОР НА КАРТЕ", { x: flo.x, y: flo.y + 8 }, "float-fx__pop--military-sub");
+    }, 420);
+    showPlacementFeedback(
+      "Передовая база на карте — расширяйтесь от неё, но держите связь с главной базой.",
+      "ok",
+      { telegramAlert: false }
+    );
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
+    } catch {
+      /* ignore */
+    }
   }
   if (kind === "teamRecovery") {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
@@ -3948,6 +4313,7 @@ function shopBtnMatchesPurchase(btn, msg) {
   if (kind === "massCapture") return action === "massCapture";
   if (kind === "zone12Capture") return action === "zone12Capture";
   if (kind === "nukeBomb") return action === "nukeBomb";
+  if (kind === "militaryBase") return action === "militaryBase";
   return false;
 }
 
@@ -4008,6 +4374,8 @@ function recordQuickBuyAfterPurchase(kind, msg) {
     pushQuickBuyHistory({ action: "zone12Capture" });
   } else if (kind === "nukeBomb") {
     pushQuickBuyHistory({ action: "nukeBomb" });
+  } else if (kind === "militaryBase") {
+    pushQuickBuyHistory({ action: "militaryBase" });
   }
 }
 
@@ -4018,6 +4386,7 @@ function getQuickBuyPriceQuant(entry) {
   if (entry.action === "massCapture") return PRICES_QUANT.zone6;
   if (entry.action === "zone12Capture") return PRICES_QUANT.zone12;
   if (entry.action === "nukeBomb") return PRICES_QUANT.nukeBomb;
+  if (entry.action === "militaryBase") return PRICES_QUANT.militaryBase;
   return 0;
 }
 
@@ -4028,6 +4397,7 @@ function quickBuyShortLabel(entry) {
   if (entry.action === "massCapture") return "6×6";
   if (entry.action === "zone12Capture") return "12×12";
   if (entry.action === "nukeBomb") return "☢";
+  if (entry.action === "militaryBase") return "FOB";
   return "?";
 }
 
@@ -4052,7 +4422,8 @@ function isQuickBuyEntryBlocked(entry) {
     (entry.action === "zoneCapture" ||
       entry.action === "massCapture" ||
       entry.action === "zone12Capture" ||
-      entry.action === "nukeBomb") &&
+      entry.action === "nukeBomb" ||
+      entry.action === "militaryBase") &&
     myTeamId == null
   ) {
     return true;
@@ -4101,6 +4472,32 @@ function executeQuickBuy(entry) {
   if (entry.action === "nukeBomb") {
     pendingMapAction = { type: "nukeBomb" };
     setPendingHint();
+    showPlacementFeedback(
+      "Тактическая бомба: тап по карте. Зона ~12×12 с неровным краем — очистит чужую территорию и может разорвать связи.",
+      "warn",
+      { telegramAlert: false }
+    );
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("heavy");
+    } catch {
+      /* ignore */
+    }
+    if (shopOverlay) shopOverlay.hidden = true;
+    return;
+  }
+  if (entry.action === "militaryBase") {
+    pendingMapAction = { type: "militaryBase" };
+    setPendingHint();
+    showPlacementFeedback(
+      "Плацдарм готов: выберите точку на карте — это сильнейший стратегический ход команды.",
+      "info",
+      { telegramAlert: false }
+    );
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("medium");
+    } catch {
+      /* ignore */
+    }
     if (shopOverlay) shopOverlay.hidden = true;
     return;
   }
@@ -4142,7 +4539,8 @@ function renderQuickBuyRail() {
       entry.action === "zoneCapture" ||
       entry.action === "massCapture" ||
       entry.action === "zone12Capture" ||
-      entry.action === "nukeBomb"
+      entry.action === "nukeBomb" ||
+      entry.action === "militaryBase"
     ) {
       btn.title = `${short} · ${q} кв. — тап по карте, затем списание`;
     } else if (!playerCanAffordQuickBuy(entry)) {
@@ -4232,7 +4630,7 @@ function syncQuickBuyRailMapPending() {
   const host = document.getElementById("quick-buy-list");
   if (!host) return;
   const t = pendingMapAction?.type;
-  const mapKinds = new Set(["zoneCapture", "massCapture", "zone12Capture", "nukeBomb"]);
+  const mapKinds = new Set(["zoneCapture", "massCapture", "zone12Capture", "nukeBomb", "militaryBase"]);
   host.querySelectorAll(".quick-buy-rail__btn").forEach((btn) => {
     const a = btn.dataset.action || "";
     const armed = mapKinds.has(a) && t === a;
@@ -4313,10 +4711,12 @@ function startMapAnimLoop() {
     mapAnimTimer = null;
     if (!wantOnline || !getWsUrl()) return;
     if (!mapDrawUseLite()) drawFull(performance.now());
-    const ms =
+    const base =
       lastDrawVisibleCellCount > 16000 ? 160
       : lastDrawVisibleCellCount > 10000 ? 90
       : 45;
+    /* Фермы у центра — заметнее пульсация маяков без лишней нагрузки на слабых устройствах. */
+    const ms = quantumFarmsMeta.length > 0 ? Math.max(30, base - 14) : base;
     mapAnimTimer = setTimeout(tick, ms);
   };
   mapAnimTimer = setTimeout(tick, 45);
@@ -4651,6 +5051,22 @@ function setupEconomyUi() {
         if (shopOverlay) shopOverlay.hidden = true;
         return;
       }
+      if (action === "militaryBase") {
+        pendingMapAction = { type: "militaryBase" };
+        setPendingHint();
+        showPlacementFeedback(
+          "Плацдарм готов: выберите точку на карте — это сильнейший стратегический ход команды.",
+          "info",
+          { telegramAlert: false }
+        );
+        try {
+          window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("medium");
+        } catch {
+          /* ignore */
+        }
+        if (shopOverlay) shopOverlay.hidden = true;
+        return;
+      }
     });
   });
 
@@ -4673,6 +5089,10 @@ function setupEconomyUi() {
 }
 
 function setPendingHint() {
+  if (!pendingMapAction) {
+    mapHoverGx = -1;
+    mapHoverGy = -1;
+  }
   const full = (() => {
     if (!pendingMapAction) return "";
     if (pendingMapAction.type === "zoneCapture")
@@ -4683,6 +5103,8 @@ function setPendingHint() {
       return "Зона 12×12: тап по центру — 144 клетки перекрасятся";
     if (pendingMapAction.type === "nukeBomb")
       return "Бомба: тап по эпицентру — хаотичный взрыв ~12×12, территория станет нейтральной";
+    if (pendingMapAction.type === "militaryBase")
+      return "Стратегическое развёртывание 6×6: выберите плацдарм на чистой суше — команда получит второй вектор расширения (снабжение по-прежнему от главной базы)";
     return "";
   })();
   /** Короткая строка в шапке — иначе длинный текст раздувает toolbar на пол-экрана */
@@ -4691,7 +5113,8 @@ function setPendingHint() {
     if (pendingMapAction.type === "zoneCapture") return "4×4 · тап по карте";
     if (pendingMapAction.type === "massCapture") return "6×6 · тап по центру";
     if (pendingMapAction.type === "zone12Capture") return "12×12 · тап по центру";
-    if (pendingMapAction.type === "nukeBomb") return "☢ бомба · тап по карте";
+    if (pendingMapAction.type === "nukeBomb") return "☢ бомба · ~12×12, край неровный · тап";
+    if (pendingMapAction.type === "militaryBase") return "Плацдарм 6×6 · превью";
     return "";
   })();
   const text = short;
@@ -5092,6 +5515,11 @@ function connectWs() {
         const p = cells[i];
         if (!Array.isArray(p) || p.length < 2) continue;
         pixels.delete(`${p[0] | 0},${p[1] | 0}`);
+      }
+      const ecx = typeof msg.cx === "number" && Number.isFinite(msg.cx) ? msg.cx | 0 : NaN;
+      const ecy = typeof msg.cy === "number" && Number.isFinite(msg.cy) ? msg.cy | 0 : NaN;
+      if (Number.isFinite(ecx) && Number.isFinite(ecy)) {
+        applyNukeAftermathFromEpicenter(ecx, ecy);
       }
       seismicAfterglowTremorUntilMs = Math.max(seismicAfterglowTremorUntilMs, Date.now() + 2800);
       applySeismicTremorBodyOverride();
@@ -5722,6 +6150,48 @@ function connectWs() {
       applyWalletFromServer(msg);
       return;
     }
+    if (msg.type === "quantumFarmsInit") {
+      quantumFarmsMeta = Array.isArray(msg.farms)
+        ? msg.farms
+            .filter((f) => f && typeof f.x0 === "number" && typeof f.y0 === "number")
+            .map((f) => ({
+              id: Number(f.id) | 0,
+              x0: f.x0 | 0,
+              y0: f.y0 | 0,
+              w: typeof f.w === "number" ? f.w | 0 : 2,
+              h: typeof f.h === "number" ? f.h | 0 : 2,
+            }))
+        : [];
+      syncToolbarQuantumObjective();
+      scheduleDraw({ full: true });
+      return;
+    }
+    if (msg.type === "quantumFarmNotice") {
+      const tid = msg.teamId | 0;
+      if (!myTeamId || (tid | 0) !== (myTeamId | 0)) return;
+      const kind = typeof msg.kind === "string" ? msg.kind : "";
+      if (kind === "connected") {
+        showPlacementFeedback(
+          "Квантовая ферма в штурме центра: команда получает +1 квант / 5 с с этой точки.",
+          "ok",
+          { telegramAlert: false }
+        );
+      } else if (kind === "disconnected") {
+        showPlacementFeedback(
+          "Квантовая ферма потеряна — доход с ключевой точки остановлен, бейте центр.",
+          "warn",
+          { telegramAlert: false }
+        );
+      } else if (kind === "lost") {
+        showPlacementFeedback("Враг отжал квантовую ферму у центра карты.", "warn", { telegramAlert: false });
+      } else if (kind === "captured_from") {
+        showPlacementFeedback("Ваша команда захватила квантовую ферму — контроль центра усилен.", "ok", {
+          telegramAlert: false,
+        });
+      }
+      syncToolbarQuantumObjective();
+      return;
+    }
     if (msg.type === "treasureClaimed") {
       const k = typeof msg.key === "string" ? msg.key.trim() : "";
       if (k) treasureSpotKeys.delete(k);
@@ -6315,8 +6785,100 @@ function clientCellNukeProtectedSpawn(gx, gy) {
     const x0 = t.spawn.x0 | 0;
     const y0 = t.spawn.y0 | 0;
     if (gx >= x0 && gx < x0 + FLAG_SPAWN_SIZE && gy >= y0 && gy < y0 + FLAG_SPAWN_SIZE) return true;
+    for (const r of clientMilitaryOutpostRects(t.id)) {
+      const rx0 = r.x0 | 0;
+      const ry0 = r.y0 | 0;
+      const rw = r.w | 0;
+      const rh = r.h | 0;
+      if (gx >= rx0 && gx < rx0 + rw && gy >= ry0 && gy < ry0 + rh) return true;
+    }
   }
   return false;
+}
+
+function clientSpawnRectsConflict(x0, y0, ox0, oy0) {
+  const g = CLIENT_SPAWN_RECT_GAP;
+  const S = FLAG_SPAWN_SIZE;
+  const ax0 = x0 - g;
+  const ay0 = y0 - g;
+  const ax1 = x0 + S + g - 1;
+  const ay1 = y0 + S + g - 1;
+  const bx0 = ox0 - g;
+  const by0 = oy0 - g;
+  const bx1 = ox0 + S + g - 1;
+  const by1 = oy0 + S + g - 1;
+  return !(ax1 < bx0 || bx1 < ax0 || ay1 < by0 || by1 < ay0);
+}
+
+function clientRectChebyshevEdgeGap(x0, y0, w, h, ox0, oy0, ow, oh) {
+  const dx = Math.max(0, Math.max(ox0 - (x0 + w), x0 - (ox0 + ow)));
+  const dy = Math.max(0, Math.max(oy0 - (y0 + h), y0 - (oy0 + oh)));
+  return Math.max(dx, dy);
+}
+
+function clientAllSpawnLikeRectsForMilitaryPreview() {
+  if (!teamsMeta) return [];
+  /** @type {{ x0: number, y0: number }[]} */
+  const out = [];
+  for (const t of teamsMeta) {
+    if (t.solo || t.eliminated) continue;
+    if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
+      out.push({ x0: t.spawn.x0 | 0, y0: t.spawn.y0 | 0 });
+    }
+    for (const r of clientMilitaryOutpostRects(t.id)) {
+      out.push({ x0: r.x0, y0: r.y0 });
+    }
+  }
+  return out;
+}
+
+/**
+ * Клиентская проверка 6×6 для превью (центр клика cx,cy как у масс-захвата).
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+function validateClientMilitaryBasePreview(cx, cy) {
+  if (myTeamId == null) return { ok: false, reason: "no_team" };
+  const tid = myTeamId | 0;
+  const x0 = (cx | 0) - 2;
+  const y0 = (cy | 0) - 2;
+  const S = FLAG_SPAWN_SIZE;
+  if (x0 < 0 || y0 < 0 || x0 + S > gridW || y0 + S > gridH) {
+    return { ok: false, reason: "military_bounds" };
+  }
+  for (let y = y0; y < y0 + S; y++) {
+    for (let x = x0; x < x0 + S; x++) {
+      if (!isClientPlayableCell(x, y)) return { ok: false, reason: "military_water" };
+      if (pixels.has(`${x},${y}`)) return { ok: false, reason: "military_occupied" };
+    }
+  }
+  if (clientMilitaryOutpostRects(tid).length >= CLIENT_MILITARY_MAX_BASES) {
+    return { ok: false, reason: "military_max" };
+  }
+  const reserved = clientAllSpawnLikeRectsForMilitaryPreview();
+  for (let i = 0; i < reserved.length; i++) {
+    const o = reserved[i];
+    if (clientSpawnRectsConflict(x0, y0, o.x0, o.y0)) {
+      return { ok: false, reason: "military_conflict" };
+    }
+  }
+  const mySpawn = clientTeamSpawnRect(tid);
+  if (mySpawn) {
+    const g0 = clientRectChebyshevEdgeGap(x0, y0, S, S, mySpawn.x0, mySpawn.y0, mySpawn.w, mySpawn.h);
+    if (g0 < CLIENT_MILITARY_GAP_OWN_MAIN) return { ok: false, reason: "military_too_close_own_main" };
+  }
+  if (teamsMeta) {
+    for (const t of teamsMeta) {
+      if (t.solo || t.eliminated) continue;
+      if ((t.id | 0) === tid) continue;
+      const sp = t.spawn;
+      if (!sp || typeof sp.x0 !== "number" || typeof sp.y0 !== "number") continue;
+      const w = typeof sp.w === "number" ? sp.w : S;
+      const h = typeof sp.h === "number" ? sp.h : S;
+      const g1 = clientRectChebyshevEdgeGap(x0, y0, S, S, sp.x0 | 0, sp.y0 | 0, w, h);
+      if (g1 < CLIENT_MILITARY_GAP_ENEMY_MAIN) return { ok: false, reason: "military_too_close_enemy_main" };
+    }
+  }
+  return { ok: true };
 }
 
 /** Ключи клеток в зоне бомбы — тот же алгоритм, что на сервере. */
@@ -6721,6 +7283,99 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
+  /** Кэш владения ферм на один кадр: нижний маяк, реактор и «корона» читают одни и те же данные. */
+  /** @type {Map<number, { owner: number, contested: boolean, topScore: number }> | null} */
+  let qFarmCtrlOnce = null;
+  function qFarmCtrl(f) {
+    if (qFarmCtrlOnce === null) qFarmCtrlOnce = new Map();
+    const id = f.id | 0;
+    const hit = qFarmCtrlOnce.get(id);
+    if (hit) return hit;
+    const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
+      const p = key.split(",");
+      const v = clientPixelTeamIdAt(Number(p[0]), Number(p[1]));
+      return v == null ? 0 : v | 0;
+    });
+    const st = resolveFarmControl(scores);
+    qFarmCtrlOnce.set(id, st);
+    return st;
+  }
+
+  /* Квантовые фермы: широкий маяк и контур зоны боя (под остальными оверлеями карты). */
+  const drawQuantumUnderlay =
+    !lite &&
+    !partial &&
+    online &&
+    quantumFarmsMeta.length > 0 &&
+    cell >= 1.15 &&
+    visibleCellCount <= 28000;
+  if (drawQuantumUnderlay) {
+    for (let fi = 0; fi < quantumFarmsMeta.length; fi++) {
+      const f = quantumFarmsMeta[fi];
+      const igx0 = Math.max(0, f.x0 - 1);
+      const igy0 = Math.max(0, f.y0 - 1);
+      const igx1 = Math.min(gridW - 1, f.x0 + f.w);
+      const igy1 = Math.min(gridH - 1, f.y0 + f.h);
+      if (igx1 < x0 || igx0 > x1 || igy1 < y0 || igy0 > y1) continue;
+      const { owner, contested } = qFarmCtrl(f);
+      const sx0 = offsetX + f.x0 * cell;
+      const sy0 = offsetY + f.y0 * cell;
+      const sw = f.w * cell;
+      const sh = f.h * cell;
+      const cx = sx0 + sw * 0.5;
+      const cy = sy0 + sh * 0.5;
+      const pulse = 0.5 + 0.5 * Math.sin(time * 0.0029 + fi * 0.47);
+      const teamHex = owner ? teamColor(owner) : null;
+      const { r: tr, g: tg, b: tb } = teamHex ? hexToRgb(teamHex) : { r: 110, g: 200, b: 255 };
+      const rx = offsetX + igx0 * cell;
+      const ry = offsetY + igy0 * cell;
+      const rw = (igx1 - igx0 + 1) * cell;
+      const rh = (igy1 - igy0 + 1) * cell;
+      ctx.save();
+      ctx.fillStyle = contested
+        ? `rgba(255, 120, 60, ${0.045 + pulse * 0.055})`
+        : owner
+          ? `rgba(${tr},${tg},${tb},${0.038 + pulse * 0.048})`
+          : `rgba(80, 190, 255, ${0.04 + pulse * 0.05})`;
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.restore();
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      const bloomR = Math.min(w, h, cell * 4.2 * (0.92 + pulse * 0.1));
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, bloomR);
+      if (contested) {
+        bg.addColorStop(0, `rgba(255, 240, 200, ${0.2 + pulse * 0.12})`);
+        bg.addColorStop(0.45, `rgba(255, 100, 70, ${0.09 + pulse * 0.06})`);
+        bg.addColorStop(1, "rgba(20, 40, 90, 0)");
+      } else if (owner) {
+        bg.addColorStop(0, `rgba(255, 255, 255, ${0.14 + pulse * 0.1})`);
+        bg.addColorStop(0.5, `rgba(${tr},${tg},${tb},${0.11 + pulse * 0.08})`);
+        bg.addColorStop(1, "rgba(15, 30, 70, 0)");
+      } else {
+        bg.addColorStop(0, `rgba(200, 245, 255, ${0.16 + pulse * 0.09})`);
+        bg.addColorStop(0.55, `rgba(80, 180, 255, ${0.08 + pulse * 0.05})`);
+        bg.addColorStop(1, "rgba(10, 40, 80, 0)");
+      }
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.arc(cx, cy, bloomR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      ctx.save();
+      ctx.strokeStyle = contested
+        ? `rgba(255, 90, 50, ${0.38 + pulse * 0.28})`
+        : owner
+          ? `rgba(${tr},${tg},${tb},${0.28 + pulse * 0.22})`
+          : `rgba(160, 230, 255, ${0.26 + pulse * 0.2})`;
+      ctx.lineWidth = Math.max(1.2, cell * 0.085);
+      ctx.setLineDash([Math.max(4, cell * 0.42), Math.max(3, cell * 0.28)]);
+      ctx.lineDashOffset = -(time * 0.035 + fi * 7);
+      ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+
   /* Обратный отсчёт у отрезанного кармана своей команды — компактная метка сбоку от пятна. */
   if (!lite && online && myTeamId != null && cell >= 2 && territoryIsolationCellMeta.size > 0) {
     const pockets = aggregateMyTeamIsolationPockets();
@@ -6979,6 +7634,47 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
+  if (!lite && !partial && online) {
+    const nuAft = Date.now();
+    if (nuAft >= nukeAftermathUntilMs) {
+      nukeAftermathBlastKeys = null;
+    } else if (
+      nukeAftermathBlastKeys &&
+      nukeAftermathBlastKeys.size > 0 &&
+      nukeAftermathGx1 >= nukeAftermathGx0
+    ) {
+      const fade = Math.min(1, (nukeAftermathUntilMs - nuAft) / 5200);
+      const pulse = 0.5 + 0.5 * Math.sin(time * 0.022 + nukeScorchHash01(x0, y0) * 2);
+      const flicker = 0.5 + 0.5 * Math.sin(time * 0.031 + nukeScorchHash01(y0, x0) * 3.1);
+      for (let gy = y0; gy <= y1; gy++) {
+        for (let gx = x0; gx <= x1; gx++) {
+          if (gx < nukeAftermathGx0 || gx > nukeAftermathGx1 || gy < nukeAftermathGy0 || gy > nukeAftermathGy1) {
+            continue;
+          }
+          const pk = `${gx},${gy}`;
+          if (!nukeAftermathBlastKeys.has(pk)) continue;
+          const h = nukeScorchHash01(gx, gy);
+          const h2 = nukeScorchHash01(gy + 17, gx - 3);
+          const edgeWobble = 0.65 + 0.35 * h2;
+          const ember =
+            fade * edgeWobble * (0.028 + h * 0.055 + pulse * 0.028 * h + flicker * 0.018 * (1 - h));
+          const px = offsetX + gx * cell;
+          const py = offsetY + gy * cell;
+          const cw = Math.ceil(cell);
+          const ch = Math.ceil(cell);
+          ctx.fillStyle = `rgba(255, ${40 + (h * 95) | 0}, ${15 + (h2 * 40) | 0}, ${ember})`;
+          ctx.fillRect(px, py, cw, ch);
+          ctx.fillStyle = `rgba(${22 + (h * 25) | 0}, ${8 + (h2 * 12) | 0}, 4, ${ember * (0.45 + h * 0.35)})`;
+          ctx.fillRect(px, py, cw, ch);
+          if (h > 0.82 && flicker > 0.72) {
+            ctx.fillStyle = `rgba(255, 240, 200, ${ember * 0.35})`;
+            ctx.fillRect(px + cw * 0.15, py + ch * 0.15, cw * 0.7, ch * 0.7);
+          }
+        }
+      }
+    }
+  }
+
   /* Допустимые клетки для следующего пикселя: пустая суша, 8-соседство с вашей территорией. */
   const drawExpansionFrontier =
     !lite &&
@@ -7006,6 +7702,232 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.lineWidth = Math.max(1, cell * 0.07);
         ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
       }
+    }
+  }
+
+  const drawMilitaryPlacePreview =
+    !lite &&
+    !partial &&
+    online &&
+    myTeamId != null &&
+    !spectatorMode &&
+    pendingMapAction?.type === "militaryBase" &&
+    mapHoverGx >= 0 &&
+    cell >= 2;
+  if (drawMilitaryPlacePreview) {
+    const cx = mapHoverGx | 0;
+    const cy = mapHoverGy | 0;
+    const bx0 = cx - 2;
+    const by0 = cy - 2;
+    const sx0 = offsetX + bx0 * cell;
+    const sy0 = offsetY + by0 * cell;
+    const sw = FLAG_SPAWN_SIZE * cell;
+    const sh = FLAG_SPAWN_SIZE * cell;
+    const v = validateClientMilitaryBasePreview(cx, cy);
+    const ok = v.ok;
+    const pulse = ok ? 0.5 + 0.5 * Math.sin(time * 0.007) : 1;
+    ctx.save();
+    ctx.fillStyle = ok
+      ? `rgba(120, 255, 190, ${0.1 + pulse * 0.08})`
+      : "rgba(255, 55, 70, 0.14)";
+    ctx.fillRect(sx0, sy0, sw, sh);
+    ctx.strokeStyle = ok ? `rgba(253, 230, 138, ${0.55 + pulse * 0.35})` : "rgba(255, 120, 130, 0.9)";
+    ctx.lineWidth = Math.max(2, cell * 0.11);
+    ctx.strokeRect(sx0 + 0.5, sy0 + 0.5, sw - 1, sh - 1);
+    ctx.strokeStyle = ok ? `rgba(129, 140, 248, ${0.35 + pulse * 0.25})` : "rgba(255,200,200,0.38)";
+    ctx.lineWidth = Math.max(1, cell * 0.05);
+    ctx.strokeRect(sx0 + cell * 0.15, sy0 + cell * 0.15, sw - cell * 0.3, sh - cell * 0.3);
+    ctx.restore();
+  }
+
+  const drawNukeBombTargetingPreview =
+    !lite &&
+    !partial &&
+    online &&
+    myTeamId != null &&
+    !spectatorMode &&
+    pendingMapAction?.type === "nukeBomb" &&
+    mapHoverGx >= 0 &&
+    cell >= 1.6 &&
+    visibleCellCount <= 20000;
+  if (drawNukeBombTargetingPreview) {
+    const tcx = mapHoverGx | 0;
+    const tcy = mapHoverGy | 0;
+    const valid =
+      isClientPlayableCell(tcx, tcy) &&
+      !clientCellNukeProtectedSpawn(tcx, tcy) &&
+      clientNukeBlastWouldClearTerritory(tcx, tcy);
+    const pulseT = 0.5 + 0.5 * Math.sin(time * 0.0065);
+    const blastPairs = computeNukeBombBlastCells(
+      tcx,
+      tcy,
+      roundIndexMeta,
+      gridW,
+      gridH,
+      isClientPlayableCell,
+      clientCellNukeProtectedSpawn
+    );
+    const inBlast = new Set(blastPairs.map(([bx, by]) => `${bx},${by}`));
+    ctx.save();
+    for (let gy = y0; gy <= y1; gy++) {
+      for (let gx = x0; gx <= x1; gx++) {
+        const pk = `${gx},${gy}`;
+        if (!inBlast.has(pk)) continue;
+        const wob = nukeScorchHash01(gx, gy);
+        const px = offsetX + gx * cell;
+        const py = offsetY + gy * cell;
+        const cw = Math.ceil(cell);
+        const ch = Math.ceil(cell);
+        if (valid) {
+          ctx.fillStyle = `rgba(72, 255, 140, ${0.07 + pulseT * 0.06 + wob * 0.04})`;
+          ctx.fillRect(px, py, cw, ch);
+          ctx.strokeStyle = `rgba(200, 255, 220, ${0.16 + pulseT * 0.14 + wob * 0.08})`;
+        } else {
+          ctx.fillStyle = `rgba(255, 70, 50, ${0.09 + pulseT * 0.08 + wob * 0.05})`;
+          ctx.fillRect(px, py, cw, ch);
+          ctx.strokeStyle = `rgba(255, 200, 160, ${0.22 + pulseT * 0.18 + wob * 0.1})`;
+        }
+        ctx.lineWidth = Math.max(1, cell * 0.055);
+        ctx.strokeRect(px + 0.5, py + 0.5, Math.max(1, cw - 1), Math.max(1, ch - 1));
+      }
+    }
+    const scx = offsetX + tcx * cell + cell * 0.5;
+    const scy = offsetY + tcy * cell + cell * 0.5;
+    ctx.strokeStyle = valid
+      ? `rgba(120, 255, 180, ${0.42 + pulseT * 0.2})`
+      : `rgba(255, 120, 80, ${0.5 + pulseT * 0.22})`;
+    ctx.lineWidth = Math.max(1.5, cell * 0.085);
+    ctx.setLineDash([cell * 0.2, cell * 0.35, cell * 0.12, cell * 0.28]);
+    ctx.lineDashOffset = -(time * 0.055);
+    ctx.beginPath();
+    ctx.arc(scx, scy, 1.15 * cell, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  const drawQuantumFarmsLayer =
+    !lite &&
+    !partial &&
+    online &&
+    quantumFarmsMeta.length > 0 &&
+    cell >= 1.5 &&
+    visibleCellCount <= 22000;
+  if (drawQuantumFarmsLayer) {
+    const myT = myTeamId | 0;
+    for (let fi = 0; fi < quantumFarmsMeta.length; fi++) {
+      const f = quantumFarmsMeta[fi];
+      const fx1 = f.x0 + f.w - 1;
+      const fy1 = f.y0 + f.h - 1;
+      if (fx1 < x0 || f.x0 > x1 || fy1 < y0 || f.y0 > y1) continue;
+      const { owner, contested } = qFarmCtrl(f);
+      const sx0 = offsetX + f.x0 * cell;
+      const sy0 = offsetY + f.y0 * cell;
+      const sw = f.w * cell;
+      const sh = f.h * cell;
+      const cx = sx0 + sw * 0.5;
+      const cy = sy0 + sh * 0.5;
+      const pulse = 0.5 + 0.5 * Math.sin(time * 0.0038 + fi * 0.61);
+      const pulse2 = 0.5 + 0.5 * Math.sin(time * 0.0055 + fi * 0.31);
+      const pad = cell * 0.065;
+      const teamHex = owner ? teamColor(owner) : null;
+      const rgb = teamHex ? hexToRgb(teamHex) : { r: 120, g: 210, b: 255 };
+      const tr = rgb.r;
+      const tg = rgb.g;
+      const tb = rgb.b;
+      const mine = myT && owner === myT;
+      for (let ring = 0; ring < 3; ring++) {
+        const phase = (time * 0.0019 + fi * 0.31 + ring * 0.21) % 1;
+        const rad = Math.min(sw, sh) * (0.52 + ring * 0.28 + phase * 0.22);
+        const a = (0.07 + 0.14 * (1 - phase)) * (contested ? 1.25 : 1);
+        ctx.save();
+        ctx.strokeStyle = contested
+          ? `rgba(255, 160, 90, ${a})`
+          : owner
+            ? `rgba(${tr},${tg},${tb},${a * 0.95})`
+            : `rgba(120, 210, 255, ${a})`;
+        ctx.lineWidth = Math.max(1, cell * (0.05 + ring * 0.018));
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.save();
+      ctx.strokeStyle = contested
+        ? `rgba(255, 220, 120, ${0.35 + pulse2 * 0.35})`
+        : owner
+          ? `rgba(${tr},${tg},${tb},${0.3 + pulse * 0.35})`
+          : `rgba(190, 240, 255, ${0.28 + pulse * 0.3})`;
+      ctx.lineWidth = Math.max(1.5, cell * 0.07);
+      ctx.setLineDash([cell * 0.5, cell * 0.35]);
+      ctx.lineDashOffset = -(time * 0.055 + fi * 11);
+      ctx.beginPath();
+      ctx.arc(cx, cy, Math.min(sw, sh) * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+      ctx.save();
+      if (mine) {
+        ctx.shadowColor = `rgba(${tr},${tg},${tb},0.85)`;
+        ctx.shadowBlur = Math.min(28, cell * 0.95);
+      }
+      ctx.fillStyle = contested
+        ? `rgba(52, 36, 48, ${0.48 + pulse2 * 0.12})`
+        : `rgba(14, 22, 38, ${0.5 + pulse * 0.1})`;
+      ctx.fillRect(sx0 + pad, sy0 + pad, sw - pad * 2, sh - pad * 2);
+      ctx.shadowBlur = 0;
+      if (contested) {
+        const flash = 0.5 + 0.5 * Math.sin(time * 0.016);
+        ctx.strokeStyle = `rgba(255, ${40 + flash * 200 | 0}, 55, ${0.68 + flash * 0.22})`;
+      } else if (owner) {
+        ctx.strokeStyle = `rgba(${tr},${tg},${tb},${0.58 + pulse * 0.38})`;
+      } else {
+        ctx.strokeStyle = `rgba(190, 240, 255, ${0.48 + pulse * 0.34})`;
+      }
+      ctx.lineWidth = Math.max(2.2, cell * 0.13);
+      ctx.strokeRect(sx0 + pad * 0.65, sy0 + pad * 0.65, sw - pad * 1.3, sh - pad * 1.3);
+      const cr = Math.max(2.8, Math.min(sw, sh) * 0.21);
+      const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr * 2.55);
+      if (contested) {
+        const wob = 0.5 + 0.5 * Math.sin(time * 0.021);
+        grd.addColorStop(0, "rgba(255, 255, 255, 1)");
+        grd.addColorStop(0.32, `rgba(255, ${90 + wob * 120 | 0}, 70, 0.82)`);
+        grd.addColorStop(1, "rgba(60, 90, 200, 0)");
+      } else if (owner) {
+        grd.addColorStop(0, "rgba(255, 255, 255, 0.98)");
+        grd.addColorStop(0.38, `rgba(${tr},${tg},${tb},0.72)`);
+        grd.addColorStop(1, "rgba(25, 45, 95, 0)");
+      } else {
+        grd.addColorStop(0, "rgba(255, 255, 255, 0.96)");
+        grd.addColorStop(0.4, "rgba(120, 220, 255, 0.58)");
+        grd.addColorStop(1, "rgba(20, 70, 120, 0)");
+      }
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cr * 2.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = contested
+        ? `rgba(255, 255, 255, ${0.55 + pulse2 * 0.35})`
+        : `rgba(255, 255, 255, ${0.4 + pulse * 0.25})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cr * 0.42, 0, Math.PI * 2);
+      ctx.fill();
+      const nRay = 9;
+      for (let ri = 0; ri < nRay; ri++) {
+        const ang = (ri / nRay) * Math.PI * 2 + time * 0.0014 + fi * 0.17;
+        const len = Math.min(sw, sh) * (0.48 + pulse * 0.14);
+        ctx.strokeStyle = contested
+          ? `rgba(255, 230, 150, ${0.16 + pulse2 * 0.26})`
+          : owner
+            ? `rgba(${tr},${tg},${tb},${0.13 + pulse * 0.24})`
+            : `rgba(160, 230, 255, ${0.11 + pulse * 0.2})`;
+        ctx.lineWidth = Math.max(1.2, cell * 0.065);
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(ang) * cr * 0.45, cy + Math.sin(ang) * cr * 0.45);
+        ctx.lineTo(cx + Math.cos(ang) * len, cy + Math.sin(ang) * len);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
   }
 
@@ -7128,6 +8050,116 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.fillText(hpLabel, tx, ty);
         ctx.restore();
       }
+    }
+    for (const tm of teamsMeta) {
+      if (tm.solo || tm.eliminated) continue;
+      const mos = clientMilitaryOutpostRects(tm.id);
+      if (!mos.length) continue;
+      const teamHex = tm.color || teamColor(tm.id);
+      const { r: rr, g: gg, b: bb } = hexToRgb(teamHex);
+      for (let mi = 0; mi < mos.length; mi++) {
+        const r = mos[mi];
+        const gx00 = r.x0 | 0;
+        const gy00 = r.y0 | 0;
+        const gw = r.w | 0;
+        const gh = r.h | 0;
+        if (gx00 + gw < x0 || gx00 > x1 || gy00 + gh < y0 || gy00 > y1) continue;
+        const obx0 = offsetX + gx00 * cell;
+        const oby0 = offsetY + gy00 * cell;
+        const osw = gw * cell;
+        const osh = gh * cell;
+        ctx.save();
+        ctx.strokeStyle = `rgba(${Math.min(255, rr + 50)},${Math.min(255, gg + 50)},${Math.min(255, bb + 35)},0.78)`;
+        ctx.lineWidth = Math.max(2, cell * 0.1);
+        ctx.setLineDash([Math.max(3, cell * 0.22), Math.max(2, cell * 0.16)]);
+        ctx.strokeRect(obx0 + 1, oby0 + 1, osw - 2, osh - 2);
+        ctx.setLineDash([]);
+        ctx.strokeStyle = "rgba(255, 210, 120, 0.55)";
+        ctx.lineWidth = Math.max(1, cell * 0.055);
+        ctx.strokeRect(obx0 + cell * 0.18, oby0 + cell * 0.18, osw - cell * 0.36, osh - cell * 0.36);
+        ctx.restore();
+        const fgx = gx00 + ((gw / 2) | 0);
+        const fgy = gy00 + ((gh / 2) | 0);
+        const px = offsetX + fgx * cell;
+        const py = offsetY + fgy * cell;
+        const cw = Math.ceil(cell);
+        const ch = Math.ceil(cell);
+        const mastW = Math.max(3, cell * 0.17);
+        const mastX = px + cw * 0.58;
+        const rowsAbove = Math.max(1.5, cell * 0.22);
+        const topY = py - rowsAbove * ch;
+        const pulseF = 0.55 + 0.45 * Math.sin(time * 0.004 + gx00 * 0.19);
+        ctx.save();
+        ctx.fillStyle = "rgba(34,36,42,0.96)";
+        ctx.fillRect(mastX, topY, mastW, py + ch - topY);
+        const cLeft = px - cw * 0.04;
+        const cTop = topY + ch * 0.06;
+        const cW = cw * 0.9;
+        const cH = py + ch * 0.9 - cTop;
+        ctx.beginPath();
+        ctx.moveTo(mastX, cTop);
+        ctx.lineTo(cLeft + cW, cTop + 1.5);
+        ctx.lineTo(cLeft + cW * 0.87, cTop + cH);
+        ctx.lineTo(cLeft, cTop + cH * 0.96);
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${Math.min(255, rr + 30)},${Math.min(255, gg + 30)},${Math.min(255, bb + 22)},${0.86 + pulseF * 0.1})`;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.5)";
+        ctx.lineWidth = Math.max(1, cell * 0.055);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  /* Квантовые фермы: «корона» над флагами — якорь внимания на главной цели матча. */
+  const drawQuantumCrown =
+    !lite &&
+    !partial &&
+    online &&
+    quantumFarmsMeta.length > 0 &&
+    cell >= 2 &&
+    visibleCellCount <= 22000;
+  if (drawQuantumCrown) {
+    for (let fi = 0; fi < quantumFarmsMeta.length; fi++) {
+      const f = quantumFarmsMeta[fi];
+      const fx1 = f.x0 + f.w - 1;
+      const fy1 = f.y0 + f.h - 1;
+      if (fx1 < x0 || f.x0 > x1 || fy1 < y0 || f.y0 > y1) continue;
+      const { owner, contested } = qFarmCtrl(f);
+      const sx0 = offsetX + f.x0 * cell;
+      const sy0 = offsetY + f.y0 * cell;
+      const sw = f.w * cell;
+      const sh = f.h * cell;
+      const cx = sx0 + sw * 0.5;
+      const pulse = 0.5 + 0.5 * Math.sin(time * 0.0048 + fi * 0.52);
+      const fs = Math.max(12, Math.min(24, cell * 0.56));
+      const ty = sy0 - cell * 0.1 - pulse * cell * 0.04;
+      const teamHexC = owner ? teamColor(owner) : null;
+      const rgbC = teamHexC ? hexToRgb(teamHexC) : { r: 186, g: 240, b: 255 };
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.font = `900 ${fs}px system-ui,Segoe UI,sans-serif`;
+      ctx.lineWidth = Math.max(2, fs * 0.14);
+      ctx.strokeStyle = "rgba(0,0,0,0.82)";
+      ctx.strokeText("⚛", cx, ty);
+      ctx.fillStyle = contested
+        ? `rgba(255, ${180 + (pulse * 75) | 0}, 90, 0.98)`
+        : `rgba(${rgbC.r},${rgbC.g},${rgbC.b},0.96)`;
+      ctx.fillText("⚛", cx, ty);
+      if (cell >= 3.2) {
+        const subFs = Math.max(7, fs * 0.36);
+        ctx.font = `800 ${subFs}px system-ui,Segoe UI,sans-serif`;
+        const subY = ty + subFs * 1.05;
+        const sub = contested ? "СПОР" : "ЦЕНТР";
+        ctx.lineWidth = Math.max(1, subFs * 0.12);
+        ctx.strokeStyle = "rgba(0,0,0,0.78)";
+        ctx.strokeText(sub, cx, subY);
+        ctx.fillStyle = contested ? "rgba(255,220,180,0.92)" : "rgba(200,235,255,0.88)";
+        ctx.fillText(sub, cx, subY);
+      }
+      ctx.restore();
     }
   }
 
@@ -7350,8 +8382,22 @@ function placePixel(gx, gy) {
         setPendingHint();
         return;
       }
+      showPlacementFeedback("Бомба запущена — удар по выбранной точке.", "ok", { telegramAlert: false });
       wsSendJson({ type: "purchaseNukeBomb", x: gx, y: gy });
       pendingMapAction = null;
+      setPendingHint();
+      return;
+    }
+    if (pendingMapAction.type === "militaryBase") {
+      const v = validateClientMilitaryBasePreview(gx, gy);
+      if (!v.ok) {
+        notifyPurchaseError(v.reason || "military_invalid");
+        return;
+      }
+      wsSendJson({ type: "purchaseMilitaryBase", x: gx, y: gy });
+      pendingMapAction = null;
+      mapHoverGx = -1;
+      mapHoverGy = -1;
       setPendingHint();
       return;
     }
@@ -7521,6 +8567,15 @@ function setupGestures() {
           mapInteractionActive = true;
           scheduleCanvasFrame();
         }
+        if (pendingMapAction?.type === "militaryBase") {
+          const rect = canvas.getBoundingClientRect();
+          const { gx, gy } = screenToGrid(t.clientX - rect.left, t.clientY - rect.top);
+          if (mapHoverGx !== gx || mapHoverGy !== gy) {
+            mapHoverGx = gx;
+            mapHoverGy = gy;
+            scheduleCanvasFrame();
+          }
+        }
       }
       e.preventDefault();
     },
@@ -7626,6 +8681,23 @@ function setupGestures() {
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   });
+
+  canvas.addEventListener(
+    "pointermove",
+    (e) => {
+      if (pendingMapAction?.type !== "militaryBase") return;
+      const rect = canvas.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const { gx, gy } = screenToGrid(sx, sy);
+      if (mapHoverGx !== gx || mapHoverGy !== gy) {
+        mapHoverGx = gx;
+        mapHoverGy = gy;
+        scheduleCanvasFrame();
+      }
+    },
+    { passive: true }
+  );
 
   canvas.addEventListener(
     "wheel",
