@@ -61,6 +61,15 @@
     </div>
   </div>
 
+  <div id="admin-game-pause-overlay" class="admin-game-pause-overlay" hidden aria-live="assertive">
+    <div class="admin-game-pause-overlay__backdrop" aria-hidden="true"></div>
+    <div class="admin-game-pause-overlay__panel">
+      <p class="admin-game-pause-overlay__kicker">GAME PAUSED</p>
+      <p class="admin-game-pause-overlay__title">Paused by admin</p>
+      <p class="admin-game-pause-overlay__hint">Действия и таймеры остановлены до снятия паузы.</p>
+    </div>
+  </div>
+
   <div id="tournament-warmup-overlay" class="tournament-warmup-overlay" hidden>
     <div class="tournament-warmup-overlay__card">
       <div class="tournament-warmup-overlay__badge" id="tournament-warmup-badge">Разминка</div>
@@ -689,8 +698,10 @@
               type="button"
               id="btn-game-audio"
               class="toolbar__btn toolbar__btn--audio"
-              title="Звук и музыка"
+              title="Настройки звука"
+              aria-label="Звук: настройки и отключение"
               aria-expanded="false"
+              aria-pressed="false"
               aria-controls="game-audio-panel"
             >
               🔊

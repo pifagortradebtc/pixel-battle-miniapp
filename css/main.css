@@ -59,6 +59,63 @@ body {
   display: none !important;
 }
 
+/* Полная пауза игры (сервер: pause по Telegram) */
+.admin-game-pause-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.admin-game-pause-overlay[hidden] {
+  display: none !important;
+}
+
+.admin-game-pause-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(5, 8, 14, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.admin-game-pause-overlay__panel {
+  position: relative;
+  z-index: 1;
+  max-width: min(420px, 92vw);
+  padding: 28px 32px;
+  border-radius: 16px;
+  text-align: center;
+  background: linear-gradient(160deg, rgba(28, 38, 52, 0.96), rgba(12, 18, 28, 0.98));
+  border: 2px solid rgba(255, 80, 80, 0.55);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+}
+
+.admin-game-pause-overlay__kicker {
+  margin: 0 0 8px;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  color: #ff6b6b;
+  text-transform: uppercase;
+}
+
+.admin-game-pause-overlay__title {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--tg-text);
+}
+
+.admin-game-pause-overlay__hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--tg-hint);
+}
+
 .app {
   position: relative;
   display: block;
@@ -291,6 +348,19 @@ body {
 
 .toolbar__btn:active {
   opacity: 0.85;
+}
+
+.toolbar__btn--audio {
+  min-width: 2rem;
+  font-size: 0.88rem;
+  line-height: 1;
+  padding: 3px 8px;
+  letter-spacing: 0;
+}
+
+.toolbar__btn--audio.toolbar__btn--audio-muted {
+  opacity: 0.9;
+  border-color: rgba(255, 140, 140, 0.5);
 }
 
 .toolbar__cooldown {
@@ -2797,11 +2867,11 @@ a.overlay__btn {
 }
 
 .game-audio-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 12040;
+  /* Позицию задаёт JS (fixed от края экрана): иначе .toolbar { overflow: hidden } обрезает панель */
+  position: fixed;
+  z-index: 20050;
   min-width: min(280px, 92vw);
+  max-width: calc(100vw - 16px);
   padding: 12px 14px 14px;
   border-radius: 12px;
   background: rgba(22, 28, 38, 0.96);
@@ -2816,6 +2886,9 @@ a.overlay__btn {
   text-transform: uppercase;
   color: rgba(200, 214, 235, 0.85);
   margin-bottom: 10px;
+  white-space: nowrap;
+  overflow: visible;
+  text-align: left;
 }
 
 .game-audio-panel__row {

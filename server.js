@@ -469,6 +469,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
   if (fw === "say") return true;
+  if (fw === "teams" || fw === "pause" || fw === "unpause" || fw === "resume") return true;
   return MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw);
 }
 
@@ -529,6 +530,16 @@ const playerTelegramMeta = new Map();
 let roundEnding = false;
 /** После финала дуэли — только просмотр, новых игроков нет */
 let gameFinished = false;
+/** Полная пауза (Telegram: pause / unpause). Таймеры и экономика не продвигаются, действия игроков отклоняются. */
+let gamePaused = false;
+/** Wall-clock момент начала паузы (только лидер кластера). */
+let pauseWallStartedAt = 0;
+/** Была ли на момент паузы фаза разминки (для продления warmup vs battle). */
+let pauseCapturedWarmup = false;
+/** Доп. мс к {@link WARMUP_MS} в раундах с roundIndex > 0 после паузы в разминке. */
+let warmupPauseExtensionMs = 0;
+/** Ручной бонус к очкам команды (админ), не из пикселей: teamId → очки. */
+const teamManualScoreBonus = new Map();
 /** Ключи playerKey, допущенные в текущий раунд (после 0-го — только победители прошлого). Пустой при roundIndex===0 = не используется. */
 let eligiblePlayerKeys = new Set();
 /** Восстановление кладов с диска после пересборки сетки (перезапуск в том же раунде). */
@@ -839,6 +850,7 @@ function normalizeManualBattleCmdKey(raw) {
 }
 
 function pruneExpiredManualBattleSlots(nowMs = Date.now()) {
+  if (gamePaused) return;
   for (const [k, u] of [...manualBattleSlotsByCmd]) {
     if (typeof u === "number" && u <= nowMs) manualBattleSlotsByCmd.delete(k);
   }
@@ -1069,6 +1081,7 @@ function broadcastSeismicImpact(cleared, uniqueEventKey) {
  * @returns {{ ok: true } | { ok: false; reason: "no_cells" }}
  */
 function scheduleManualSeismicFromBot(defId, uniqueEventKey) {
+  if (gamePaused) return { ok: false, reason: "paused" };
   clearPendingManualSeismicSchedule();
   const { balls, cleared } = computeSeismicClearData(defId);
   if (!cleared.length) return { ok: false, reason: "no_cells" };
@@ -1091,6 +1104,7 @@ function scheduleManualSeismicFromBot(defId, uniqueEventKey) {
     const p = pendingManualSeismicPayload;
     pendingManualSeismicPayload = null;
     if (!p) return;
+    if (gamePaused) return;
     broadcastSeismicImpact(p.cleared, p.uniqueEventKey);
   }, MANUAL_SEISMIC_WARNING_MS);
   return { ok: true };
@@ -1123,7 +1137,7 @@ tickRoundEventTransitions._lastLogDeca = -1;
 
 function tickBattleEvents(nowMs) {
   if (!isClusterLeader()) return;
-  if (gameFinished || isWarmupPhaseNow()) return;
+  if (gamePaused || gameFinished || isWarmupPhaseNow()) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
   const ctx = getBattleEventsContext(nowMs);
   if (!ctx) return;
@@ -1299,6 +1313,11 @@ function saveRoundState() {
         treasureGridH: gridH,
         mapTreasures: Object.fromEntries(treasureQuantByCell),
         mapTreasureClaimed: [...treasureClaimedKeys],
+        gamePaused: !!gamePaused,
+        pauseWallStartedAt: gamePaused ? pauseWallStartedAt | 0 : 0,
+        pauseCapturedWarmup: !!pauseCapturedWarmup,
+        warmupPauseExtensionMs: Math.max(0, warmupPauseExtensionMs | 0),
+        teamManualScoreBonus: Object.fromEntries(teamManualScoreBonus),
       }),
       "utf8"
     );
@@ -1396,6 +1415,34 @@ function loadRoundState() {
           mapTreasures: j.mapTreasures,
           claimed: Array.isArray(j.mapTreasureClaimed) ? j.mapTreasureClaimed.filter((x) => typeof x === "string") : [],
         };
+      }
+      if (typeof j.gamePaused === "boolean") gamePaused = j.gamePaused;
+      else gamePaused = false;
+      if (typeof j.pauseWallStartedAt === "number" && Number.isFinite(j.pauseWallStartedAt)) {
+        pauseWallStartedAt = Math.max(0, j.pauseWallStartedAt | 0);
+      } else {
+        pauseWallStartedAt = 0;
+      }
+      if (typeof j.pauseCapturedWarmup === "boolean") pauseCapturedWarmup = j.pauseCapturedWarmup;
+      else pauseCapturedWarmup = false;
+      if (typeof j.warmupPauseExtensionMs === "number" && Number.isFinite(j.warmupPauseExtensionMs)) {
+        warmupPauseExtensionMs = Math.max(0, Math.min(7 * 24 * 3600000, j.warmupPauseExtensionMs | 0));
+      } else {
+        warmupPauseExtensionMs = 0;
+      }
+      teamManualScoreBonus.clear();
+      if (j.teamManualScoreBonus && typeof j.teamManualScoreBonus === "object" && !Array.isArray(j.teamManualScoreBonus)) {
+        for (const [k, v] of Object.entries(j.teamManualScoreBonus)) {
+          const tid = Number(k) | 0;
+          const n = Number(v);
+          if (!tid || !Number.isFinite(n) || n === 0) continue;
+          teamManualScoreBonus.set(tid, n);
+        }
+      }
+      if (gamePaused && pauseWallStartedAt > Date.now()) {
+        gamePaused = false;
+        pauseWallStartedAt = 0;
+        pauseCapturedWarmup = false;
       }
     } else {
       roundIndex = 0;
@@ -1711,8 +1758,18 @@ function getTournamentTimeScale() {
   return 1;
 }
 
+/**
+ * Во время глобальной паузы «игровые часы» застывают на момент нажатия pause:
+ * очки/события/кулдауны в payload не уезжают от реального wall-clock.
+ */
+function effectiveGameClockMs() {
+  if (gamePaused && (pauseWallStartedAt | 0) > 0) return pauseWallStartedAt | 0;
+  return Date.now();
+}
+
 function isMstimAltSeasonBurstActive(nowMs = Date.now()) {
-  return (mstimAltSeasonBurstUntilMs | 0) > nowMs;
+  const t = gamePaused && (pauseWallStartedAt | 0) > 0 ? pauseWallStartedAt | 0 : nowMs;
+  return (mstimAltSeasonBurstUntilMs | 0) > t;
 }
 
 function effectivePixelCooldownMs(u, teamFx, st, now) {
@@ -1727,7 +1784,7 @@ function effectiveRecoverySecForWallet(u, teamFx, now) {
 
 function getWarmupDurationMs() {
   if (tournamentQuickTestMode) return QUICK_TEST_WARMUP_MS;
-  if (roundIndex !== 0) return WARMUP_MS;
+  if (roundIndex !== 0) return WARMUP_MS + Math.max(0, warmupPauseExtensionMs | 0);
   const w = round0WarmupMs | 0;
   return w >= 5000 && w <= 600000 ? w : WARMUP_MS;
 }
@@ -1758,6 +1815,7 @@ function broadcastTournamentTimeScaleToClients() {
 function isWarmupPhaseNow() {
   if (gameFinished) return false;
   if (roundIndex === 0 && !roundTimerStarted) return false;
+  if (gamePaused) return pauseCapturedWarmup;
   return Date.now() < getPlayStartMs();
 }
 
@@ -1832,6 +1890,7 @@ function schedulePlayStartBroadcast() {
     playStartBroadcastTimer = null;
   }
   if (gameFinished) return;
+  if (gamePaused) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
   const ps = getPlayStartMs();
   const delay = ps - Date.now();
@@ -1871,7 +1930,7 @@ function updateTiebreakFromStatsPayload(stats) {
 
 function checkDuelInstantWin(stats) {
   if (!isClusterLeader()) return;
-  if (gameFinished || roundEnding || roundIndex !== 3) return;
+  if (gamePaused || gameFinished || roundEnding || roundIndex !== 3) return;
   if (isWarmupPhaseNow()) return;
   const rows = stats?.rows || [];
   const top = rows[0];
@@ -2055,7 +2114,7 @@ function broadcastTerritoryIsolationSyncIfChanged(serverNow) {
  * @returns {boolean} были ли удалены клетки из pixels
  */
 function advanceTerritoryIsolationState() {
-  if (!isClusterLeader() || gameFinished) return false;
+  if (!isClusterLeader() || gameFinished || gamePaused) return false;
   pruneTerritoryIsolationEliminatedTeams();
   let pixelsMutated = false;
   /** @type {Map<string, { teamId: number, cells: Set<string>, deadlineMs: number, groupId: string }>} */
@@ -2205,6 +2264,7 @@ function applyPlannedCapture(pk, tid, planned) {
 async function tryClaimMapTreasureForPlayer(pk, cellKey, deferRoundStateSave) {
   const key = typeof cellKey === "string" ? cellKey.trim() : "";
   if (!key || !pk) return 0;
+  if (gamePaused) return 0;
   if (!treasureQuantByCell.has(key) || treasureClaimedKeys.has(key)) return 0;
   const tq = treasureQuantByCell.get(key) | 0;
   if (tq < 1 || tq > 50) return 0;
@@ -2328,7 +2388,7 @@ async function broadcastWalletPayloadToAllClients() {
 async function buildWalletPayload(ws) {
   const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
   const u = await walletStore.getOrCreateUser(pk);
-  const now = Date.now();
+  const now = effectiveGameClockMs();
   const st = tournamentStage(roundIndex, gameFinished);
   const tid = ws.teamId | 0;
   const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
@@ -2411,7 +2471,7 @@ function broadcastQuantumFarmTeamNotice(teamId, payload) {
 }
 
 function syncQuantumFarmStateAfterTerritoryChange() {
-  if (gameFinished || !quantumFarmLayouts.length) return;
+  if (gamePaused || gameFinished || !quantumFarmLayouts.length) return;
   if (REDIS_URL && !isClusterLeader()) return;
   const next = computeQuantumFarmOwnersNow();
   if (quantumFarmOwnerPrev.length !== next.length) {
@@ -2446,7 +2506,7 @@ function syncQuantumFarmStateAfterTerritoryChange() {
 
 async function tickQuantumFarmIncome() {
   if (REDIS_URL && !isClusterLeader()) return;
-  if (gameFinished || !quantumFarmLayouts.length) return;
+  if (gamePaused || gameFinished || !quantumFarmLayouts.length) return;
   const owners = computeQuantumFarmOwnersNow();
   /** @type {Map<number, number>} */
   const farmsPerTeam = new Map();
@@ -2860,6 +2920,38 @@ function applyClusterGameReplication(msg) {
       }
       return;
     }
+    case "gamePauseSync": {
+      gamePaused = !!msg.paused;
+      if (typeof msg.pauseCapturedWarmup === "boolean") pauseCapturedWarmup = msg.pauseCapturedWarmup;
+      if (typeof msg.round0WarmupMs === "number" && Number.isFinite(msg.round0WarmupMs)) {
+        const w = Math.round(msg.round0WarmupMs);
+        if (w >= 5000 && w <= 600000) round0WarmupMs = w;
+      }
+      if (typeof msg.roundDurationMs === "number" && msg.roundDurationMs >= 1000 && msg.roundDurationMs <= 8760 * 3600000) {
+        roundDurationMs = msg.roundDurationMs;
+      }
+      if (typeof msg.warmupPauseExtensionMs === "number" && Number.isFinite(msg.warmupPauseExtensionMs)) {
+        warmupPauseExtensionMs = Math.max(0, Math.min(7 * 24 * 3600000, msg.warmupPauseExtensionMs | 0));
+      }
+      if (!msg.paused) {
+        pauseWallStartedAt = 0;
+        pauseCapturedWarmup = false;
+      }
+      playStartMs = getPlayStartMs();
+      if (isClusterLeader()) schedulePlayStartBroadcast();
+      return;
+    }
+    case "teamManualScoreBonusSync": {
+      teamManualScoreBonus.clear();
+      const bon = msg.bonuses && typeof msg.bonuses === "object" && !Array.isArray(msg.bonuses) ? msg.bonuses : {};
+      for (const [k, v] of Object.entries(bon)) {
+        const tid = Number(k) | 0;
+        const n = Number(v);
+        if (!tid || !Number.isFinite(n) || n === 0) continue;
+        teamManualScoreBonus.set(tid, n);
+      }
+      return;
+    }
     default:
       return;
   }
@@ -3057,7 +3149,7 @@ function buildFlagsSnapshot() {
 
 function tickFlagBaseRegen(now) {
   if (!isClusterLeader()) return;
-  if (gameFinished || roundEnding) return;
+  if (gamePaused || gameFinished || roundEnding) return;
   scanMilitaryOutpostsVacancyAndExpire(now);
   const regenBroadcastPeriodMs = 800;
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
@@ -3743,6 +3835,7 @@ function notifyTerritoryDramaEvents(prev, next) {
  */
 function afterTerritoryMutation() {
   if (gameFinished) return;
+  if (gamePaused) return;
   if (REDIS_URL && !isClusterLeader()) return;
   advanceTerritoryIsolationState();
   const next = computeTeamTerritoryCounts();
@@ -4155,15 +4248,22 @@ function countOnlineClients() {
 }
 
 function buildStatsPayload() {
-  const nowMs = Date.now();
-  const { agg, totalAvailableScore } = recalculateAllTeamScores(nowMs);
+  const nowMs = effectiveGameClockMs();
+  const { agg } = recalculateAllTeamScores(nowMs);
   const list = teamsForMeta().filter((t) => !t.solo && !t.eliminated);
+  let totalAvailableScore = 0;
+  for (const t of list) {
+    const a = agg.get(t.id) || { score: 0, cells: 0 };
+    const bonus = teamManualScoreBonus.get(t.id) | 0;
+    totalAvailableScore += a.score + bonus;
+  }
   const rows = list.map((t) => {
     const a = agg.get(t.id) || { score: 0, cells: 0 };
-    const score = Math.round(a.score * 1000) / 1000;
+    const bonus = teamManualScoreBonus.get(t.id) | 0;
+    const score = Math.round((a.score + bonus) * 1000) / 1000;
     const pix = a.cells | 0;
     const scoreSharePercent =
-      totalAvailableScore > 0 ? Math.round((a.score / totalAvailableScore) * 100000) / 1000 : 0;
+      totalAvailableScore > 0 ? Math.round(((a.score + bonus) / totalAvailableScore) * 100000) / 1000 : 0;
     const players = teamPlayerCounts.get(t.id) || 0;
     return {
       teamId: t.id,
@@ -4218,6 +4318,167 @@ function broadcastStatsImmediate() {
   broadcast(buildStatsPayload());
 }
 
+function logAdminAction(entry) {
+  console.log(`[admin] ${JSON.stringify({ ts: new Date().toISOString(), ...entry })}`);
+}
+
+function broadcastTeamManualScoreBonusSync() {
+  broadcast({
+    type: "teamManualScoreBonusSync",
+    bonuses: Object.fromEntries(teamManualScoreBonus),
+  });
+}
+
+function normTeamAdminQuery(s) {
+  return String(s || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * @returns {{ kind: "one"; team: (typeof dynamicTeams)[0] } | { kind: "none" } | { kind: "many"; names: string[] }}
+ */
+function resolveTeamForAdminBonus(needleRaw) {
+  const needle = normTeamAdminQuery(needleRaw);
+  if (!needle) return { kind: "none" };
+  const candidates = dynamicTeams.filter((t) => !t.solo && !t.eliminated);
+  const exact = candidates.filter((t) => normTeamAdminQuery(t.name) === needle);
+  if (exact.length === 1) return { kind: "one", team: exact[0] };
+  if (exact.length > 1) return { kind: "many", names: exact.map((t) => t.name) };
+  const partial = candidates.filter((t) => normTeamAdminQuery(t.name).includes(needle));
+  if (partial.length === 1) return { kind: "one", team: partial[0] };
+  if (partial.length > 1) return { kind: "many", names: partial.map((t) => t.name) };
+  return { kind: "none" };
+}
+
+/**
+ * @returns {{ ok: true; teamName: string; points: number } | { ok: false; error: string }}
+ */
+function parseTeamsTelegramAddPoints(body) {
+  const m = /^([\s\S]+?)\s*\+\s*(\d+)\s*$/i.exec(String(body || "").trim());
+  if (!m) {
+    return {
+      ok: false,
+      error: "Формат: teams Имя +очки — например: teams Alpha +500 или teams \"Team Alpha\" +500",
+    };
+  }
+  let name = m[1].trim();
+  if (
+    (name.startsWith('"') && name.endsWith('"') && name.length >= 2) ||
+    (name.startsWith("'") && name.endsWith("'") && name.length >= 2)
+  ) {
+    name = name.slice(1, -1).trim();
+  }
+  const points = parseInt(m[2], 10);
+  if (!Number.isFinite(points) || points < 1 || points > 1_000_000_000) {
+    return { ok: false, error: "Число очков должно быть от 1 до 1e9." };
+  }
+  if (!name) return { ok: false, error: "Укажите имя команды." };
+  return { ok: true, teamName: name, points };
+}
+
+function shiftManualBattleSlotsAfterPause(d, pauseStart) {
+  const ps = pauseStart | 0;
+  const dd = d | 0;
+  if (dd < 1 || !ps) return;
+  for (const [k, u] of [...manualBattleSlotsByCmd]) {
+    if (typeof u === "number" && u > ps) {
+      manualBattleSlotsByCmd.set(k, u + dd);
+    }
+  }
+}
+
+function shiftMstimAfterPause(d, pauseStart) {
+  const u = mstimAltSeasonBurstUntilMs | 0;
+  const ps = pauseStart | 0;
+  const dd = d | 0;
+  if (dd < 1 || !ps || u <= ps) return;
+  mstimAltSeasonBurstUntilMs = u + dd;
+}
+
+/**
+ * @param {number} telegramUserId
+ * @returns {{ ok: true } | { ok: false; reason: string }}
+ */
+function applyAdminPause(telegramUserId) {
+  if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
+  if (gameFinished) return { ok: false, reason: "game_finished" };
+  if (gamePaused) return { ok: false, reason: "already" };
+  const wasWarmup = isWarmupPhaseNow();
+  gamePaused = true;
+  pauseWallStartedAt = Date.now();
+  pauseCapturedWarmup = wasWarmup;
+  clearPendingManualSeismicSchedule();
+  if (statsBroadcastTimer != null) {
+    clearTimeout(statsBroadcastTimer);
+    statsBroadcastTimer = null;
+  }
+  if (playStartBroadcastTimer) {
+    clearTimeout(playStartBroadcastTimer);
+    playStartBroadcastTimer = null;
+  }
+  saveRoundState();
+  logAdminAction({ command: "pause", byTelegramId: telegramUserId, pauseCapturedWarmup });
+  broadcast({
+    type: "gamePauseSync",
+    paused: true,
+    pauseCapturedWarmup: wasWarmup,
+    round0WarmupMs,
+    roundDurationMs,
+    warmupPauseExtensionMs,
+  });
+  void Promise.all(
+    wss ? [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c)) : []
+  );
+  broadcastStatsImmediate();
+  void broadcastWalletPayloadToAllClients();
+  return { ok: true };
+}
+
+/**
+ * @param {number} telegramUserId
+ * @returns {{ ok: true } | { ok: false; reason: string }}
+ */
+function applyAdminUnpause(telegramUserId) {
+  if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
+  if (!gamePaused) return { ok: false, reason: "not_paused" };
+  const start = pauseWallStartedAt | 0;
+  const d = Math.max(0, Date.now() - start);
+  if (pauseCapturedWarmup) {
+    if (roundIndex === 0) {
+      const w = (round0WarmupMs | 0) + d;
+      round0WarmupMs = Math.min(600000, Math.max(5000, w));
+    } else {
+      warmupPauseExtensionMs = Math.min(7 * 24 * 3600000, (warmupPauseExtensionMs | 0) + d);
+    }
+  } else {
+    roundDurationMs = Math.min(8760 * 3600000, (roundDurationMs | 0) + d);
+  }
+  shiftManualBattleSlotsAfterPause(d, start);
+  shiftMstimAfterPause(d, start);
+  gamePaused = false;
+  pauseWallStartedAt = 0;
+  pauseCapturedWarmup = false;
+  saveRoundState();
+  logAdminAction({ command: "unpause", byTelegramId: telegramUserId, pauseDurationMs: d });
+  broadcast({
+    type: "gamePauseSync",
+    paused: false,
+    round0WarmupMs,
+    roundDurationMs,
+    warmupPauseExtensionMs,
+  });
+  broadcastTournamentTimeScaleToClients();
+  broadcast({ type: "mstimAltSeasonSync", untilMs: mstimAltSeasonBurstUntilMs });
+  broadcastManualBattleSyncAndStats();
+  schedulePlayStartBroadcast();
+  void Promise.all(
+    wss ? [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c)) : []
+  );
+  return { ok: true };
+}
+
 function blockWarmupPurchase(ws) {
   if (!isWarmupPhaseNow()) return false;
   safeSend(ws, { type: "purchaseError", reason: "warmup" });
@@ -4229,6 +4490,10 @@ function blockPrePlayPurchases(ws) {
 }
 
 function assertCanPlay(ws) {
+  if (gamePaused) {
+    safeSend(ws, { type: "playRejected", reason: "paused" });
+    return false;
+  }
   if (gameFinished) {
     safeSend(ws, { type: "playRejected", reason: "spectator" });
     return false;
@@ -4262,7 +4527,7 @@ async function sendConnectionMeta(ws) {
   }
   const warmupEndsAt =
     gameFinished || (roundIndex === 0 && !roundTimerStarted) ? null : getPlayStartMs();
-  const isoNow = Date.now();
+  const isoNow = effectiveGameClockMs();
   safeSend(ws, {
     type: "meta",
     teams: teamsForMeta(),
@@ -4274,6 +4539,7 @@ async function sendConnectionMeta(ws) {
     warmupEndsAt,
     playStartsAt: warmupEndsAt,
     warmupMs: getWarmupDurationMs(),
+    gamePaused: !!gamePaused,
     lobbyBeforeGo: !!(WAIT_FOR_TELEGRAM_GO && roundIndex === 0 && !roundTimerStarted),
     eligible: !!ws.eligible,
     gameFinished: !!gameFinished,
@@ -4292,6 +4558,12 @@ async function sendConnectionMeta(ws) {
 async function finalizeGameEnd(winnerRow) {
   roundEnding = true;
   try {
+    gamePaused = false;
+    pauseWallStartedAt = 0;
+    pauseCapturedWarmup = false;
+    warmupPauseExtensionMs = 0;
+    teamManualScoreBonus.clear();
+    clearPendingManualSeismicSchedule();
     const winnerTeamId = winnerRow.teamId;
     const winningTeamName = winnerRow.name || "";
     const scoreShare =
@@ -4485,6 +4757,7 @@ async function runMaybeEndRound() {
   if (!isClusterLeader()) return;
   if (roundEnding) return;
   if (gameFinished) return;
+  if (gamePaused) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
   if (Date.now() < getRoundBattleEndRealMs()) return;
   /* Авторитетный итог: полный пересчёт очков по pixels внутри buildStatsPayload (recalculateAllTeamScores). */
@@ -4661,7 +4934,7 @@ setInterval(() => maybeEndRound(), 5000);
 setInterval(() => tickFlagBaseRegen(Date.now()), 500);
 setInterval(() => tickBattleEvents(Date.now()), 1000);
 setInterval(() => {
-  if (gameFinished) return;
+  if (gameFinished || gamePaused) return;
   if (REDIS_URL && !isClusterLeader()) return;
   const removed = advanceTerritoryIsolationState();
   if (!removed) return;
@@ -4958,6 +5231,10 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg.type === "leaveTeam") {
+      if (gamePaused) {
+        safeSend(ws, { type: "leaveError", reason: "paused" });
+        return;
+      }
       attachPlayerKey(ws, msg);
       if (ws.teamId == null) {
         safeSend(ws,{ type: "leaveError", reason: "no_team" });
@@ -5961,6 +6238,10 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
     );
     return;
   }
+  if (gamePaused) {
+    await telegramSendMessage(chatId, "Игра на паузе — события карты (evt / seismic) недоступны до unpause.");
+    return;
+  }
   const parts = String(lineRaw || "")
     .toLowerCase()
     .split(/\s+/)
@@ -6312,6 +6593,118 @@ async function telegramPollLoop() {
           }
         }
 
+        {
+          let cn = restartNorm.replace(/^\/teams\b/i, "teams").trim();
+          if (cn === "teams" || cn.startsWith("teams ")) {
+            if (!isClusterLeader()) {
+              await telegramSendMessage(
+                chatId,
+                "Команды teams / pause / unpause выполняет только лидер кластера (CLUSTER_LEADER=true)."
+              );
+              continue;
+            }
+            const arg = cn.slice(5).trim();
+            if (!arg) {
+              const st = buildStatsPayload();
+              const rowBy = new Map(st.rows.map((r) => [r.teamId, r]));
+              const lines = [];
+              let n = 0;
+              for (const t of dynamicTeams) {
+                if (t.solo || t.eliminated) continue;
+                n += 1;
+                const r = rowBy.get(t.id);
+                const score =
+                  r && typeof r.score === "number" ? r.score : Math.round((teamManualScoreBonus.get(t.id) | 0) * 1000) / 1000;
+                const players = r && typeof r.players === "number" ? r.players : teamPlayerCounts.get(t.id) || 0;
+                lines.push(`${n}. ${t.name} — id ${t.id} — ${score} очк. — ${players} игроков`);
+              }
+              const hint = "\n\nДобавить очки команде: teams Имя +N (пример: teams Alpha +500 или teams \"Team Alpha\" +500).";
+              const text = lines.length
+                ? `Текущие команды:\n${lines.join("\n")}${hint}`
+                : `Команд нет (или все выбыли).${hint}`;
+              logAdminAction({ command: "teams_list", byTelegramId: uid, teamCount: lines.length });
+              await telegramSendMessage(chatId, text);
+              continue;
+            }
+            const parsed = parseTeamsTelegramAddPoints(arg);
+            if (!parsed.ok) {
+              await telegramSendMessage(chatId, parsed.error);
+              continue;
+            }
+            const resTeam = resolveTeamForAdminBonus(parsed.teamName);
+            if (resTeam.kind === "none") {
+              await telegramSendMessage(chatId, `Команда не найдена: «${parsed.teamName}».`);
+              continue;
+            }
+            if (resTeam.kind === "many") {
+              await telegramSendMessage(
+                chatId,
+                `Несколько совпадений для «${parsed.teamName}»: ${resTeam.names.join(", ")}. Уточните имя или используйте кавычки.`
+              );
+              continue;
+            }
+            const tid = resTeam.team.id;
+            const prevB = teamManualScoreBonus.get(tid) | 0;
+            teamManualScoreBonus.set(tid, prevB + parsed.points);
+            saveRoundState();
+            broadcastTeamManualScoreBonusSync();
+            scheduleStatsBroadcast();
+            const st2 = buildStatsPayload();
+            const row = st2.rows.find((x) => x.teamId === tid);
+            const newScore = row && typeof row.score === "number" ? row.score : prevB + parsed.points;
+            logAdminAction({
+              command: "teams_add",
+              byTelegramId: uid,
+              teamId: tid,
+              teamName: resTeam.team.name,
+              pointsAdded: parsed.points,
+              manualBonusTotal: teamManualScoreBonus.get(tid) | 0,
+            });
+            await telegramSendMessage(
+              chatId,
+              `Добавлено ${parsed.points} очков команде «${resTeam.team.name}». Новый счёт: ${newScore}`
+            );
+            continue;
+          }
+        }
+
+        {
+          const p0 = (restartNorm.split(/\s+/)[0] || "").replace(/@\w+$/i, "");
+          if (p0 === "pause") {
+            if (!isClusterLeader()) {
+              await telegramSendMessage(chatId, "Паузу выставляет только лидер кластера (CLUSTER_LEADER=true).");
+              continue;
+            }
+            const pr = applyAdminPause(uid);
+            if (!pr.ok) {
+              const replyPause =
+                pr.reason === "already"
+                  ? "Game is already paused."
+                  : pr.reason === "game_finished"
+                    ? "Game finished — pause not applied."
+                    : "Game paused not applied.";
+              await telegramSendMessage(chatId, replyPause);
+              continue;
+            }
+            await telegramSendMessage(chatId, "Game paused.");
+            continue;
+          }
+          if (p0 === "unpause" || p0 === "resume") {
+            if (!isClusterLeader()) {
+              await telegramSendMessage(chatId, "Unpause only on cluster leader (CLUSTER_LEADER=true).");
+              continue;
+            }
+            const ur = applyAdminUnpause(uid);
+            if (!ur.ok) {
+              await telegramSendMessage(chatId, ur.reason === "not_paused" ? "Game is not paused." : "Unpause failed.");
+              continue;
+            }
+            await telegramSendMessage(chatId, "Game resumed.");
+            broadcast({ type: "serverAnnouncement", text: "GAME RESUMED", durationMs: 4000 });
+            continue;
+          }
+        }
+
         let manualBattleLine = null;
         const manualEvtPrefix = /^(evt|event|события|событие)\s+/iu;
         if (manualEvtPrefix.test(restartNorm)) {
@@ -6345,7 +6738,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start, go [часы], test / test off (раунды по 30 с), say, speed, paint, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start, go [часы], teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, restart, evt help, gold…"
             );
           }
           continue;

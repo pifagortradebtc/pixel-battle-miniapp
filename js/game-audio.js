@@ -1,8 +1,7 @@
 /**
- * Премиальная игровая аудиосистема: шины громкости, приоритеты SFX, процедурные стинги,
- * динамическая музыка (CALM → TENSION → BATTLE → CRITICAL) с кроссфейдом.
- * Звук работает как в стратегии: эскалация = тактический сигнал, не просто фон.
- * Без внешних файлов — Web Audio API; при желании позже можно подменить стемы на буферы.
+ * Аудио как у серьёзной военно-стратегической симуляции: суббас, сдержанные удары, тишина между событиями.
+ * Без «игровых» писков, мелодичных стингов и яркого верха. Музыка CALM → TENSION → BATTLE → CRITICAL
+ * с плавным кроссфейдом. Web Audio API (процедурно).
  */
 
 const STORAGE_KEY = "pixelBattleAudioSettings";
@@ -18,6 +17,10 @@ const DEFAULT_SETTINGS = /** @type {const} */ ({
 
 /** @type {AudioSettings} */
 let settings = { ...DEFAULT_SETTINGS };
+
+/** Синхронизация иконки кнопки в шапке после applyAudioSettings (назначается в initGameAudio). */
+/** @type {(() => void) | undefined} */
+let refreshGameAudioToolbarUi;
 
 /** @type {AudioContext | null} */
 let ctx = null;
@@ -63,6 +66,8 @@ let lastThreatEscalationCueWallMs = 0;
 let lastAlertWallMs = 0;
 let lastExplosionWallMs = 0;
 let lastBaseHitWallMs = 0;
+/** Длинные кинематографические стинги — не засыпать UI мелочью сразу после. */
+let lastEpicStingWallMs = 0;
 let lowPrioritySfxCount = 0;
 
 const MUSIC_STATE = /** @type {const} */ ({
@@ -99,14 +104,38 @@ function saveSettings() {
 function applyBusGains() {
   if (!masterGain || !musicBus || !sfxBus || !uiBus || !alertBus || !ambientBus) return;
   const m = settings.muted ? 0 : settings.master;
-  masterGain.gain.value = m;
   const mv = m * settings.music;
-  musicBus.gain.value = mv;
   const ev = m * settings.effects;
-  sfxBus.gain.value = ev;
-  uiBus.gain.value = ev * 0.55;
-  alertBus.gain.value = ev * 1.12;
-  ambientBus.gain.value = ev * 0.35;
+  if (ctx) {
+    const t = ctx.currentTime;
+    masterGain.gain.cancelScheduledValues(t);
+    masterGain.gain.setValueAtTime(m, t);
+    musicBus.gain.cancelScheduledValues(t);
+    musicBus.gain.setValueAtTime(mv, t);
+    sfxBus.gain.cancelScheduledValues(t);
+    sfxBus.gain.setValueAtTime(ev * 0.9, t);
+    uiBus.gain.cancelScheduledValues(t);
+    /* Баланс: UI тихо, геймплей средне, алерты выше, музыка и ambient сдержанно */
+    uiBus.gain.setValueAtTime(ev * 0.34, t);
+    alertBus.gain.cancelScheduledValues(t);
+    alertBus.gain.setValueAtTime(ev * 1.06, t);
+    ambientBus.gain.cancelScheduledValues(t);
+    ambientBus.gain.setValueAtTime(ev * 0.28, t);
+  } else {
+    masterGain.gain.value = m;
+    musicBus.gain.value = mv;
+    sfxBus.gain.value = ev * 0.9;
+    uiBus.gain.value = ev * 0.34;
+    alertBus.gain.value = ev * 1.06;
+    ambientBus.gain.value = ev * 0.28;
+  }
+  /* Полная тишина + меньше нагрузки в WebView: граф можно приостановить */
+  try {
+    if (ctx && settings.muted && ctx.state === "running") void ctx.suspend();
+    else if (ctx && !settings.muted && ctx.state === "suspended") void ctx.resume();
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -156,8 +185,8 @@ function buildGraph() {
 
   musicFilter = ctx.createBiquadFilter();
   musicFilter.type = "lowpass";
-  musicFilter.frequency.value = 2400;
-  musicFilter.Q.value = 0.7;
+  musicFilter.frequency.value = 880;
+  musicFilter.Q.value = 0.65;
   musicFilter.connect(musicBus);
 
   musicLayerGains = [];
@@ -167,11 +196,12 @@ function buildGraph() {
 function ensureMusicOscs() {
   if (!ctx || !musicFilter || musicLayerGains.length) return;
 
+  /* Только sine/triangle, низкие «дроны» — без saw/square (не аркада). */
   const layers = [
-    { f0: 55, f1: 82.5, t0: "sine", t1: "sine", det: 4 },
-    { f0: 65, f1: 98, t0: "triangle", t1: "sine", det: 6 },
-    { f0: 73, f1: 110, t0: "sawtooth", t1: "triangle", det: 8 },
-    { f0: 82, f1: 123, t0: "sawtooth", t1: "square", det: 10 },
+    { f0: 32, f1: 48, t0: "sine", t1: "sine", det: 2 },
+    { f0: 40, f1: 60, t0: "sine", t1: "triangle", det: 3 },
+    { f0: 48, f1: 72, t0: "triangle", t1: "sine", det: 4 },
+    { f0: 55, f1: 82, t0: "sine", t1: "sine", det: 5 },
   ];
 
   for (let li = 0; li < layers.length; li++) {
@@ -186,7 +216,7 @@ function ensureMusicOscs() {
       const f = k === 0 ? spec.f0 : spec.f1;
       osc.frequency.value = f * (1 + ((k === 0 ? 1 : -1) * spec.det) / 1200);
       const og = ctx.createGain();
-      og.gain.value = k === 0 ? 0.055 : 0.04;
+      og.gain.value = k === 0 ? 0.026 : 0.018;
       osc.connect(og);
       og.connect(g);
       osc.start();
@@ -220,69 +250,70 @@ function scheduleBattlePulseLoop() {
       const volBase = settings.effects * (settings.muted ? 0 : settings.master);
       const t = ctx.currentTime;
       if (st === MUSIC_STATE.TENSION) {
-        nextStrategicPulseWallMs = wall + 820;
+        /* Build-up: редкий низкий такт, почти тишина между ударами */
+        nextStrategicPulseWallMs = wall + 1180;
         const g = ctx.createGain();
         g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(0.038 * volBase, t + 0.01);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+        g.gain.exponentialRampToValueAtTime(0.022 * volBase, t + 0.014);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
         const o = ctx.createOscillator();
-        o.type = "triangle";
-        o.frequency.setValueAtTime(198, t);
-        o.frequency.exponentialRampToValueAtTime(118, t + 0.08);
+        o.type = "sine";
+        o.frequency.setValueAtTime(62, t);
+        o.frequency.exponentialRampToValueAtTime(38, t + 0.16);
         o.connect(g);
         g.connect(musicBus);
         o.start(t);
-        o.stop(t + 0.1);
+        o.stop(t + 0.22);
         return;
       }
       if (st === MUSIC_STATE.BATTLE) {
-        nextStrategicPulseWallMs = wall + 400;
+        nextStrategicPulseWallMs = wall + 520;
         lastBattlePulseWallMs = wall;
         const g = ctx.createGain();
         g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(0.092 * volBase, t + 0.012);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+        g.gain.exponentialRampToValueAtTime(0.048 * volBase, t + 0.016);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
         const o = ctx.createOscillator();
         o.type = "sine";
-        o.frequency.setValueAtTime(58, t);
-        o.frequency.exponentialRampToValueAtTime(38, t + 0.12);
+        o.frequency.setValueAtTime(52, t);
+        o.frequency.exponentialRampToValueAtTime(36, t + 0.18);
         o.connect(g);
         g.connect(musicBus);
         o.start(t);
-        o.stop(t + 0.16);
+        o.stop(t + 0.24);
         return;
       }
-      /* CRITICAL: плотный такт + лёгкий «тревожный» обертон */
-      nextStrategicPulseWallMs = wall + 268;
+      /* CRITICAL: плотный суб + короткий шёлк (LP), без square */
+      nextStrategicPulseWallMs = wall + 340;
       lastBattlePulseWallMs = wall;
       const g1 = ctx.createGain();
       g1.gain.setValueAtTime(0.0001, t);
-      g1.gain.exponentialRampToValueAtTime(0.1 * volBase, t + 0.01);
-      g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+      g1.gain.exponentialRampToValueAtTime(0.065 * volBase, t + 0.012);
+      g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
       const k = ctx.createOscillator();
       k.type = "sine";
-      k.frequency.setValueAtTime(52, t);
-      k.frequency.exponentialRampToValueAtTime(34, t + 0.1);
+      k.frequency.setValueAtTime(48, t);
+      k.frequency.exponentialRampToValueAtTime(28, t + 0.14);
       k.connect(g1);
       g1.connect(musicBus);
       k.start(t);
-      k.stop(t + 0.13);
+      k.stop(t + 0.18);
       const g2 = ctx.createGain();
-      g2.gain.setValueAtTime(0.0001, t + 0.02);
-      g2.gain.exponentialRampToValueAtTime(0.042 * volBase, t + 0.025);
-      g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+      g2.gain.setValueAtTime(0.0001, t + 0.03);
+      g2.gain.exponentialRampToValueAtTime(0.024 * volBase, t + 0.04);
+      g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
       const h = ctx.createOscillator();
-      h.type = "square";
-      h.frequency.setValueAtTime(310, t + 0.02);
-      h.frequency.exponentialRampToValueAtTime(220, t + 0.09);
+      h.type = "triangle";
+      h.frequency.setValueAtTime(88, t + 0.03);
+      h.frequency.exponentialRampToValueAtTime(58, t + 0.1);
       const lp = ctx.createBiquadFilter();
       lp.type = "lowpass";
-      lp.frequency.value = 620;
+      lp.frequency.value = 260;
       h.connect(lp);
       lp.connect(g2);
       g2.connect(musicBus);
-      h.start(t + 0.02);
-      h.stop(t + 0.12);
+      h.start(t + 0.03);
+      h.stop(t + 0.14);
     } catch {
       /* ignore */
     }
@@ -301,9 +332,9 @@ function startAmbientHum() {
   src.loop = true;
   const f = ctx.createBiquadFilter();
   f.type = "lowpass";
-  f.frequency.value = 420;
+  f.frequency.value = 220;
   const g = ctx.createGain();
-  g.gain.value = 0.028;
+  g.gain.value = 0.02;
   ambientNoiseGainNode = g;
   src.connect(f);
   f.connect(g);
@@ -312,9 +343,9 @@ function startAmbientHum() {
 
   const hum = ctx.createOscillator();
   hum.type = "sine";
-  hum.frequency.value = 62;
+  hum.frequency.value = 48;
   const hg = ctx.createGain();
-  hg.gain.value = 0.018;
+  hg.gain.value = 0.012;
   ambientHumGainNode = hg;
   hum.connect(hg);
   hg.connect(ambientBus);
@@ -331,20 +362,20 @@ function syncAmbientToThreat(state, instant = false) {
   if (!ctx || !ambientNoiseGainNode || !ambientHumGainNode) return;
   const now = ctx.currentTime;
   const dur = instant ? 0.04 : 0.55;
-  let n = 0.024;
-  let h = 0.016;
+  let n = 0.016;
+  let h = 0.01;
   if (state === MUSIC_STATE.CALM) {
-    n = 0.02;
-    h = 0.014;
+    n = 0.014;
+    h = 0.009;
   } else if (state === MUSIC_STATE.TENSION) {
-    n = 0.034;
-    h = 0.022;
+    n = 0.022;
+    h = 0.014;
   } else if (state === MUSIC_STATE.BATTLE) {
-    n = 0.03;
-    h = 0.019;
+    n = 0.024;
+    h = 0.015;
   } else {
-    n = 0.017;
-    h = 0.011;
+    n = 0.012;
+    h = 0.008;
   }
   ambientNoiseGainNode.gain.cancelScheduledValues(now);
   ambientHumGainNode.gain.cancelScheduledValues(now);
@@ -365,29 +396,29 @@ function syncAmbientToThreat(state, instant = false) {
 function playThreatEscalationMarker(fromState, toState) {
   if (!ctx || !sfxBus || settings.muted) return;
   const w = performance.now();
-  if (w - lastThreatEscalationCueWallMs < 1200) return;
+  if (w - lastThreatEscalationCueWallMs < 1400) return;
   if (toState <= fromState) return;
   lastThreatEscalationCueWallMs = w;
   const now = ctx.currentTime;
   const g = ctx.createGain();
   g.gain.setValueAtTime(0.0001, now);
-  g.gain.linearRampToValueAtTime(0.048, now + 0.018);
-  g.gain.exponentialRampToValueAtTime(0.0001, now + 0.15);
+  g.gain.exponentialRampToValueAtTime(0.042, now + 0.05);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
   const o = ctx.createOscillator();
   o.type = "sine";
-  const f0 = 360 + fromState * 45;
-  const f1 = 500 + toState * 70;
+  const f0 = 72 + fromState * 10;
+  const f1 = 34 + toState * 5;
   o.frequency.setValueAtTime(f0, now);
-  o.frequency.exponentialRampToValueAtTime(f1, now + 0.1);
-  const bp = ctx.createBiquadFilter();
-  bp.type = "bandpass";
-  bp.frequency.value = 880;
-  bp.Q.value = 1.1;
-  o.connect(bp);
-  bp.connect(g);
+  o.frequency.exponentialRampToValueAtTime(Math.max(28, f1), now + 0.32);
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = 320;
+  lp.Q.value = 0.6;
+  o.connect(lp);
+  lp.connect(g);
   g.connect(sfxBus);
   o.start(now);
-  o.stop(now + 0.17);
+  o.stop(now + 0.45);
 }
 
 /**
@@ -397,25 +428,26 @@ function playThreatEscalationMarker(fromState, toState) {
 function applyMusicLayerTargets(instant, escalating = false) {
   if (!ctx || musicLayerGains.length < 4) return;
   const now = ctx.currentTime;
-  const dur = instant ? 0.05 : escalating ? 1.05 : 2.75;
+  const dur = instant ? 0.07 : escalating ? 1.45 : 3.15;
   const s = currentMusicState;
   const weights = [0.02, 0.02, 0.02, 0.02];
   weights[s] = 1;
-  if (s > 0) weights[s - 1] = Math.max(weights[s - 1], 0.22);
-  if (s < 3) weights[s + 1] = Math.max(weights[s + 1], 0.14);
+  if (s > 0) weights[s - 1] = Math.max(weights[s - 1], 0.26);
+  if (s < 3) weights[s + 1] = Math.max(weights[s + 1], 0.16);
 
-  const layerMul = [0.85, 0.95, 1.05, 1.22];
+  const layerMul = [0.82, 0.92, 1.02, 1.14];
   for (let i = 0; i < 4; i++) {
     const g = musicLayerGains[i];
-    const target = weights[i] * layerMul[i] * 0.55;
+    const target = weights[i] * layerMul[i] * 0.36;
     g.gain.cancelScheduledValues(now);
     if (instant) g.gain.setValueAtTime(target, now);
     else g.gain.linearRampToValueAtTime(target, now + dur);
   }
 
   if (musicFilter) {
-    const fq = s === MUSIC_STATE.CALM ? 1750 : s === MUSIC_STATE.TENSION ? 2150 : s === MUSIC_STATE.BATTLE ? 2750 : 3350;
-    const qVal = s === MUSIC_STATE.CRITICAL ? 2.05 : s === MUSIC_STATE.BATTLE ? 1.15 : 0.78;
+    const fq =
+      s === MUSIC_STATE.CALM ? 560 : s === MUSIC_STATE.TENSION ? 720 : s === MUSIC_STATE.BATTLE ? 980 : 1320;
+    const qVal = s === MUSIC_STATE.CRITICAL ? 1.35 : s === MUSIC_STATE.BATTLE ? 0.95 : 0.62;
     musicFilter.frequency.cancelScheduledValues(now);
     musicFilter.Q.cancelScheduledValues(now);
     if (instant) {
@@ -454,32 +486,32 @@ function duckMusicForAlert(ms, deep = false) {
   const now = ctx.currentTime;
   const dur = (ms / 1000) * 0.5;
   const end = now + ms / 1000;
-  const floor = deep ? 0.26 : 0.44;
+  const floor = deep ? 0.18 : 0.32;
   musicDuck.gain.cancelScheduledValues(now);
   musicDuck.gain.setValueAtTime(musicDuck.gain.value, now);
   musicDuck.gain.linearRampToValueAtTime(floor, now + dur);
   musicDuck.gain.linearRampToValueAtTime(1, end);
 }
 
-/** Краткий «шум рации» — тактический канал, не декоративный шум. */
-function playTacticalRadioCrackle(bus, audioNow, peak = 0.035) {
+/** Краткий «шум рации» — низкий тактический канал (штаб), без «песка» в верхах. */
+function playTacticalRadioCrackle(bus, audioNow, peak = 0.016) {
   if (!ctx || !bus) return;
-  const len = Math.max(64, Math.floor(0.045 * ctx.sampleRate));
+  const len = Math.max(64, Math.floor(0.038 * ctx.sampleRate));
   const buf = ctx.createBuffer(1, len, ctx.sampleRate);
   const d = buf.getChannelData(0);
   for (let i = 0; i < len; i++) {
-    d[i] = (Math.random() * 2 - 1) * (1 - i / len) * (0.55 + 0.45 * Math.sin(i * 0.31));
+    d[i] = (Math.random() * 2 - 1) * (1 - i / len) * (0.55 + 0.45 * Math.sin(i * 0.18));
   }
   const src = ctx.createBufferSource();
   src.buffer = buf;
   const f = ctx.createBiquadFilter();
   f.type = "bandpass";
-  f.frequency.value = 1550;
-  f.Q.value = 0.85;
+  f.frequency.value = 380;
+  f.Q.value = 0.48;
   const g = ctx.createGain();
   g.gain.setValueAtTime(0.0001, audioNow);
-  g.gain.linearRampToValueAtTime(peak, audioNow + 0.006);
-  g.gain.exponentialRampToValueAtTime(0.0001, audioNow + 0.042);
+  g.gain.linearRampToValueAtTime(peak, audioNow + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, audioNow + 0.036);
   src.connect(f);
   f.connect(g);
   g.connect(bus);
@@ -494,8 +526,9 @@ function playTacticalRadioCrackle(bus, audioNow, peak = 0.035) {
  * @param {number} durSec
  * @param {GainNode} bus
  * @param {number} now
+ * @param {number | null} [lowpassHz] срез верха (triangle/saw), «штаб» без блеска
  */
-function playOscThrough(type, f0, f1, peakGain, durSec, bus, now) {
+function playOscThrough(type, f0, f1, peakGain, durSec, bus, now, lowpassHz = null) {
   if (!ctx) return;
   const osc = ctx.createOscillator();
   osc.type = type;
@@ -509,76 +542,193 @@ function playOscThrough(type, f0, f1, peakGain, durSec, bus, now) {
       osc.frequency.exponentialRampToValueAtTime(Math.max(20, f1), now + durSec * 0.92);
     else osc.frequency.linearRampToValueAtTime(f1, now + durSec * 0.85);
   }
-  osc.connect(g);
+  if (typeof lowpassHz === "number" && lowpassHz > 0) {
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = lowpassHz;
+    lp.Q.value = 0.62;
+    osc.connect(lp);
+    lp.connect(g);
+  } else {
+    osc.connect(g);
+  }
   g.connect(bus);
   osc.start(now);
   osc.stop(now + durSec + 0.04);
 }
 
 /**
- * Кинематографические стинги (раньше в event-presentation).
+ * Низкий «телесный» удар (взрыв, захват, удар по базе).
+ * @param {GainNode} bus
+ * @param {number} now
+ * @param {number} durSec
+ * @param {number} fStart
+ * @param {number} fEnd
+ * @param {number} peak
+ */
+function playSubThump(bus, now, durSec, fStart, fEnd, peak) {
+  if (!ctx) return;
+  const o = ctx.createOscillator();
+  o.type = "sine";
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = 380;
+  lp.Q.value = 0.55;
+  const g = ctx.createGain();
+  o.frequency.setValueAtTime(fStart, now);
+  o.frequency.exponentialRampToValueAtTime(Math.max(18, fEnd), now + durSec * 0.9);
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), now + 0.045);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + durSec);
+  o.connect(lp);
+  lp.connect(g);
+  g.connect(bus);
+  o.start(now);
+  o.stop(now + durSec + 0.06);
+}
+
+/**
+ * Короткий отфильтрованный шум (шокволна, обломки, «металл»).
+ * @param {GainNode} bus
+ * @param {number} now
+ * @param {number} durSec
+ * @param {number} peak
+ * @param {number} lowpassHz
+ */
+function playFilteredNoiseBurst(bus, now, durSec, peak, lowpassHz) {
+  if (!ctx) return;
+  const len = Math.max(48, Math.floor(ctx.sampleRate * durSec));
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  let leak = 0;
+  for (let i = 0; i < len; i++) {
+    leak = leak * 0.93 + (Math.random() * 2 - 1) * 0.16;
+    d[i] = Math.max(-1, Math.min(1, leak));
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = lowpassHz;
+  lp.Q.value = 0.62;
+  const g = ctx.createGain();
+  const att = Math.min(0.055, durSec * 0.22);
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), now + att);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + durSec);
+  src.connect(lp);
+  lp.connect(g);
+  g.connect(bus);
+  src.start(now);
+  src.stop(now + durSec + 0.04);
+}
+
+/**
+ * Кинематографические стинги (event-presentation): только низы / сдержанные слои, без square/saw «аркады».
  * @param {string} kind
  */
 export function playPresentationSting(kind) {
   resumeAudioContext().then(() => {
-    if (!ctx || !sfxBus) return;
+    if (!ctx || !sfxBus || settings.muted) return;
     startMusicEngine();
+    const k = String(kind || "default");
+    const epic = k === "nuke-bomb" || k === "base_captured" || k === "final-ten";
+    if (epic) lastEpicStingWallMs = performance.now();
+
     const now = ctx.currentTime;
     const master = ctx.createGain();
-    master.gain.setValueAtTime(0.0001, now);
-    master.gain.exponentialRampToValueAtTime(0.92, now + 0.02);
-    master.gain.exponentialRampToValueAtTime(0.0001, now + 0.85);
     master.connect(sfxBus);
 
-    if (kind === "nuke-bomb") {
-      master.gain.cancelScheduledValues(now);
+    if (k === "nuke-bomb") {
       master.gain.setValueAtTime(0.0001, now);
-      master.gain.exponentialRampToValueAtTime(0.34, now + 0.032);
-      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.78);
-      playOscThrough("triangle", 44, 15, 0.21, 0.64, master, now);
-      playOscThrough("sine", 102, 38, 0.11, 0.52, master, now + 0.035);
-      playOscThrough("square", 228, 88, 0.052, 0.3, master, now + 0.1);
+      master.gain.exponentialRampToValueAtTime(1, now + 0.018);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 1.05);
+      playSubThump(master, now, 0.58, 36, 17, 0.48);
+      playFilteredNoiseBurst(master, now + 0.015, 0.48, 0.2, 420);
+      playFilteredNoiseBurst(master, now + 0.09, 0.2, 0.042, 950);
+      playOscThrough("sine", 78, 32, 0.07, 0.45, master, now + 0.04);
       return;
     }
-    const epic = kind === "base_captured" || kind === "final-ten";
-    const tail = epic ? 0.58 : 0.44;
-    master.gain.cancelScheduledValues(now);
+
+    if (k === "base_captured") {
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.92, now + 0.022);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.72);
+      playSubThump(master, now, 0.42, 48, 22, 0.38);
+      playOscThrough("triangle", 78, 42, 0.065, 0.35, master, now + 0.05, 340);
+      playOscThrough("sine", 108, 52, 0.04, 0.32, master, now + 0.08);
+      playFilteredNoiseBurst(master, now + 0.12, 0.16, 0.045, 900);
+      return;
+    }
+
+    if (k === "final-ten") {
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.88, now + 0.028);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
+      playSubThump(master, now, 0.32, 55, 38, 0.22);
+      playOscThrough("sine", 118, 92, 0.048, 0.38, master, now + 0.06);
+      playOscThrough("sine", 102, 62, 0.035, 0.42, master, now + 0.14);
+      return;
+    }
+
+    const tail = 0.38;
     master.gain.setValueAtTime(0.0001, now);
-    master.gain.exponentialRampToValueAtTime(epic ? 0.28 : 0.22, now + 0.024);
+    master.gain.exponentialRampToValueAtTime(0.78, now + 0.02);
     master.gain.exponentialRampToValueAtTime(0.0001, now + tail);
 
-    if (kind === "base_captured") {
-      playOscThrough("triangle", 95, 42, 0.14, 0.52, master, now);
-      playOscThrough("sine", 190, 95, 0.07, 0.38, master, now + 0.04);
-      playOscThrough("square", 380, 190, 0.04, 0.12, master, now + 0.12);
+    if (k === "seismic-incoming") {
+      playFilteredNoiseBurst(master, now, 0.28, 0.08, 320);
+      playOscThrough("sine", 52, 28, 0.1, 0.42, master, now + 0.04);
+      playOscThrough("triangle", 62, 36, 0.038, 0.28, master, now + 0.1, 320);
       return;
     }
-    if (kind === "final-ten") {
-      playOscThrough("sine", 196, 392, 0.11, 0.42, master, now);
-      playOscThrough("sine", 293.66, 440, 0.06, 0.36, master, now + 0.05);
+    if (k === "seismic") {
+      playSubThump(master, now, 0.36, 42, 20, 0.32);
+      playFilteredNoiseBurst(master, now + 0.02, 0.25, 0.09, 480);
       return;
     }
-
-    if (kind === "gold" || kind === "center") {
-      playOscThrough("sine", 880, 1320, 0.12, 0.32, master, now);
-    } else if (kind === "seismic" || kind === "seismic-incoming") {
-      playOscThrough("triangle", 58, 26, 0.14, 0.4, master, now);
-    } else if (kind === "compression" || kind === "final-phase") {
-      playOscThrough("sawtooth", 110, 168, 0.1, 0.34, master, now);
-    } else if (kind === "economic" || kind === "boom" || kind === "recession") {
-      playOscThrough("square", 330, 440, 0.1, 0.28, master, now);
-    } else if (kind === "dramatic") {
-      playOscThrough("sine", 220, 660, 0.1, 0.36, master, now);
-    } else {
-      playOscThrough("sine", 523, 784, 0.1, 0.3, master, now);
+    if (k === "gold" || k === "center") {
+      playOscThrough("sine", 118, 92, 0.042, 0.28, master, now);
+      playOscThrough("triangle", 88, 68, 0.028, 0.3, master, now + 0.05, 380);
+      return;
     }
+    if (k === "compression" || k === "final-phase") {
+      playOscThrough("sine", 88, 52, 0.07, 0.34, master, now);
+      playFilteredNoiseBurst(master, now + 0.06, 0.18, 0.04, 550);
+      return;
+    }
+    if (k === "economic" || k === "economic-dual") {
+      playOscThrough("sine", 72, 98, 0.06, 0.26, master, now);
+      playOscThrough("sine", 98, 62, 0.045, 0.24, master, now + 0.08);
+      return;
+    }
+    if (k === "boom") {
+      playSubThump(master, now, 0.22, 62, 40, 0.2);
+      playOscThrough("sine", 120, 92, 0.05, 0.2, master, now + 0.04);
+      return;
+    }
+    if (k === "recession") {
+      playOscThrough("sine", 98, 55, 0.065, 0.32, master, now);
+      playFilteredNoiseBurst(master, now + 0.08, 0.14, 0.03, 400);
+      return;
+    }
+    if (k === "dramatic") {
+      playSubThump(master, now, 0.22, 58, 38, 0.14);
+      playOscThrough("sine", 92, 58, 0.055, 0.34, master, now + 0.04);
+      return;
+    }
+    /* default, synergy — сухой низкий маркер, без «мелодии» */
+    playOscThrough("sine", 108, 82, 0.038, 0.2, master, now);
   });
 }
 
 function canPlayLowPrioritySfx() {
   const now = performance.now();
-  if (now - lastAlertWallMs < 120) return false;
-  if (lowPrioritySfxCount >= 5) return false;
+  if (now - lastAlertWallMs < 280) return false;
+  if (now - lastExplosionWallMs < 820) return false;
+  if (now - lastBaseHitWallMs < 480) return false;
+  if (now - lastEpicStingWallMs < 650) return false;
+  if (lowPrioritySfxCount >= 4) return false;
   return true;
 }
 
@@ -594,18 +744,8 @@ export function playUiClick() {
     if (!ctx || !uiBus || settings.muted || !canPlayLowPrioritySfx()) return;
     registerLowPrioritySfx();
     const now = ctx.currentTime;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, now);
-    g.gain.exponentialRampToValueAtTime(0.07, now + 0.006);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
-    const o = ctx.createOscillator();
-    o.type = "sine";
-    o.frequency.setValueAtTime(1760, now);
-    o.frequency.exponentialRampToValueAtTime(990, now + 0.038);
-    o.connect(g);
-    g.connect(uiBus);
-    o.start(now);
-    o.stop(now + 0.055);
+    playFilteredNoiseBurst(uiBus, now, 0.018, 0.022, 520);
+    playOscThrough("sine", 198, 165, 0.018, 0.032, uiBus, now + 0.002);
   });
 }
 
@@ -616,15 +756,15 @@ export function playUiHover() {
     const now = ctx.currentTime;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, now);
-    g.gain.exponentialRampToValueAtTime(0.035, now + 0.008);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.009, now + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.042);
     const o = ctx.createOscillator();
     o.type = "sine";
-    o.frequency.value = 1320;
+    o.frequency.value = 155;
     o.connect(g);
     g.connect(uiBus);
     o.start(now);
-    o.stop(now + 0.06);
+    o.stop(now + 0.048);
   });
 }
 
@@ -637,8 +777,8 @@ export function playUiError() {
     if (w - lastUiErrorWallMs < 220) return;
     lastUiErrorWallMs = w;
     const now = ctx.currentTime;
-    playOscThrough("triangle", 220, 92, 0.09, 0.14, uiBus, now);
-    playOscThrough("sine", 166, 80, 0.05, 0.12, uiBus, now + 0.02);
+    playSubThump(uiBus, now, 0.14, 108, 58, 0.07);
+    playOscThrough("sine", 92, 48, 0.04, 0.12, uiBus, now + 0.015);
   });
 }
 
@@ -646,9 +786,8 @@ export function playPurchaseSuccess() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 523.25, 659.25, 0.1, 0.09, sfxBus, now);
-    playOscThrough("sine", 659.25, 783.99, 0.08, 0.1, sfxBus, now + 0.07);
-    playOscThrough("triangle", 392, 523.25, 0.06, 0.14, sfxBus, now + 0.04);
+    playOscThrough("sine", 98, 118, 0.038, 0.14, sfxBus, now);
+    playOscThrough("sine", 118, 88, 0.028, 0.12, sfxBus, now + 0.07);
   });
 }
 
@@ -657,18 +796,8 @@ export function playPixelPlace() {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
     registerLowPrioritySfx();
     const now = ctx.currentTime;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, now);
-    g.gain.exponentialRampToValueAtTime(0.11, now + 0.004);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.035);
-    const o = ctx.createOscillator();
-    o.type = "triangle";
-    o.frequency.setValueAtTime(420, now);
-    o.frequency.exponentialRampToValueAtTime(280, now + 0.028);
-    o.connect(g);
-    g.connect(sfxBus);
-    o.start(now);
-    o.stop(now + 0.045);
+    playFilteredNoiseBurst(sfxBus, now, 0.012, 0.035, 680);
+    playOscThrough("sine", 265, 198, 0.045, 0.028, sfxBus, now + 0.001);
   });
 }
 
@@ -676,8 +805,8 @@ export function playTerritoryExpand() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 130, 210, 0.08, 0.22, sfxBus, now);
-    playOscThrough("triangle", 98, 164, 0.06, 0.28, sfxBus, now + 0.04);
+    playOscThrough("sine", 55, 95, 0.048, 0.28, sfxBus, now);
+    playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022, 380);
   });
 }
 
@@ -689,8 +818,9 @@ export function playFlagBaseHit() {
     lastBaseHitWallMs = nowW;
     const now = ctx.currentTime;
     duckMusicForAlert(260, false);
-    playOscThrough("triangle", 48, 28, 0.18, 0.35, sfxBus, now);
-    playOscThrough("square", 140, 70, 0.08, 0.22, sfxBus, now + 0.02);
+    playSubThump(sfxBus, now, 0.26, 68, 42, 0.26);
+    playFilteredNoiseBurst(sfxBus, now + 0.01, 0.07, 0.065, 1100);
+    playOscThrough("triangle", 78, 48, 0.028, 0.15, sfxBus, now + 0.018, 420);
   });
 }
 
@@ -709,8 +839,9 @@ export function playQuantumConnect() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 220, 880, 0.1, 0.4, sfxBus, now);
-    playOscThrough("triangle", 330, 990, 0.06, 0.35, sfxBus, now + 0.05);
+    playOscThrough("sine", 48, 118, 0.075, 0.38, sfxBus, now);
+    playOscThrough("triangle", 55, 92, 0.032, 0.32, sfxBus, now + 0.06, 340);
+    playFilteredNoiseBurst(sfxBus, now + 0.12, 0.12, 0.028, 600);
   });
 }
 
@@ -718,8 +849,9 @@ export function playQuantumDisconnect() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     const now = ctx.currentTime;
-    playOscThrough("sine", 720, 120, 0.09, 0.38, sfxBus, now);
-    playOscThrough("triangle", 360, 90, 0.06, 0.32, sfxBus, now + 0.03);
+    playOscThrough("sine", 125, 38, 0.08, 0.35, sfxBus, now);
+    playOscThrough("triangle", 78, 38, 0.03, 0.28, sfxBus, now + 0.04, 300);
+    playFilteredNoiseBurst(sfxBus, now + 0.08, 0.16, 0.04, 380);
   });
 }
 
@@ -728,7 +860,7 @@ export function playQuantumIncomeTick() {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
     registerLowPrioritySfx();
     const now = ctx.currentTime;
-    playOscThrough("sine", 990, 1320, 0.06, 0.08, sfxBus, now);
+    playOscThrough("sine", 88, 102, 0.022, 0.055, sfxBus, now);
   });
 }
 
@@ -738,11 +870,11 @@ export function playAlertBaseUnderAttack() {
     lastAlertWallMs = performance.now();
     duckMusicForAlert(720, true);
     const now = ctx.currentTime;
-    playTacticalRadioCrackle(alertBus, now, 0.042);
+    playTacticalRadioCrackle(alertBus, now, 0.018);
     for (let i = 0; i < 3; i++) {
-      const t = now + 0.04 + i * 0.11;
-      playOscThrough("square", 520, 520, 0.12, 0.06, alertBus, t);
-      playOscThrough("square", 390, 390, 0.1, 0.055, alertBus, t + 0.055);
+      const t = now + 0.045 + i * 0.12;
+      playOscThrough("sine", 142, 142, 0.095, 0.052, alertBus, t);
+      playOscThrough("sine", 108, 108, 0.072, 0.045, alertBus, t + 0.058);
     }
   });
 }
@@ -753,11 +885,10 @@ export function playAlertLastCells() {
     lastAlertWallMs = performance.now();
     duckMusicForAlert(560, true);
     const now = ctx.currentTime;
-    /* Два удара квинты — «сектор сжимается», читается отдельно от атаки на базу. */
-    playOscThrough("triangle", 220, 220, 0.1, 0.08, alertBus, now);
-    playOscThrough("triangle", 330, 330, 0.09, 0.08, alertBus, now + 0.09);
-    playOscThrough("triangle", 310, 175, 0.12, 0.16, alertBus, now + 0.2);
-    playOscThrough("triangle", 265, 165, 0.09, 0.14, alertBus, now + 0.28);
+    playOscThrough("sine", 122, 122, 0.068, 0.072, alertBus, now);
+    playOscThrough("sine", 98, 98, 0.06, 0.068, alertBus, now + 0.095);
+    playOscThrough("sine", 108, 72, 0.078, 0.14, alertBus, now + 0.2);
+    playOscThrough("sine", 88, 58, 0.058, 0.12, alertBus, now + 0.29);
   });
 }
 
@@ -767,10 +898,13 @@ export function playAlertLastCell() {
     lastAlertWallMs = performance.now();
     duckMusicForAlert(920, true);
     const now = ctx.currentTime;
-    playTacticalRadioCrackle(alertBus, now, 0.038);
-    for (let i = 0; i < 4; i++) {
-      playOscThrough("square", 720 - i * 55, 240, 0.14, 0.065, alertBus, now + 0.05 + i * 0.075);
+    playTacticalRadioCrackle(alertBus, now, 0.014);
+    const steps = [132, 118, 102, 88];
+    for (let i = 0; i < steps.length; i++) {
+      const f = steps[i];
+      playOscThrough("sine", f, f, 0.095, 0.068, alertBus, now + 0.055 + i * 0.085);
     }
+    playSubThump(alertBus, now + 0.38, 0.2, 48, 32, 0.14);
   });
 }
 
@@ -780,10 +914,10 @@ export function playAlertTerritoryCutOff() {
     lastAlertWallMs = performance.now();
     duckMusicForAlert(520, true);
     const now = ctx.currentTime;
-    /* «Разрыв линии снабжения» — нисходящий скан + удар. */
-    playOscThrough("sawtooth", 240, 48, 0.11, 0.28, alertBus, now);
-    playOscThrough("triangle", 420, 90, 0.08, 0.12, alertBus, now + 0.08);
-    playOscThrough("square", 95, 55, 0.1, 0.22, alertBus, now + 0.14);
+    playFilteredNoiseBurst(alertBus, now, 0.22, 0.07, 420);
+    playOscThrough("sine", 95, 38, 0.09, 0.26, alertBus, now + 0.04);
+    playOscThrough("triangle", 92, 48, 0.04, 0.16, alertBus, now + 0.1, 360);
+    playSubThump(alertBus, now + 0.14, 0.18, 62, 38, 0.16);
   });
 }
 
@@ -867,6 +1001,7 @@ export function applyAudioSettings(patch) {
   if (typeof patch.muted === "boolean") settings.muted = patch.muted;
   saveSettings();
   applyBusGains();
+  refreshGameAudioToolbarUi?.();
 }
 
 export function getAudioSettings() {
@@ -886,6 +1021,18 @@ export function initGameAudio() {
   const sfxEl = document.getElementById("game-audio-sfx");
   const muteEl = document.getElementById("game-audio-mute");
 
+  const positionAudioPanel = () => {
+    if (!panel || panel.hidden || !btn) return;
+    const r = btn.getBoundingClientRect();
+    const margin = 6;
+    panel.style.position = "fixed";
+    panel.style.left = "auto";
+    panel.style.bottom = "auto";
+    panel.style.top = `${Math.round(r.bottom + margin)}px`;
+    panel.style.right = `${Math.round(window.innerWidth - r.right)}px`;
+    panel.style.zIndex = "20050";
+  };
+
   const syncUi = () => {
     if (masterEl) {
       masterEl.value = String(Math.round(settings.master * 100));
@@ -894,13 +1041,39 @@ export function initGameAudio() {
     if (sfxEl) sfxEl.value = String(Math.round(settings.effects * 100));
     if (muteEl) muteEl.checked = settings.muted;
   };
+
+  const syncToolbarBtn = () => {
+    if (!btn) return;
+    if (settings.muted) {
+      btn.textContent = "🔇";
+      btn.classList.add("toolbar__btn--audio-muted");
+      btn.setAttribute("aria-pressed", "true");
+      btn.title = "Звук выключен — нажмите, чтобы настроить или включить";
+    } else {
+      btn.textContent = "🔊";
+      btn.classList.remove("toolbar__btn--audio-muted");
+      btn.setAttribute("aria-pressed", "false");
+      btn.title = "Звук включён — нажмите для настроек громкости";
+    }
+  };
+
+  refreshGameAudioToolbarUi = () => {
+    syncUi();
+    syncToolbarBtn();
+  };
+
   syncUi();
+  syncToolbarBtn();
 
   const togglePanel = () => {
     if (!panel) return;
-    const open = !panel.hidden;
-    panel.hidden = open;
-    if (btn) btn.setAttribute("aria-expanded", open ? "false" : "true");
+    const wasHidden = panel.hidden;
+    panel.hidden = !wasHidden;
+    if (btn) btn.setAttribute("aria-expanded", wasHidden ? "true" : "false");
+    if (!panel.hidden) {
+      positionAudioPanel();
+      syncUi();
+    }
   };
 
   if (btn && panel) {
@@ -910,6 +1083,10 @@ export function initGameAudio() {
       togglePanel();
     });
   }
+
+  window.addEventListener("resize", () => {
+    if (panel && !panel.hidden) positionAudioPanel();
+  });
 
   document.addEventListener("click", (e) => {
     if (!panel || panel.hidden) return;
@@ -931,10 +1108,13 @@ export function initGameAudio() {
   bindRange(musicEl, "music");
   bindRange(sfxEl, "effects");
 
+  const applyMuteFromCheckbox = () => {
+    if (!muteEl) return;
+    applyAudioSettings({ muted: muteEl.checked });
+  };
   if (muteEl) {
-    muteEl.addEventListener("change", () => {
-      applyAudioSettings({ muted: muteEl.checked });
-    });
+    muteEl.addEventListener("change", applyMuteFromCheckbox);
+    muteEl.addEventListener("input", applyMuteFromCheckbox);
   }
 
   const resumeOnGesture = () => {

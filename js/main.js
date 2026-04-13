@@ -335,6 +335,7 @@ const tournamentWarmupTitleEl = document.getElementById("tournament-warmup-title
 const tournamentWarmupCountdownEl = document.getElementById("tournament-warmup-countdown");
 const tournamentWarmupBadgeEl = document.getElementById("tournament-warmup-badge");
 const tournamentWarmupBodyEl = document.getElementById("tournament-warmup-body");
+const adminGamePauseOverlayEl = document.getElementById("admin-game-pause-overlay");
 const roundEndedOverlayEl = document.getElementById("round-ended-overlay");
 const roundEndedWinnerEl = document.getElementById("round-ended-winner");
 const roundEndedScoreEl = document.getElementById("round-ended-score");
@@ -781,6 +782,8 @@ let roundIndexMeta = 0;
 let lobbyBeforeGoMeta = false;
 /** С сервера: игра полностью завершена (финал) */
 let gameFinishedMeta = false;
+/** С сервера: полная пауза (бот pause / unpause). */
+let gamePausedMeta = false;
 /** После leaveTeam открыть список команд (кнопка «Вступить», уже не в команде) */
 let pendingLeaveToTeamList = false;
 /** После leaveTeam открыть форму «Новая команда» (кнопка «Создать», пока ещё в команде) */
@@ -1982,14 +1985,23 @@ function tournamentRoundCopy(ri) {
 }
 
 function isClientWarmupPhase() {
-  if (!wantOnline || !getWsUrl() || gameFinishedMeta || spectatorMode) return false;
+  if (!wantOnline || !getWsUrl() || gameFinishedMeta || spectatorMode || gamePausedMeta) return false;
   if (playStartsAtMs == null || Number.isNaN(playStartsAtMs)) return false;
   if (roundIndexMeta === 0 && roundEndsAtMs == null) return false;
   return Date.now() < playStartsAtMs;
 }
 
+function syncAdminGamePauseOverlay() {
+  if (!adminGamePauseOverlayEl) return;
+  adminGamePauseOverlayEl.hidden = !gamePausedMeta;
+}
+
 function syncTournamentWarmupOverlay() {
   if (!tournamentWarmupOverlayEl) return;
+  if (gamePausedMeta) {
+    tournamentWarmupOverlayEl.hidden = true;
+    return;
+  }
   const show =
     wantOnline &&
     getWsUrl() &&
@@ -2126,6 +2138,13 @@ function updateRoundTimer() {
     if (gameFinishedMeta) {
       roundTimerEl.hidden = true;
       roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
+      return;
+    }
+    if (gamePausedMeta) {
+      roundTimerEl.hidden = false;
+      roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
+      roundTimerEl.textContent = "ПАУЗА\nадмин";
+      syncTournamentWarmupOverlay();
       return;
     }
     if (roundEndsAtMs == null && roundIndexMeta === 0) {
@@ -3270,6 +3289,8 @@ function onMeta(msg) {
   teamCounts = msg.teamCounts || {};
   maxPerTeam = msg.maxPerTeam ?? 200;
   gameFinishedMeta = !!msg.gameFinished;
+  gamePausedMeta = !!msg.gamePaused;
+  syncAdminGamePauseOverlay();
   roundEndsAtMs =
     typeof msg.roundEndsAt === "number" && !Number.isNaN(msg.roundEndsAt) ? msg.roundEndsAt : null;
   playStartsAtMs =
@@ -3320,6 +3341,7 @@ function onMeta(msg) {
       rebuildTeamList();
       updateRoundTimer();
       syncTournamentWarmupOverlay();
+      syncAdminGamePauseOverlay();
       syncWelcomeForRound();
 
       if (spectatorMode) {
@@ -3388,6 +3410,7 @@ function notifyReject(reason) {
     spectator: MSG_WATCH_ONLY,
     not_eligible: MSG_WATCH_ONLY,
     need_telegram: "Откройте игру из Telegram Mini App (нужна подпись initData).",
+    paused: "Игра на паузе (администратор). Действия временно отключены.",
     rate_limited: "Слишком много действий подряд. Подождите секунду.",
     same_cell: "Для линии выберите другую клетку — так задаётся направление.",
     not_adjacent:
@@ -3624,6 +3647,7 @@ function notifyPurchaseError(reason) {
     military_too_close_own_main: "Слишком близко к вашей главной базе.",
     military_too_close_enemy_main: "Слишком близко к чужой главной базе.",
     military_invalid: "Нельзя разместить здесь.",
+    paused: "Игра на паузе (администратор). Покупки временно недоступны.",
   };
   const text = m[reason] || String(reason);
   const severe =
@@ -5448,6 +5472,8 @@ function connectWs() {
       pendingLeaveToCreate = false;
       spectatorMode = true;
       gameFinishedMeta = true;
+      gamePausedMeta = false;
+      syncAdminGamePauseOverlay();
       lastMyTeamScoreShare = null;
       const gw = typeof msg.grid?.w === "number" ? msg.grid.w : 64;
       const gh = typeof msg.grid?.h === "number" ? msg.grid.h : 64;
@@ -5542,6 +5568,11 @@ function connectWs() {
       return;
     }
     if (msg.type === "playRejected") {
+      if (msg.reason === "paused") {
+        notifyReject("paused");
+        setFooterMode();
+        return;
+      }
       if (msg.reason === "spectator" || msg.reason === "not_eligible") spectatorMode = true;
       notifyReject(
         msg.reason === "spectator" || msg.reason === "not_eligible"
@@ -5549,6 +5580,14 @@ function connectWs() {
           : msg.reason || ""
       );
       setFooterMode();
+      return;
+    }
+
+    if (msg.type === "gamePauseSync") {
+      gamePausedMeta = !!msg.paused;
+      syncAdminGamePauseOverlay();
+      updateRoundTimer();
+      syncTournamentWarmupOverlay();
       return;
     }
 
@@ -6280,6 +6319,12 @@ function connectWs() {
         return;
       }
       endSessionRestore();
+      if (msg.reason === "paused") {
+        showPlacementFeedback("Игра на паузе (админ). Вступление в команду недоступно.", "warn", {
+          telegramAlert: false,
+        });
+        return;
+      }
       if (msg.reason === "duel") {
         const tg = window.Telegram?.WebApp;
         const text = "В дуэли 1 на 1 нельзя вступать в чужие команды — играйте только за свою команду.";
@@ -6333,6 +6378,11 @@ function connectWs() {
       return;
     }
     if (msg.type === "leaveError") {
+      if (msg.reason === "paused") {
+        showPlacementFeedback("Игра на паузе (админ). Выход из команды недоступен.", "warn", {
+          telegramAlert: false,
+        });
+      }
       const hadPendingIntent = pendingLeaveToTeamList || pendingLeaveToCreate;
       pendingLeaveToTeamList = false;
       pendingLeaveToCreate = false;
