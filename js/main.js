@@ -18,12 +18,14 @@ import {
 import {
   initGameAudio,
   syncReactiveMusic,
+  syncDynamicBgmMusic,
+  computeGameplayMusicIntensity,
+  computeBattleReactive01,
   getCombatBumpUntil,
   bumpCombat,
   playUiError,
   playPurchaseSuccess,
   playPixelPlace,
-  playTerritoryExpand,
   playFlagBaseHit,
   playBombExplosion,
   playQuantumConnect,
@@ -33,6 +35,13 @@ import {
   playAlertLastCells,
   playAlertLastCell,
   playAlertTerritoryCutOff,
+  playSeismicImpactSfx,
+  scheduleSeismicAftermathSfx,
+  playRoundEndSfx,
+  playFinalVictorySfx,
+  playTreasureFoundSfx,
+  playBuffPersonalSfx,
+  playBuffTeamSfx,
 } from "./game-audio.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
@@ -2116,6 +2125,7 @@ function showRoundEndedOverlay(msg) {
       : `Следующий этап уже запущен: раунд ${stageNum} из 4, до ${cap} игроков в команде. Снова 2 мин разминки, затем бой.`;
   }
   roundEndedOverlayEl.hidden = false;
+  playRoundEndSfx();
 }
 
 function escapeHtml(s) {
@@ -2833,6 +2843,7 @@ function showTreasureFoundOverlay(quant) {
   if (q < 1) return;
   treasureFoundAmountEl.textContent = `+${q} ${quantWord(q)}`;
   treasureFoundOverlayEl.hidden = false;
+  playTreasureFoundSfx();
   try {
     window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
   } catch {
@@ -3484,7 +3495,7 @@ function getClientMyMainBaseHpRatio01(nowMs = Date.now()) {
   return computeClientFlagDisplayEffHp(raw, nowMs) / FLAG_BASE_MAX_HP;
 }
 
-function syncReactiveMusicFromMain() {
+function buildClientMusicSnap() {
   let isolationMyTeam = false;
   if (myTeamId != null && territoryIsolationCellMeta.size) {
     for (const m of territoryIsolationCellMeta.values()) {
@@ -3494,7 +3505,8 @@ function syncReactiveMusicFromMain() {
       }
     }
   }
-  syncReactiveMusic({
+  const roundLeftMs = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : null;
+  return {
     now: Date.now(),
     hasTeam: myTeamId != null,
     spectator: !!spectatorMode,
@@ -3507,6 +3519,46 @@ function syncReactiveMusicFromMain() {
     isolationMyTeam,
     combatBumpUntil: getCombatBumpUntil(),
     nukeAfterglowUntil: nukeAftermathUntilMs,
+    roundLeftMs,
+    lastOwnPlaceMs: lastPlaceAt,
+  };
+}
+
+function syncReactiveMusicFromMain() {
+  syncReactiveMusic(buildClientMusicSnap());
+}
+
+function syncDynamicBgmFromMain() {
+  const snap = buildClientMusicSnap();
+  /** @type {"menu" | "preRound" | "gameplay" | "postRound" | "final"} */
+  let uiPhase = "gameplay";
+  let preRoundSecondsLeft;
+
+  if (gameFinishedMeta) {
+    uiPhase = "final";
+  } else if (roundEndedOverlayEl && !roundEndedOverlayEl.hidden) {
+    uiPhase = "postRound";
+  } else if (welcomeOverlay && !welcomeOverlay.hidden) {
+    uiPhase = "menu";
+  } else if (wantOnline && getWsUrl() && myTeamId == null && !spectatorMode) {
+    uiPhase = "menu";
+  } else if (tournamentWarmupOverlayEl && !tournamentWarmupOverlayEl.hidden) {
+    uiPhase = "preRound";
+    if (playStartsAtMs != null) {
+      preRoundSecondsLeft = Math.max(0, (playStartsAtMs - Date.now()) / 1000);
+    }
+  }
+
+  const intensity = uiPhase === "gameplay" ? computeGameplayMusicIntensity(snap) : 0;
+  const react = computeBattleReactive01(snap);
+
+  syncDynamicBgmMusic({
+    uiPhase,
+    gameplayIntensity: intensity,
+    preRoundSecondsLeft,
+    gamePaused: !!gamePausedMeta,
+    battlePulse01: react.battlePulse01,
+    sustainDread01: react.sustainDread01,
   });
 }
 
@@ -4200,6 +4252,7 @@ function updateToolbarHud() {
   updateQuickBuyBuffRings();
   syncToolbarHeightCssVar();
   syncEventBanner();
+  syncDynamicBgmFromMain();
   syncReactiveMusicFromMain();
   refreshPassiveIncomeDisplays();
 }
@@ -4452,6 +4505,7 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
+    playBuffPersonalSfx();
     return;
   }
   if (kind === "zoneCapture" && hasGrid) {
@@ -4469,7 +4523,6 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
-    playTerritoryExpand();
     return;
   }
   if (kind === "massCapture" && hasGrid) {
@@ -4487,7 +4540,6 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
-    playTerritoryExpand();
     return;
   }
   if (kind === "zone12Capture" && hasGrid) {
@@ -4505,7 +4557,6 @@ function applyGlobalPurchaseVfx(msg) {
       flushBoardVfxFrame();
       requestAnimationFrame(() => flushBoardVfxFrame());
     }
-    playTerritoryExpand();
     return;
   }
   if (kind === "militaryBase" && hasGrid) {
@@ -4522,7 +4573,6 @@ function applyGlobalPurchaseVfx(msg) {
         flushBoardVfxFrame();
       });
     }
-    playTerritoryExpand();
     scheduleDraw({
       dirty: { gx0: gxi, gy0: gyi, gx1: gxi + FLAG_SPAWN_SIZE - 1, gy1: gyi + FLAG_SPAWN_SIZE - 1 },
     });
@@ -4534,6 +4584,7 @@ function applyGlobalPurchaseVfx(msg) {
     boardVfx?.lightningBurst(getVfxTransform());
     flushBoardVfxFrame();
     requestAnimationFrame(() => flushBoardVfxFrame());
+    playBuffTeamSfx();
   }
 }
 
@@ -5584,6 +5635,7 @@ function connectWs() {
       spectatorMode = true;
       gameFinishedMeta = true;
       gamePausedMeta = false;
+      playFinalVictorySfx();
       syncAdminGamePauseOverlay();
       lastMyTeamScoreShare = null;
       const gw = typeof msg.grid?.w === "number" ? msg.grid.w : 64;
@@ -5842,6 +5894,8 @@ function connectWs() {
         flushBoardVfxFrame();
       }
       runBoardSeismicHitShake();
+      playSeismicImpactSfx();
+      scheduleSeismicAftermathSfx();
       applySeismicTremorBodyOverride();
       syncEventBanner();
       scheduleDraw({ full: true });

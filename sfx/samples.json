@@ -1,0 +1,25 @@
+{
+  "files": {
+    "bomb": "sfx/bomb.mp3",
+    "base_hit": "sfx/base-hit.mp3",
+    "base_capture": "sfx/base-capture.mp3",
+    "territory_4": "sfx/territory-4.mp3",
+    "territory_6": "sfx/territory-6.mp3",
+    "territory_12": "sfx/territory-12.mp3",
+    "military_base": "sfx/military-base.mp3",
+    "buff_personal": "sfx/buff-personal.mp3",
+    "buff_team": "sfx/buff-team.mp3",
+    "seismic_warning": "sfx/seismic-warning.mp3",
+    "seismic_hit": "sfx/seismic-hit.mp3",
+    "seismic_after": "sfx/seismic-after.mp3",
+    "quantum_connect": "sfx/quantum-connect.mp3",
+    "quantum_disconnect": "sfx/quantum-disconnect.mp3",
+    "quantum_tick": "sfx/quantum-tick.mp3",
+    "treasure": "sfx/treasure.mp3",
+    "round_end": "sfx/round-end.mp3",
+    "final_victory": "sfx/final-victory.mp3",
+    "alert_base_attack": "sfx/alert-base-attack.mp3",
+    "alert_last_cells": "sfx/alert-last-cells.mp3",
+    "alert_territory_cut": "sfx/alert-territory-cut.mp3"
+  }
+}

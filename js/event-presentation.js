@@ -510,11 +510,19 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size) {
     subtitle = `«${name}» — стратегический плацдарм 6×6. Новый фронт на карте.`;
     holdMs = 2800;
   }
+  const sound =
+    kind === "zoneCapture"
+      ? "territory_4"
+      : kind === "massCapture"
+        ? "territory_6"
+        : kind === "zone12Capture"
+          ? "territory_12"
+          : "military_base";
   enqueueBattleCinematic({
     title,
     subtitle,
     theme: "gold",
-    sound: "gold",
+    sound,
     holdMs,
   });
 }

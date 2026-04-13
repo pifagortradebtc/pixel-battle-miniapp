@@ -2,7 +2,10 @@
  * Аудио как у серьёзной военно-стратегической симуляции: суббас, сдержанные удары, тишина между событиями.
  * Без «игровых» писков, мелодичных стингов и яркого верха. Музыка CALM → TENSION → BATTLE → CRITICAL
  * с плавным кроссфейдом. Web Audio API (процедурно).
+ * Опционально: стриминговые треки из music/manifest.json (см. streaming-bgm.js).
  */
+
+import { streamingBgm } from "./streaming-bgm.js";
 
 const STORAGE_KEY = "pixelBattleAudioSettings";
 
@@ -70,6 +73,11 @@ let lastBaseHitWallMs = 0;
 let lastEpicStingWallMs = 0;
 let lowPrioritySfxCount = 0;
 
+/** Сэмплы событий из sfx/samples.json (при отсутствии файла — процедурный fallback). */
+/** @type {Map<string, AudioBuffer>} */
+const eventSfxBuffers = new Map();
+let eventSfxPreloadStarted = false;
+
 const MUSIC_STATE = /** @type {const} */ ({
   CALM: 0,
   TENSION: 1,
@@ -78,6 +86,9 @@ const MUSIC_STATE = /** @type {const} */ ({
 });
 
 let currentMusicState = MUSIC_STATE.CALM;
+
+/** Процедурные слои приглушены из‑за активного streaming-bgm; при снятии — восстановить. */
+let streamingHadProceduralSilenced = false;
 
 function loadSettings() {
   try {
@@ -112,6 +123,7 @@ function applyBusGains() {
     masterGain.gain.setValueAtTime(m, t);
     musicBus.gain.cancelScheduledValues(t);
     musicBus.gain.setValueAtTime(mv, t);
+    streamingBgm.setOutputLevel(settings.muted, settings.muted ? 0 : settings.master * settings.music);
     sfxBus.gain.cancelScheduledValues(t);
     sfxBus.gain.setValueAtTime(ev * 0.9, t);
     uiBus.gain.cancelScheduledValues(t);
@@ -189,8 +201,12 @@ function buildGraph() {
   musicFilter.Q.value = 0.65;
   musicFilter.connect(musicBus);
 
-  musicLayerGains = [];
-  musicOscs = [];
+    musicLayerGains = [];
+    musicOscs = [];
+
+    streamingBgm.attach(ctx, musicDuck);
+    void streamingBgm.loadManifestAndBuffers();
+    void preloadEventSfxBuffers();
 }
 
 function ensureMusicOscs() {
@@ -243,6 +259,7 @@ function scheduleBattlePulseLoop() {
   battlePulseTimer = window.setInterval(() => {
     try {
       if (!ctx || settings.muted || !musicBus) return;
+      if (streamingBgm.shouldSuppressProcedural()) return;
       const st = currentMusicState;
       if (st < MUSIC_STATE.TENSION) return;
       const wall = performance.now();
@@ -425,6 +442,18 @@ function playThreatEscalationMarker(fromState, toState) {
  * @param {boolean} instant
  * @param {boolean} [escalating] true — быстрый нарост угрозы; false — медленное «выдыхание».
  */
+function silenceMusicLayers(instant) {
+  if (!ctx || musicLayerGains.length < 4) return;
+  const now = ctx.currentTime;
+  const dur = instant ? 0.05 : 0.55;
+  for (let i = 0; i < musicLayerGains.length; i++) {
+    const g = musicLayerGains[i];
+    g.gain.cancelScheduledValues(now);
+    if (instant) g.gain.setValueAtTime(0.0001, now);
+    else g.gain.linearRampToValueAtTime(0.0001, now + dur);
+  }
+}
+
 function applyMusicLayerTargets(instant, escalating = false) {
   if (!ctx || musicLayerGains.length < 4) return;
   const now = ctx.currentTime;
@@ -477,6 +506,32 @@ export function setMusicState(state) {
   }
 }
 
+function syncProceduralStreamingOverlay() {
+  const sup = streamingBgm.shouldSuppressProcedural();
+  if (sup) {
+    silenceMusicLayers(true);
+    streamingHadProceduralSilenced = true;
+  } else if (streamingHadProceduralSilenced) {
+    streamingHadProceduralSilenced = false;
+    applyMusicLayerTargets(true, false);
+  }
+}
+
+/** Процедурная музыка: лёгкое «открытие» по импульсу боя, пока не играет стрим. */
+function applyProceduralBattleBrightness(snap) {
+  if (!ctx || !musicFilter || streamingBgm.shouldSuppressProcedural()) return;
+  if (!snap.hasTeam || snap.spectator) return;
+  const { battlePulse01, sustainDread01 } = computeBattleReactive01(snap);
+  const s = currentMusicState;
+  const baseFq =
+    s === MUSIC_STATE.CALM ? 560 : s === MUSIC_STATE.TENSION ? 720 : s === MUSIC_STATE.BATTLE ? 980 : 1320;
+  const target = Math.min(2280, baseFq * (1 + battlePulse01 * 0.95 + sustainDread01 * 0.5));
+  const now = ctx.currentTime;
+  musicFilter.frequency.cancelScheduledValues(now);
+  musicFilter.frequency.setValueAtTime(musicFilter.frequency.value, now);
+  musicFilter.frequency.exponentialRampToValueAtTime(Math.max(240, target), now + 0.12);
+}
+
 /**
  * @param {number} ms
  * @param {boolean} [deep] сильнее прижать музыку под голос «штаба» / критический алерт
@@ -491,6 +546,94 @@ function duckMusicForAlert(ms, deep = false) {
   musicDuck.gain.setValueAtTime(musicDuck.gain.value, now);
   musicDuck.gain.linearRampToValueAtTime(floor, now + dur);
   musicDuck.gain.linearRampToValueAtTime(1, end);
+}
+
+function resolveSfxAssetUrl(relPath) {
+  try {
+    return new URL(relPath, window.location.href).href;
+  } catch {
+    return relPath;
+  }
+}
+
+async function preloadEventSfxBuffers() {
+  if (!ctx || eventSfxPreloadStarted) return;
+  eventSfxPreloadStarted = true;
+  try {
+    const res = await fetch(resolveSfxAssetUrl("sfx/samples.json"), { cache: "no-store" });
+    if (!res.ok) return;
+    const j = await res.json();
+    const files = j.files && typeof j.files === "object" ? j.files : {};
+    for (const [key, rel] of Object.entries(files)) {
+      if (eventSfxBuffers.has(key)) continue;
+      try {
+        const r = await fetch(resolveSfxAssetUrl(String(rel)));
+        if (!r.ok) continue;
+        const ab = await r.arrayBuffer();
+        const buf = await ctx.decodeAudioData(ab.slice(0));
+        eventSfxBuffers.set(key, buf);
+      } catch {
+        /* файл отсутствует или битый */
+      }
+    }
+  } catch {
+    /* нет манифеста */
+  }
+}
+
+/**
+ * @param {string} key ключ из samples.json
+ * @param {{ bus?: "sfx" | "alert" | "ui"; duckMs?: number; deepDuck?: boolean; gainMul?: number }} [opt]
+ * @returns {boolean}
+ */
+function playEventSample(key, opt = {}) {
+  if (!ctx || settings.muted) return false;
+  const buf = eventSfxBuffers.get(key);
+  if (!buf) return false;
+  const busName = opt.bus || "sfx";
+  const bus = busName === "alert" ? alertBus : busName === "ui" ? uiBus : sfxBus;
+  if (!bus) return false;
+  const dm = opt.duckMs ?? 0;
+  if (dm > 0) duckMusicForAlert(dm, !!opt.deepDuck);
+  const now = ctx.currentTime;
+  const ev = settings.master * settings.effects;
+  const mul = opt.gainMul ?? 1;
+  let peak = ev * mul;
+  if (busName === "sfx") peak *= 0.9;
+  else if (busName === "ui") peak *= 0.4;
+  else peak *= 1.05;
+  peak = Math.min(0.96, peak);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.linearRampToValueAtTime(peak, now + 0.028);
+  src.connect(g);
+  g.connect(bus);
+  src.start(now);
+  return true;
+}
+
+/**
+ * @param {string} kind аргумент playPresentationSting / spec.sound
+ * @returns {string | null}
+ */
+function presentationStingKindToSampleKey(kind) {
+  const k = String(kind || "");
+  /** @type {Record<string, string>} */
+  const m = {
+    "nuke-bomb": "bomb",
+    base_captured: "base_capture",
+    "seismic-incoming": "seismic_warning",
+    seismic: "seismic_hit",
+    gold: "treasure",
+    center: "treasure",
+    territory_4: "territory_4",
+    territory_6: "territory_6",
+    territory_12: "territory_12",
+    military_base: "military_base",
+  };
+  return m[k] || null;
 }
 
 /** Краткий «шум рации» — низкий тактический канал (штаб), без «песка» в верхах. */
@@ -632,6 +775,30 @@ export function playPresentationSting(kind) {
     if (!ctx || !sfxBus || settings.muted) return;
     startMusicEngine();
     const k = String(kind || "default");
+    const sampleKey = presentationStingKindToSampleKey(k);
+    if (sampleKey) {
+      const epic = k === "nuke-bomb" || k === "base_captured" || k === "final-ten";
+      let duckMs = 0;
+      let deepDuck = false;
+      if (k === "nuke-bomb") {
+        duckMs = 880;
+        deepDuck = true;
+      } else if (k === "base_captured") {
+        duckMs = 720;
+        deepDuck = true;
+      } else if (k === "seismic-incoming") {
+        duckMs = 560;
+        deepDuck = true;
+      } else if (k === "seismic") {
+        duckMs = 640;
+        deepDuck = true;
+      }
+      if (playEventSample(sampleKey, { bus: "sfx", duckMs, deepDuck, gainMul: 1 })) {
+        if (epic) lastEpicStingWallMs = performance.now();
+        return;
+      }
+    }
+
     const epic = k === "nuke-bomb" || k === "base_captured" || k === "final-ten";
     if (epic) lastEpicStingWallMs = performance.now();
 
@@ -791,6 +958,20 @@ export function playPurchaseSuccess() {
   });
 }
 
+export function playBuffPersonalSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || !sfxBus || settings.muted) return;
+    playEventSample("buff_personal", { bus: "sfx", gainMul: 0.95 });
+  });
+}
+
+export function playBuffTeamSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || !sfxBus || settings.muted) return;
+    playEventSample("buff_team", { bus: "sfx", gainMul: 0.95 });
+  });
+}
+
 export function playPixelPlace() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
@@ -801,9 +982,26 @@ export function playPixelPlace() {
   });
 }
 
-export function playTerritoryExpand() {
+/**
+ * @param {4 | 6 | 12 | void} [zoneSide] сторона зоны захвата; без аргумента — только процедурный звук.
+ */
+export function playTerritoryExpand(zoneSide) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
+    if (zoneSide === 4 || zoneSide === 6 || zoneSide === 12) {
+      const key = zoneSide === 12 ? "territory_12" : zoneSide === 6 ? "territory_6" : "territory_4";
+      if (playEventSample(key, { bus: "sfx", gainMul: 1 })) return;
+    }
+    const now = ctx.currentTime;
+    playOscThrough("sine", 55, 95, 0.048, 0.28, sfxBus, now);
+    playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022, 380);
+  });
+}
+
+export function playMilitaryBaseDeploySound() {
+  resumeAudioContext().then(() => {
+    if (!ctx || !sfxBus || settings.muted) return;
+    if (playEventSample("military_base", { bus: "sfx", gainMul: 1 })) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 55, 95, 0.048, 0.28, sfxBus, now);
     playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022, 380);
@@ -818,6 +1016,7 @@ export function playFlagBaseHit() {
     lastBaseHitWallMs = nowW;
     const now = ctx.currentTime;
     duckMusicForAlert(260, false);
+    if (playEventSample("base_hit", { bus: "sfx", gainMul: 1.02 })) return;
     playSubThump(sfxBus, now, 0.26, 68, 42, 0.26);
     playFilteredNoiseBurst(sfxBus, now + 0.01, 0.07, 0.065, 1100);
     playOscThrough("triangle", 78, 48, 0.028, 0.15, sfxBus, now + 0.018, 420);
@@ -831,6 +1030,10 @@ export function playBombExplosion() {
     if (nowW - lastExplosionWallMs < 380) return;
     lastExplosionWallMs = nowW;
     duckMusicForAlert(520, true);
+    if (playEventSample("bomb", { bus: "sfx", gainMul: 1.05 })) {
+      lastEpicStingWallMs = performance.now();
+      return;
+    }
     playPresentationSting("nuke-bomb");
   });
 }
@@ -838,6 +1041,7 @@ export function playBombExplosion() {
 export function playQuantumConnect() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
+    if (playEventSample("quantum_connect", { bus: "sfx", gainMul: 0.98 })) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 48, 118, 0.075, 0.38, sfxBus, now);
     playOscThrough("triangle", 55, 92, 0.032, 0.32, sfxBus, now + 0.06, 340);
@@ -848,6 +1052,7 @@ export function playQuantumConnect() {
 export function playQuantumDisconnect() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
+    if (playEventSample("quantum_disconnect", { bus: "sfx", gainMul: 0.98 })) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 125, 38, 0.08, 0.35, sfxBus, now);
     playOscThrough("triangle", 78, 38, 0.03, 0.28, sfxBus, now + 0.04, 300);
@@ -859,6 +1064,7 @@ export function playQuantumIncomeTick() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
     registerLowPrioritySfx();
+    if (playEventSample("quantum_tick", { bus: "sfx", gainMul: 0.72 })) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 88, 102, 0.022, 0.055, sfxBus, now);
   });
@@ -869,6 +1075,7 @@ export function playAlertBaseUnderAttack() {
     if (!ctx || !alertBus || settings.muted) return;
     lastAlertWallMs = performance.now();
     duckMusicForAlert(720, true);
+    if (playEventSample("alert_base_attack", { bus: "alert", gainMul: 0.92 })) return;
     const now = ctx.currentTime;
     playTacticalRadioCrackle(alertBus, now, 0.018);
     for (let i = 0; i < 3; i++) {
@@ -884,6 +1091,7 @@ export function playAlertLastCells() {
     if (!ctx || !alertBus || settings.muted) return;
     lastAlertWallMs = performance.now();
     duckMusicForAlert(560, true);
+    if (playEventSample("alert_last_cells", { bus: "alert", gainMul: 0.9 })) return;
     const now = ctx.currentTime;
     playOscThrough("sine", 122, 122, 0.068, 0.072, alertBus, now);
     playOscThrough("sine", 98, 98, 0.06, 0.068, alertBus, now + 0.095);
@@ -897,6 +1105,7 @@ export function playAlertLastCell() {
     if (!ctx || !alertBus || settings.muted) return;
     lastAlertWallMs = performance.now();
     duckMusicForAlert(920, true);
+    if (playEventSample("alert_last_cells", { bus: "alert", gainMul: 0.95 })) return;
     const now = ctx.currentTime;
     playTacticalRadioCrackle(alertBus, now, 0.014);
     const steps = [132, 118, 102, 88];
@@ -913,11 +1122,59 @@ export function playAlertTerritoryCutOff() {
     if (!ctx || !alertBus || settings.muted) return;
     lastAlertWallMs = performance.now();
     duckMusicForAlert(520, true);
+    if (playEventSample("alert_territory_cut", { bus: "alert", gainMul: 0.92 })) return;
     const now = ctx.currentTime;
     playFilteredNoiseBurst(alertBus, now, 0.22, 0.07, 420);
     playOscThrough("sine", 95, 38, 0.09, 0.26, alertBus, now + 0.04);
     playOscThrough("triangle", 92, 48, 0.04, 0.16, alertBus, now + 0.1, 360);
     playSubThump(alertBus, now + 0.14, 0.18, 62, 38, 0.16);
+  });
+}
+
+/** @type {ReturnType<typeof setTimeout> | null} */
+let seismicAfterSfxTimer = null;
+
+export function playSeismicImpactSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || settings.muted) return;
+    duckMusicForAlert(600, true);
+    if (playEventSample("seismic_hit", { bus: "sfx", gainMul: 1.02 })) return;
+    playPresentationSting("seismic");
+  });
+}
+
+export function scheduleSeismicAftermathSfx() {
+  if (typeof window === "undefined") return;
+  if (seismicAfterSfxTimer != null) clearTimeout(seismicAfterSfxTimer);
+  seismicAfterSfxTimer = window.setTimeout(() => {
+    seismicAfterSfxTimer = null;
+    resumeAudioContext().then(() => {
+      if (!ctx || settings.muted) return;
+      playEventSample("seismic_after", { bus: "sfx", gainMul: 0.78 });
+    });
+  }, 1100);
+}
+
+export function playRoundEndSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || settings.muted) return;
+    duckMusicForAlert(900, true);
+    playEventSample("round_end", { bus: "sfx", gainMul: 1 });
+  });
+}
+
+export function playFinalVictorySfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || settings.muted) return;
+    duckMusicForAlert(1400, true);
+    playEventSample("final_victory", { bus: "sfx", gainMul: 1.02 });
+  });
+}
+
+export function playTreasureFoundSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || settings.muted) return;
+    playEventSample("treasure", { bus: "sfx", gainMul: 0.95 });
   });
 }
 
@@ -936,43 +1193,151 @@ export function playAlertTerritoryCutOff() {
  *   isolationMyTeam: boolean;
  *   combatBumpUntil: number;
  *   nukeAfterglowUntil: number;
+ *   roundLeftMs?: number | null;
  * }} snap
  */
+export function computeGameplayMusicIntensity(snap) {
+  if (!snap.hasTeam || snap.spectator) return MUSIC_STATE.CALM;
+  const t = snap.now;
+  let next = MUSIC_STATE.CALM;
+
+  const lastCell = t < snap.lastCellUntil;
+  const hpCrit = snap.mainBaseHpRatio < 0.15 && snap.mainBaseHpRatio >= 0;
+  const basePanic = t < snap.flagCriticalUntil || lastCell || hpCrit;
+  const underAttack = t < snap.flagUnderAttackUntil;
+
+  if (basePanic || (underAttack && snap.mainBaseHpRatio < 0.35)) {
+    next = MUSIC_STATE.CRITICAL;
+  } else if (t < snap.territoryDangerUntil && snap.territoryCellsRemaining <= 8) {
+    next = MUSIC_STATE.BATTLE;
+  } else if (t < snap.combatBumpUntil || t < snap.nukeAfterglowUntil) {
+    next = MUSIC_STATE.BATTLE;
+  } else if (
+    underAttack ||
+    snap.isolationMyTeam ||
+    (t < snap.territoryDangerUntil && snap.territoryCellsRemaining <= 22)
+  ) {
+    next = MUSIC_STATE.TENSION;
+  }
+
+  const rlm = snap.roundLeftMs;
+  if (rlm != null && Number.isFinite(rlm) && rlm > 0) {
+    if (rlm <= 60_000) next = Math.max(next, MUSIC_STATE.CRITICAL);
+    else if (rlm <= 120_000) next = Math.max(next, MUSIC_STATE.BATTLE);
+    else if (rlm <= 180_000) next = Math.max(next, MUSIC_STATE.TENSION);
+  }
+
+  return next;
+}
+
+/**
+ * Импульс боя (быстро гаснет) и фоновое давление (медленнее) — для реактивного микса стрима и процедуры.
+ * @param {{
+ *   now: number;
+ *   hasTeam: boolean;
+ *   spectator: boolean;
+ *   lastCellUntil: number;
+ *   territoryDangerUntil: number;
+ *   territoryCellsRemaining: number;
+ *   flagCriticalUntil: number;
+ *   flagUnderAttackUntil: number;
+ *   mainBaseHpRatio: number;
+ *   isolationMyTeam: boolean;
+ *   combatBumpUntil: number;
+ *   nukeAfterglowUntil: number;
+ *   roundLeftMs?: number | null;
+ *   lastOwnPlaceMs?: number;
+ * }} snap
+ */
+export function computeBattleReactive01(snap) {
+  if (!snap.hasTeam || snap.spectator) return { battlePulse01: 0, sustainDread01: 0 };
+  const t = snap.now;
+  let pulse = 0;
+  if (t < snap.combatBumpUntil) {
+    pulse = Math.max(pulse, Math.min(1, (snap.combatBumpUntil - t) / 2400));
+  }
+  if (t < snap.nukeAfterglowUntil) {
+    pulse = Math.max(pulse, Math.min(1, (snap.nukeAfterglowUntil - t) / 4500));
+  }
+  if (t < snap.flagCriticalUntil) pulse = Math.max(pulse, 0.74);
+  if (t < snap.lastCellUntil) pulse = Math.max(pulse, 0.9);
+  if (t < snap.flagUnderAttackUntil) pulse = Math.max(pulse, 0.44);
+
+  const lastPl = snap.lastOwnPlaceMs;
+  if (typeof lastPl === "number" && lastPl > 0 && t >= lastPl) {
+    pulse = Math.max(pulse, Math.min(1, (1 - (t - lastPl) / 720) * 0.64));
+  }
+
+  let sustain = 0;
+  if (t < snap.flagUnderAttackUntil) sustain += 0.44;
+  const hp = snap.mainBaseHpRatio;
+  if (hp < 0.52 && hp >= 0) sustain += ((0.52 - hp) / 0.52) * 0.58;
+  if (snap.isolationMyTeam) sustain += 0.34;
+  if (t < snap.territoryDangerUntil) {
+    const c = Math.min(48, Math.max(0, snap.territoryCellsRemaining));
+    sustain += Math.min(0.48, ((28 - Math.min(28, c)) / 28) * 0.48);
+  }
+  const rlm = snap.roundLeftMs;
+  if (rlm != null && Number.isFinite(rlm) && rlm > 0 && rlm < 240_000) {
+    sustain += (1 - rlm / 240_000) * 0.4;
+  }
+
+  return { battlePulse01: Math.min(1, pulse), sustainDread01: Math.min(1, sustain) };
+}
+
+/**
+ * @param {{
+ *   uiPhase: "menu" | "preRound" | "gameplay" | "postRound" | "final";
+ *   gameplayIntensity?: number;
+ *   preRoundSecondsLeft?: number;
+ *   gamePaused?: boolean;
+ *   battlePulse01?: number;
+ *   sustainDread01?: number;
+ * }} payload
+ */
+export function syncDynamicBgmMusic(payload) {
+  resumeAudioContext().then(() => {
+    if (!ctx) return;
+    const mm = settings.muted ? 0 : settings.master * settings.music;
+    streamingBgm.setOutputLevel(settings.muted, mm);
+    streamingBgm.setGameplayPaused(!!payload.gamePaused);
+    const flatReactive = {
+      uiPhase: payload.uiPhase,
+      gameplayIntensity: 0,
+      battlePulse01: 0,
+      sustainDread01: 0,
+      preRoundSecondsLeft: payload.preRoundSecondsLeft,
+    };
+    if (settings.muted) {
+      streamingBgm.applyReactiveBattleMix(flatReactive);
+      return;
+    }
+    streamingBgm.syncFromMain({
+      uiPhase: payload.uiPhase,
+      gameplayIntensity: payload.gameplayIntensity ?? 0,
+      preRoundSecondsLeft: payload.preRoundSecondsLeft,
+    });
+    streamingBgm.applyReactiveBattleMix({
+      uiPhase: payload.uiPhase,
+      gameplayIntensity: payload.gameplayIntensity ?? 0,
+      battlePulse01: payload.battlePulse01 ?? 0,
+      sustainDread01: payload.sustainDread01 ?? 0,
+      preRoundSecondsLeft: payload.preRoundSecondsLeft,
+    });
+  });
+}
+
 export function syncReactiveMusic(snap) {
   resumeAudioContext().then(() => {
     if (!ctx || settings.muted) return;
     startMusicEngine();
-    const t = snap.now;
     if (!snap.hasTeam || snap.spectator) {
       setMusicState(MUSIC_STATE.CALM);
-      return;
-    }
-
-    let next = MUSIC_STATE.CALM;
-
-    const lastCell = t < snap.lastCellUntil;
-    const hpCrit = snap.mainBaseHpRatio < 0.15 && snap.mainBaseHpRatio >= 0;
-    const basePanic = t < snap.flagCriticalUntil || lastCell || hpCrit;
-    const underAttack = t < snap.flagUnderAttackUntil;
-
-    if (basePanic || (underAttack && snap.mainBaseHpRatio < 0.35)) {
-      next = MUSIC_STATE.CRITICAL;
-    } else if (t < snap.territoryDangerUntil && snap.territoryCellsRemaining <= 8) {
-      /* Раньше поднимаем BATTLE: игрок слышит, что территория критична, ещё до алерта «6 клеток». */
-      next = MUSIC_STATE.BATTLE;
-    } else if (t < snap.combatBumpUntil || t < snap.nukeAfterglowUntil) {
-      next = MUSIC_STATE.BATTLE;
-    } else if (
-      underAttack ||
-      snap.isolationMyTeam ||
-      (t < snap.territoryDangerUntil && snap.territoryCellsRemaining <= 22)
-    ) {
-      next = MUSIC_STATE.TENSION;
     } else {
-      next = MUSIC_STATE.CALM;
+      setMusicState(computeGameplayMusicIntensity(snap));
     }
-
-    setMusicState(next);
+    syncProceduralStreamingOverlay();
+    applyProceduralBattleBrightness(snap);
   });
 }
 

@@ -1,0 +1,20 @@
+{
+  "_comment": "Положите .mp3/.ogg в папку music/ и укажите url вида \"music/имя.mp3\". Опционально loopStart/loopEnd в секундах для лупа.",
+  "version": 1,
+  "crossfadeSec": 2.4,
+  "gameplayTransitionCooldownMs": 14000,
+  "preRoundCountdownBoostSec": 12,
+  "preRoundCountdownGainMul": 1.12,
+  "pauseMusicGainMul": 0.48,
+  "pauseLowpassHz": 900,
+  "tracks": {
+    "menu": [],
+    "preRound": [],
+    "calm": [],
+    "tension": [],
+    "battle": [],
+    "critical": [],
+    "postRound": [],
+    "final": []
+  }
+}
