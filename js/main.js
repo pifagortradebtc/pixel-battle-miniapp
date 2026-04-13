@@ -853,10 +853,29 @@ function clientPixelTeamIdAt(x, y) {
   return Number(id) | 0;
 }
 
-/** 8-соседство: есть ли рядом пиксель той же команды (как на сервере). */
+/** Прямоугольник базы команды из meta (как на сервере spawn 6×6). */
+function clientTeamSpawnRect(teamId) {
+  if (teamId == null || !teamsMeta) return null;
+  const t = teamsMeta.find((x) => (x.id | 0) === (teamId | 0));
+  const s = t?.spawn;
+  if (!s || typeof s.x0 !== "number" || typeof s.y0 !== "number") return null;
+  const w = typeof s.w === "number" ? s.w : 6;
+  const h = typeof s.h === "number" ? s.h : 6;
+  return { x0: s.x0, y0: s.y0, w, h };
+}
+
+function clientCellInsideSpawnRect(x, y, sp) {
+  return x >= sp.x0 && x < sp.x0 + sp.w && y >= sp.y0 && y < sp.y0 + sp.h;
+}
+
+/**
+ * 8-соседство со своей закрашенной клеткой ИЛИ с клеткой внутри прямоугольника базы (даже без пикселя в карте).
+ * Совпадает с cellTouchesTeamTerritory на сервере — иначе после смены раунда «база есть в UI, а поставить нельзя».
+ */
 function cellTouchesTeamTerritoryClient(x, y, teamId) {
   if (teamId == null) return false;
   const tid = teamId | 0;
+  const sp = clientTeamSpawnRect(tid);
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0) continue;
@@ -865,6 +884,7 @@ function cellTouchesTeamTerritoryClient(x, y, teamId) {
       if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
       const o = clientPixelTeamIdAt(nx, ny);
       if (o != null && o === tid) return true;
+      if (sp && clientCellInsideSpawnRect(nx, ny, sp)) return true;
     }
   }
   return false;
@@ -5464,7 +5484,9 @@ function connectWs() {
         if (!Array.isArray(p) || p.length < 3) continue;
         const x = p[0] | 0;
         const y = p[1] | 0;
-        if (wantOnline && isClientWaterCell(x, y)) continue;
+        /* Не фильтруем по isClientWaterCell: плакат/regions для 320/160/64 может расходиться с playableGrid
+         * сервера — иначе база 6×6 не попадает в pixels, клиент думает «нет соседей» (not_adjacent). */
+        if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
         if (msg.pixelFormat === "v2" && p.length >= 5) {
           const [, , t, , sh] = p;
           pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: sh || 0 });
@@ -5485,7 +5507,7 @@ function connectWs() {
       const x = msg.x | 0;
       const y = msg.y | 0;
       const pk = `${x},${y}`;
-      if (wantOnline && isClientWaterCell(x, y)) {
+      if (x < 0 || x >= gridW || y < 0 || y >= gridH) {
         pixels.delete(pk);
         if (optimisticPixelPending?.key === pk) optimisticPixelPending = null;
         scheduleDraw({ dirty: { gx0: x, gy0: y, gx1: x, gy1: y } });

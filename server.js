@@ -265,6 +265,15 @@ const COOLDOWN_MS = 0;
 const ROUND_MS = 100 * 60 * 60 * 1000;
 /** Длина фазы боя текущего раунда в мс (после разминки). */
 let roundDurationMs = ROUND_MS;
+/** Админ-команда бота «test»: все раунды — короткий бой для проверки цепочки турнира. */
+const QUICK_TEST_ROUND_BATTLE_MS = 30 * 1000;
+const QUICK_TEST_WARMUP_MS = 5 * 1000;
+let tournamentQuickTestMode = false;
+
+function effectiveBattleDurationForRound(ri) {
+  if (tournamentQuickTestMode) return QUICK_TEST_ROUND_BATTLE_MS;
+  return battleDurationForRound(ri);
+}
 const MAX_PER_TEAM_FIRST = 200;
 const MAX_PER_TEAM_NEXT = 10;
 /** Финальный раунд (команды по 2 человека) */
@@ -1198,6 +1207,7 @@ function saveRoundState() {
         roundStartMs,
         playStartMs,
         roundDurationMs,
+        tournamentQuickTestMode,
         tournamentTimeScale: 1,
         mstimAltSeasonBurstUntilMs: Math.max(0, mstimAltSeasonBurstUntilMs | 0),
         round0WarmupMs,
@@ -1231,10 +1241,11 @@ function loadRoundState() {
       } else {
         playStartMs = roundStartMs;
       }
+      if (typeof j.tournamentQuickTestMode === "boolean") tournamentQuickTestMode = j.tournamentQuickTestMode;
       if (typeof j.roundDurationMs === "number" && j.roundDurationMs >= 1000 && j.roundDurationMs <= 8760 * 3600000) {
         roundDurationMs = j.roundDurationMs;
       } else {
-        roundDurationMs = battleDurationForRound(roundIndex);
+        roundDurationMs = effectiveBattleDurationForRound(roundIndex);
       }
       if (typeof j.mstimAltSeasonBurstUntilMs === "number" && Number.isFinite(j.mstimAltSeasonBurstUntilMs)) {
         const u = j.mstimAltSeasonBurstUntilMs | 0;
@@ -1247,6 +1258,10 @@ function loadRoundState() {
         round0WarmupMs = w >= 5000 && w <= 600000 ? w : WARMUP_MS;
       } else {
         round0WarmupMs = WARMUP_MS;
+      }
+      if (tournamentQuickTestMode) {
+        roundDurationMs = QUICK_TEST_ROUND_BATTLE_MS;
+        if (roundIndex === 0) round0WarmupMs = QUICK_TEST_WARMUP_MS;
       }
       if (typeof j.roundTimerStarted === "boolean") {
         roundTimerStarted = j.roundTimerStarted;
@@ -1310,7 +1325,7 @@ function loadRoundState() {
       roundStartMs = Date.now();
       mstimAltSeasonBurstUntilMs = 0;
       playStartMs = roundStartMs;
-      roundDurationMs = battleDurationForRound(0);
+      roundDurationMs = effectiveBattleDurationForRound(0);
       eligibleTokenSet = new Set();
       gameFinished = false;
       winnerTokensByPlayerKey = {};
@@ -1327,7 +1342,7 @@ function loadRoundState() {
     roundStartMs = Date.now();
     mstimAltSeasonBurstUntilMs = 0;
     playStartMs = roundStartMs;
-    roundDurationMs = battleDurationForRound(0);
+    roundDurationMs = effectiveBattleDurationForRound(0);
     eligibleTokenSet = new Set();
     gameFinished = false;
     winnerTokensByPlayerKey = {};
@@ -1601,6 +1616,7 @@ function effectiveRecoverySecForWallet(u, teamFx, now) {
 }
 
 function getWarmupDurationMs() {
+  if (tournamentQuickTestMode) return QUICK_TEST_WARMUP_MS;
   if (roundIndex !== 0) return WARMUP_MS;
   const w = round0WarmupMs | 0;
   return w >= 5000 && w <= 600000 ? w : WARMUP_MS;
@@ -2494,8 +2510,24 @@ function broadcast(obj) {
   }
 }
 
-/** Соседи по 8 направлениям: есть ли клетка команды teamId. */
+/** Клетка внутри прямоугольника стартовой базы команды (6×6), даже без пикселя в `pixels`. */
+function cellInsideTeamSpawnRect(x, y, t) {
+  if (!t || typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") return false;
+  return (
+    x >= t.spawnX0 &&
+    x < t.spawnX0 + TEAM_SPAWN_SIZE &&
+    y >= t.spawnY0 &&
+    y < t.spawnY0 + TEAM_SPAWN_SIZE
+  );
+}
+
+/**
+ * 8-соседство: рядом своя закрашенная клетка ИЛИ клетка, лежащая в прямоугольнике базы 6×6.
+ * Второе нужно после смены раунда/сетки, если заливка базы в `pixels` не дошла до клиента или частично пуста.
+ */
 function cellTouchesTeamTerritory(x, y, teamId) {
+  const tid = teamId | 0;
+  const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0) continue;
@@ -2503,13 +2535,14 @@ function cellTouchesTeamTerritory(x, y, teamId) {
       const ny = y + dy;
       if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
       const v = pixels.get(`${nx},${ny}`);
-      if (v != null && pixelTeam(v) === (teamId | 0)) return true;
+      if (v != null && pixelTeam(v) === tid) return true;
+      if (t && cellInsideTeamSpawnRect(nx, ny, t)) return true;
     }
   }
   return false;
 }
 
-/** Псевдоним для правил размещения: можно ставить, если среди 8 соседей есть своя клетка. */
+/** Можно ставить пиксель, если из (x,y) 8-соседство с закрашенной территорией или с клеткой базы 6×6. */
 function canPlaceForTeam(x, y, teamId) {
   return cellTouchesTeamTerritory(x, y, teamId);
 }
@@ -3680,7 +3713,7 @@ async function advanceToDuelRound(winnerRow) {
     roundIndex = 3;
     roundTimerStarted = true;
     roundStartMs = Date.now();
-    roundDurationMs = battleDurationForRound(3);
+    roundDurationMs = effectiveBattleDurationForRound(3);
     clearTiebreakSnapshots();
     resetBattleEventsStateForNewBattleRound();
     rebuildLandFromRound(3);
@@ -3825,7 +3858,7 @@ async function runMaybeEndRound() {
     roundTimerStarted = true;
     round0WarmupMs = WARMUP_MS;
     roundStartMs = Date.now();
-    roundDurationMs = battleDurationForRound(roundIndex);
+    roundDurationMs = effectiveBattleDurationForRound(roundIndex);
     clearTiebreakSnapshots();
     resetBattleEventsStateForNewBattleRound();
     rebuildLandFromRound(roundIndex);
@@ -3888,7 +3921,8 @@ function maybeEndRound() {
   void runMaybeEndRound();
 }
 
-setInterval(() => maybeEndRound(), 30000);
+/* Было 30 с — при тестовых раундах по 30 с конец этапа запаздывал почти на минуту. */
+setInterval(() => maybeEndRound(), 5000);
 setInterval(() => tickFlagBaseRegen(Date.now()), 500);
 setInterval(() => tickBattleEvents(Date.now()), 1000);
 setInterval(() => {
@@ -4740,13 +4774,14 @@ async function startRoundOneTimer(durationHours) {
   if (gameFinished) return { ok: false, reason: "game_finished" };
   if (roundIndex !== 0) return { ok: false, reason: "not_round_first" };
   if (roundTimerStarted) return { ok: false, reason: "already_started" };
-  let ms = battleDurationForRound(0);
-  if (typeof durationHours === "number" && Number.isFinite(durationHours) && durationHours > 0) {
+  let ms = effectiveBattleDurationForRound(0);
+  if (!tournamentQuickTestMode && typeof durationHours === "number" && Number.isFinite(durationHours) && durationHours > 0) {
     ms = Math.round(durationHours * 60 * 60 * 1000);
     ms = Math.min(Math.max(ms, 1000), 8760 * 60 * 60 * 1000);
   }
+  if (tournamentQuickTestMode) ms = QUICK_TEST_ROUND_BATTLE_MS;
   roundDurationMs = ms;
-  round0WarmupMs = ROUND_ZERO_POST_GO_WARMUP_MS;
+  round0WarmupMs = tournamentQuickTestMode ? QUICK_TEST_WARMUP_MS : ROUND_ZERO_POST_GO_WARMUP_MS;
   roundTimerStarted = true;
   roundStartMs = Date.now();
   clearTiebreakSnapshots();
@@ -4759,7 +4794,11 @@ async function startRoundOneTimer(durationHours) {
       .map((c) => sendConnectionMeta(c))
   );
   broadcastStatsImmediate();
-  return { ok: true, durationMs: ms, warmupMs: ROUND_ZERO_POST_GO_WARMUP_MS };
+  return {
+    ok: true,
+    durationMs: ms,
+    warmupMs: tournamentQuickTestMode ? QUICK_TEST_WARMUP_MS : ROUND_ZERO_POST_GO_WARMUP_MS,
+  };
 }
 
 async function telegramSendMessage(chatId, text, extra = {}) {
@@ -5184,6 +5223,57 @@ async function telegramPollLoop() {
           }
         }
 
+        {
+          let tn = restartNorm.trim().toLowerCase();
+          if (tn.startsWith("/test")) tn = tn.slice(1).trim();
+          if (tn === "test" || tn.startsWith("test ")) {
+            if (!isClusterLeader()) {
+              await telegramSendMessage(
+                chatId,
+                "Этот процесс не лидер кластера — команда test только на инстансе с CLUSTER_LEADER=true."
+              );
+              continue;
+            }
+            const arg = tn.slice(4).trim();
+            if (arg === "off" || arg === "0" || arg === "выкл") {
+              tournamentQuickTestMode = false;
+              roundDurationMs = battleDurationForRound(roundIndex);
+              if (roundIndex === 0) round0WarmupMs = ROUND_ZERO_POST_GO_WARMUP_MS;
+              saveRoundState();
+              broadcastTournamentTimeScaleToClients();
+              if (wss) {
+                await Promise.all(
+                  [...wss.clients]
+                    .filter((c) => c.readyState === 1)
+                    .map((c) => sendConnectionMeta(c))
+                );
+              }
+              await telegramSendMessage(
+                chatId,
+                "Тестовый режим выключен. Длительность раундов — как в конфиге турнира (tournament-flow). Часы снова задаёт команда go."
+              );
+              continue;
+            }
+            tournamentQuickTestMode = true;
+            roundDurationMs = QUICK_TEST_ROUND_BATTLE_MS;
+            if (roundIndex === 0) round0WarmupMs = QUICK_TEST_WARMUP_MS;
+            saveRoundState();
+            broadcastTournamentTimeScaleToClients();
+            if (wss) {
+              await Promise.all(
+                [...wss.clients]
+                  .filter((c) => c.readyState === 1)
+                  .map((c) => sendConnectionMeta(c))
+              );
+            }
+            await telegramSendMessage(
+              chatId,
+              `Тестовый режим вкл: бой в каждом раунде ${QUICK_TEST_ROUND_BATTLE_MS / 1000} с, разминка перед боем ${QUICK_TEST_WARMUP_MS / 1000} с (все этапы). Полный цикл турнира и объявление победителя — как обычно. Выключить: test off`
+            );
+            continue;
+          }
+        }
+
         let manualBattleLine = null;
         const manualEvtPrefix = /^(evt|event|события|событие)\s+/iu;
         if (manualEvtPrefix.test(restartNorm)) {
@@ -5217,7 +5307,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start, go [часы], say, speed (Альт Сезон 5 мин), speed off, paint, restart, evt help, gold, seismic…"
+              "Неизвестная команда. Админ: /start, go [часы], test / test off (раунды по 30 с), say, speed, paint, restart, evt help, gold…"
             );
           }
           continue;
@@ -5238,10 +5328,18 @@ async function telegramPollLoop() {
         const result = await startRoundOneTimer(hours);
         let reply;
         if (result.ok) {
-          const h = (result.durationMs ?? roundDurationMs) / 3600000;
-          const warmMs = result.warmupMs ?? ROUND_ZERO_POST_GO_WARMUP_MS;
-          const warmRealSec = Math.max(1, Math.round(warmMs / 1000));
-          reply = `Раунд 1: карта очищена, ${warmRealSec} с до старта боя, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
+          if (tournamentQuickTestMode) {
+            const warmMs = result.warmupMs ?? QUICK_TEST_WARMUP_MS;
+            const battleMs = result.durationMs ?? QUICK_TEST_ROUND_BATTLE_MS;
+            const warmRealSec = Math.max(1, Math.round(warmMs / 1000));
+            const battleSec = Math.max(1, Math.round(battleMs / 1000));
+            reply = `Раунд 1 (тест): карта очищена, ${warmRealSec} с до боя, затем ${battleSec} с боя. Пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
+          } else {
+            const h = (result.durationMs ?? roundDurationMs) / 3600000;
+            const warmMs = result.warmupMs ?? ROUND_ZERO_POST_GO_WARMUP_MS;
+            const warmRealSec = Math.max(1, Math.round(warmMs / 1000));
+            reply = `Раунд 1: карта очищена, ${warmRealSec} с до старта боя, затем бой ${h.toFixed(h < 1 ? 2 : 1)} ч. Обычные пиксели с ${new Date(getPlayStartMs()).toISOString()}`;
+          }
         } else if (result.reason === "already_started") {
           reply = "Таймер первого раунда уже идёт.";
         } else if (result.reason === "game_finished") {
@@ -5328,7 +5426,7 @@ server.listen(PORT, () => {
     }
     if (WAIT_FOR_TELEGRAM_GO) {
       console.log(
-        'Первый раунд: «go» + часы; «speed» — событие «Мстим за Альт Сезон» (5 мин, пиксель раз в 1 с); выкл: speed off. Рестарт — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
+        'Первый раунд: «go» + часы; «test» / «test off» — турнир с раундами по 30 с боя (разминка 5 с); «speed» — Альт Сезон; рестарт — TELEGRAM_ENABLE_PROCESS_RESTART=true.'
       );
     } else if (TELEGRAM_ADMIN_IDS.size === 0) {
       console.warn(
