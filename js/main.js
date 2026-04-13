@@ -261,6 +261,7 @@ const createTeamColorPaletteEl = document.getElementById("create-team-color-pale
 const btnOpenCreateTeam = document.getElementById("btn-open-create-team");
 const btnCreateTeamCancel = document.getElementById("create-team-cancel");
 const btnCreateTeamSubmit = document.getElementById("create-team-submit");
+const createTeamReferralHintEl = document.getElementById("create-team-referral-hint");
 const referralSplashOverlay = document.getElementById("referral-splash-overlay");
 const referralSplashText = document.getElementById("referral-splash-text");
 const btnReferralSplashCopy = document.getElementById("referral-splash-copy");
@@ -2196,9 +2197,32 @@ function schedulePersist() {
   persistTimer = setTimeout(flushToStorage, 420);
 }
 
+function isClientDuelRound() {
+  return (roundIndexMeta | 0) === 3 || walletState?.tournamentStage === "DUEL";
+}
+
+/** Дуэль 1×1: вступление в чужие команды выключено; своя команда — через «Создать». */
+function syncDuelTeamUi() {
+  const duel = isClientDuelRound();
+  if (btnWelcomeJoin) {
+    btnWelcomeJoin.disabled = duel;
+    btnWelcomeJoin.title = duel
+      ? "В финальной дуэли нельзя вступить в чужую команду. Создайте свою — в ней только вы."
+      : "";
+    btnWelcomeJoin.style.opacity = duel ? "0.55" : "";
+  }
+  const lbl = document.getElementById("team-list-label");
+  if (lbl) {
+    lbl.textContent = duel
+      ? "В дуэли в чужие команды войти нельзя. Создайте только свою (1 игрок на команду):"
+      : "Или вступите в уже существующую:";
+  }
+}
+
 function rebuildTeamList() {
   teamListEl.innerHTML = "";
   if (!teamsMeta) return;
+  const duel = isClientDuelRound();
   for (const t of teamsMeta) {
     if (t.solo || t.eliminated) continue;
     const cnt = teamCounts[t.id] ?? 0;
@@ -2206,7 +2230,8 @@ function rebuildTeamList() {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "team-list__btn";
-    btn.disabled = full;
+    btn.disabled = full || duel;
+    if (duel) btn.title = "В дуэли 1×1 только своя команда — создайте новую.";
     btn.setAttribute("role", "option");
     const em = document.createElement("span");
     em.className = "team-list__emoji";
@@ -2238,6 +2263,7 @@ function rebuildTeamList() {
     });
     teamListEl.appendChild(btn);
   }
+  syncDuelTeamUi();
 }
 
 function tryRestoreSession() {
@@ -2584,6 +2610,12 @@ function buildCreateTeamColorPalette() {
   });
 }
 
+/** Текст про рефералку и +10 квантов — только в массовом раунде (индекс 0). */
+function syncCreateTeamReferralHintVisibility() {
+  if (!createTeamReferralHintEl) return;
+  createTeamReferralHintEl.hidden = (roundIndexMeta | 0) !== 0;
+}
+
 function openCreateTeamOverlay(fromWelcome) {
   createTeamFromWelcome = !!fromWelcome;
   if (createTeamNameInput) createTeamNameInput.value = "";
@@ -2591,6 +2623,7 @@ function openCreateTeamOverlay(fromWelcome) {
   syncCreateEmojiPresetHighlight();
   createTeamColorIdx = Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1);
   buildCreateTeamColorPalette();
+  syncCreateTeamReferralHintVisibility();
   if (createTeamOverlay) createTeamOverlay.hidden = false;
 }
 
@@ -2658,6 +2691,14 @@ function setupWelcomeUi() {
     openCreateTeamOverlay(true);
   });
   btnWelcomeJoin?.addEventListener("click", () => {
+    if (isClientDuelRound()) {
+      const tg = window.Telegram?.WebApp;
+      const m =
+        "В финальной дуэли нельзя вступить в чужую команду. Нажмите «Создать команду» — в команде будете только вы.";
+      if (typeof tg?.showAlert === "function") tg.showAlert(m);
+      else alert(m);
+      return;
+    }
     if (myTeamId != null) {
       pendingLeaveToTeamList = true;
       pendingLeaveToCreate = false;
@@ -2919,6 +2960,7 @@ function onMeta(msg) {
     stopBoardSeismicShake();
   }
   roundIndexMeta = nextRi;
+  syncCreateTeamReferralHintVisibility();
   lobbyBeforeGoMeta = !!msg.lobbyBeforeGo;
   tournamentTimeScaleClient =
     typeof msg.tournamentTimeScale === "number" && msg.tournamentTimeScale >= 1
@@ -2982,6 +3024,7 @@ function onMeta(msg) {
         teamOverlay.hidden = true;
       }
       setFooterMode();
+      syncDuelTeamUi();
     } finally {
       if (msg.territoryIsolation && typeof msg.territoryIsolation === "object") {
         applyClientTerritoryIsolationFromServer(msg.territoryIsolation);
@@ -3376,6 +3419,7 @@ function applyWalletFromServer(msg) {
   updateShopAvailability();
   syncEventBanner();
   syncTeamBuffBanner();
+  syncDuelTeamUi();
 }
 
 function syncShopHeaderBalance() {
@@ -5279,7 +5323,7 @@ function connectWs() {
       const map = {
         fields: "Укажите название и смайлик команды.",
         limit: "Достигнут лимит команд на сервере.",
-        duel: "Финальная дуэль 1 на 1 — публичные команды в этот момент недоступны.",
+        duel: "В дуэли нельзя вступить в чужую команду — создайте свою (один игрок).",
         spawn_failed:
           "Не удалось разместить стартовую базу 6×6 на карте (мало места). Попробуйте позже или сообщите администратору.",
       };

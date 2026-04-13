@@ -4097,10 +4097,7 @@ wss.on("connection", (ws, req) => {
       if (!assertCanPlay(ws)) return;
       attachPlayerKey(ws, msg);
       reconcileWsTeamMembership(ws);
-      if (roundIndex === 3) {
-        safeSend(ws, { type: "createTeamError", reason: "duel" });
-        return;
-      }
+      /* Раунд 3 (дуэль): своя команда из одного человека — joinTeam по-прежнему запрещён. */
       if (ws.teamId != null) {
         safeSend(ws,{ type: "createTeamError", reason: "already" });
         return;
