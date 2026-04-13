@@ -6301,6 +6301,71 @@ function consumeDuplicatePurchaseVfx(msg) {
   return true;
 }
 
+/**
+ * Метка клада на карте: сундук по центру клетки, без анимации (хорошо читается при любом зуме).
+ */
+function drawMapTreasureChestIcon(ctx, px, py, cw, ch) {
+  const s = Math.min(cw, ch);
+  if (s < 2) return;
+  const scale = Math.min(s * 0.68, Math.max(s - 1, 6));
+  const cx = px + cw * 0.5;
+  const cy = py + ch * 0.5;
+  ctx.save();
+  ctx.translate(cx, cy);
+  const bw = scale * 0.4;
+  const bh = scale * 0.28;
+  const lw = Math.max(1, scale * 0.075);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  ctx.beginPath();
+  ctx.ellipse(0, bh * 1.05, bw * 1.15, scale * 0.09, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(-bw * 1.1, -bh * 0.22);
+  ctx.lineTo(-bw * 0.68, -bh * 1.12);
+  ctx.lineTo(bw * 0.68, -bh * 1.12);
+  ctx.lineTo(bw * 1.1, -bh * 0.22);
+  ctx.closePath();
+  ctx.fillStyle = "#edc843";
+  ctx.strokeStyle = "#3d2a0a";
+  ctx.lineWidth = lw;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.rect(-bw * 1.1, -bh * 0.22, bw * 2.2, bh * 1.4);
+  ctx.fillStyle = "#cfa21a";
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -bh * 0.22);
+  ctx.lineTo(0, bh * 1.18);
+  ctx.strokeStyle = "#3d2a0a";
+  ctx.lineWidth = lw * 0.95;
+  ctx.stroke();
+
+  const lkW = scale * 0.22;
+  const lkH = bh * 0.58;
+  ctx.fillStyle = "#fff7dc";
+  ctx.strokeStyle = "#3d2a0a";
+  ctx.lineWidth = lw * 0.65;
+  ctx.beginPath();
+  ctx.rect(-lkW * 0.5, bh * 0.08, lkW, lkH);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "#3d2a0a";
+  ctx.beginPath();
+  ctx.arc(0, bh * 0.28, Math.max(1.2, scale * 0.055), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 function draw(time = performance.now(), drawOpts = {}) {
   const _perf0 = perfDebug ? performance.now() : 0;
   let w = canvas.clientWidth;
@@ -6481,20 +6546,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       }
 
       if (online && treasureSpotKeys.has(key)) {
-        const d = Math.max(2, Math.min(cw, ch) * 0.26);
-        const margin = Math.max(1, cell * 0.07);
-        const tcx = px + cw - margin - d * 0.5;
-        const tcy = py + ch - margin - d * 0.5;
-        const pulseT = lite ? 1 : 0.62 + 0.38 * Math.sin(time * 0.0028);
-        ctx.fillStyle = `rgba(255, 210, 55, ${0.78 * pulseT + 0.18})`;
-        ctx.beginPath();
-        ctx.arc(tcx, tcy, d * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-        if (!lite) {
-          ctx.strokeStyle = "rgba(95, 55, 8, 0.62)";
-          ctx.lineWidth = Math.max(0.75, cell * 0.038);
-          ctx.stroke();
-        }
+        drawMapTreasureChestIcon(ctx, px, py, cw, ch);
       }
     }
   }
