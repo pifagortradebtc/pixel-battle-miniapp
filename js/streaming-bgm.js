@@ -142,7 +142,7 @@ export class StreamingBgmDirector {
   }
 
   async loadManifestAndBuffers() {
-    if (!this.ctx) return;
+    if (!this.ctx) return Promise.resolve();
     if (this._manifestLoadPromise) return this._manifestLoadPromise;
     this._manifestLoadPromise = this._loadManifestAndBuffersInner().finally(() => {
       this._manifestLoadPromise = null;

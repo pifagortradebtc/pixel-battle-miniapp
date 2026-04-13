@@ -159,9 +159,14 @@ export function getAudioContext() {
   return ctx;
 }
 
+/**
+ * После resume() обязательно дождаться прелоада sfx — иначе playEventSample видит пустые буферы и играет старый синтез.
+ */
 function runAfterAudioContextRunning() {
-  void preloadEventSfxBuffers();
-  void streamingBgm.loadManifestAndBuffers();
+  return Promise.all([
+    preloadEventSfxBuffers(),
+    streamingBgm.loadManifestAndBuffers(),
+  ]).catch(() => {});
 }
 
 export function resumeAudioContext() {
@@ -176,9 +181,11 @@ export function resumeAudioContext() {
       applyMusicLayerTargets(true);
     }
     if (ctx.state === "suspended") {
-      return ctx.resume().then(runAfterAudioContextRunning, runAfterAudioContextRunning);
+      return ctx
+        .resume()
+        .then(() => runAfterAudioContextRunning(), () => runAfterAudioContextRunning());
     }
-    runAfterAudioContextRunning();
+    return runAfterAudioContextRunning();
   } catch {
     /* ignore */
   }
@@ -558,7 +565,7 @@ function duckMusicForAlert(ms, deep = false) {
 }
 
 async function preloadEventSfxBuffers() {
-  if (!ctx) return;
+  if (!ctx) return Promise.resolve();
   if (eventSfxPreloadPromise) return eventSfxPreloadPromise;
   eventSfxPreloadPromise = (async () => {
     try {
