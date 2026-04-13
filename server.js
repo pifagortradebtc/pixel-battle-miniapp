@@ -3716,6 +3716,13 @@ async function advanceToDuelRound(winnerRow) {
           : 0;
     setEligibleKeysFromWinnerTeam(winnerTeamId, 2);
 
+    void notifyTournamentStageAdvancersTelegram({
+      stageTitle: "Финал команд завершён",
+      stageSubtitle: "Дуэль 1×1: проходят два участника победившей команды.",
+      winnerRow,
+      advancingKeys: new Set(eligiblePlayerKeys),
+    });
+
     eligibleTokenSet = new Set();
     winnerTokensByPlayerKey = {};
     const tokenByPlayerKey = new Map();
@@ -3855,6 +3862,22 @@ async function runMaybeEndRound() {
     /** Конец раунда 1 (полуфинал) → в раунд 2 только MAX_PLAYERS_ADVANCING_FROM_SEMI человек; конец раунда 0 → все победители. */
     const eligibleCap = roundIndex === 1 ? MAX_PLAYERS_ADVANCING_FROM_SEMI : undefined;
     setEligibleKeysFromWinnerTeam(winnerTeamId, eligibleCap);
+
+    if (roundIndex === 0) {
+      void notifyTournamentStageAdvancersTelegram({
+        stageTitle: "Массовый раунд завершён",
+        stageSubtitle: "Полуфинал: проходят все зафиксированные участники победившей по очкам команды.",
+        winnerRow: rows[0],
+        advancingKeys: new Set(eligiblePlayerKeys),
+      });
+    } else if (roundIndex === 1) {
+      void notifyTournamentStageAdvancersTelegram({
+        stageTitle: "Полуфинал завершён",
+        stageSubtitle: `Финал команд: в следующий этап проходят до ${MAX_PLAYERS_ADVANCING_FROM_SEMI} участников победившей команды.`,
+        winnerRow: rows[0],
+        advancingKeys: new Set(eligiblePlayerKeys),
+      });
+    }
 
     eligibleTokenSet = new Set();
     winnerTokensByPlayerKey = {};
@@ -4754,13 +4777,15 @@ async function telegramFetchChatUsername(userId) {
 }
 
 /**
- * Уведомляет админов (TELEGRAM_ADMIN_IDS) о финалистах: username и Telegram ID участников победившей команды (до 2).
+ * @param {Iterable<string>} playerKeys
+ * @returns {Promise<string[]>}
  */
-async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, winnerRow) {
-  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+async function formatPlayerKeyTelegramLines(playerKeys) {
   const lines = [];
   let n = 0;
-  for (const pk of winnerPlayerKeys) {
+  for (const pkRaw of playerKeys) {
+    const pk = sanitizePlayerKey(pkRaw);
+    if (!pk) continue;
     const meta = playerTelegramMeta.get(pk);
     const m = /^tg_(\d+)$/.exec(pk);
     const tgId = meta?.id ?? (m ? Number(m[1]) : null);
@@ -4773,9 +4798,60 @@ async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, winnerRow)
       const un = username ? `@${username}` : "(username не указан или скрыт)";
       lines.push(`${n}. ${un}\n   Telegram ID: ${tgId}`);
     } else {
-      lines.push(`${n}. не из Telegram Mini App (playerKey: ${pk.slice(0, 32)}…)`);
+      lines.push(`${n}. не из Telegram Mini App (playerKey: ${pk.slice(0, 48)}…)`);
     }
   }
+  return lines;
+}
+
+async function sendTelegramMessageToAdmins(fullText) {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+  const hardLimit = 3900;
+  let remaining = String(fullText || "").replace(/\r\n/g, "\n").trim();
+  const chunks = [];
+  while (remaining.length > 0) {
+    if (remaining.length <= hardLimit) {
+      chunks.push(remaining);
+      break;
+    }
+    let cut = remaining.lastIndexOf("\n\n", hardLimit);
+    if (cut < hardLimit * 0.35) cut = remaining.lastIndexOf("\n", hardLimit);
+    if (cut < hardLimit * 0.35) cut = hardLimit;
+    const piece = remaining.slice(0, cut).trimEnd();
+    if (!piece) {
+      chunks.push(remaining.slice(0, hardLimit));
+      remaining = remaining.slice(hardLimit).trimStart();
+      continue;
+    }
+    chunks.push(piece);
+    remaining = remaining.slice(cut).trimStart();
+  }
+  for (const text of chunks) {
+    if (!text) continue;
+    const safe = text.slice(0, 4000);
+    for (const adminId of TELEGRAM_ADMIN_IDS) {
+      try {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: adminId, text: safe }),
+        });
+      } catch (e) {
+        console.warn("sendTelegramMessageToAdmins:", e.message || e);
+      }
+    }
+  }
+}
+
+/**
+ * После смены раунда: кто проходит дальше (username + Telegram ID).
+ * @param {{ stageTitle: string, stageSubtitle?: string, winnerRow: object, advancingKeys: Iterable<string> }} opts
+ */
+async function notifyTournamentStageAdvancersTelegram(opts) {
+  const { stageTitle, stageSubtitle, winnerRow, advancingKeys } = opts;
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+  const lines = await formatPlayerKeyTelegramLines(advancingKeys);
+  const teamName = winnerRow?.name || "—";
   const sc =
     winnerRow && typeof winnerRow.score === "number" && Number.isFinite(winnerRow.score)
       ? winnerRow.score.toFixed(2)
@@ -4788,25 +4864,45 @@ async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, winnerRow)
         : null;
   const shareStr =
     typeof shareRaw === "number" && Number.isFinite(shareRaw) ? shareRaw.toFixed(3) : String(shareRaw ?? "—");
+  const sub = stageSubtitle ? `${stageSubtitle}\n` : "";
   const body =
-    `Финал Pixel Battle\n` +
+    `${stageTitle}\n` +
+    `${sub}` +
+    `Команда-лидер по очкам: «${teamName}» — счёт ${sc} оч., доля доступных очков ${shareStr}%\n` +
+    `Игроки, проходящие дальше (${lines.length}):\n\n` +
+    (lines.length
+      ? lines.join("\n\n")
+      : "(не удалось сопоставить playerKey — участники должны заходить из Telegram Mini App.)");
+  await sendTelegramMessageToAdmins(body);
+}
+
+/**
+ * Уведомляет админов (TELEGRAM_ADMIN_IDS) о победителях дуэли: username и Telegram ID.
+ */
+async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, winnerRow) {
+  if (!TELEGRAM_BOT_TOKEN || TELEGRAM_ADMIN_IDS.size === 0) return;
+  const lines = await formatPlayerKeyTelegramLines(winnerPlayerKeys);
+  const sc =
+    winnerRow && typeof winnerRow.score === "number" && Number.isFinite(winnerRow.score)
+      ? winnerRow.score.toFixed(2)
+      : "—";
+  const shareRaw =
+    winnerRow && typeof winnerRow.scoreSharePercent === "number"
+      ? winnerRow.scoreSharePercent
+      : winnerRow && typeof winnerRow.percent === "number"
+        ? winnerRow.percent
+        : null;
+  const shareStr =
+    typeof shareRaw === "number" && Number.isFinite(shareRaw) ? shareRaw.toFixed(3) : String(shareRaw ?? "—");
+  const sz = winnerPlayerKeys instanceof Set ? winnerPlayerKeys.size : [...winnerPlayerKeys].length;
+  const body =
+    `Финал Pixel Battle (дуэль 1×1)\n` +
     `Победители: «${teamName}» — счёт ${sc} оч., доля доступных очков ${shareStr}%\n` +
-    `Игроки команды-победителя (Telegram / playerKey), найдено: ${winnerPlayerKeys.size}\n\n` +
+    `Игроки команды-победителя (Telegram / playerKey), найдено: ${sz}\n\n` +
     (lines.length
       ? lines.join("\n\n")
       : "(не удалось сопоставить playerKey — проверьте, что финалисты заходили из Telegram Mini App)");
-  const text = body.slice(0, 4000);
-  for (const adminId of TELEGRAM_ADMIN_IDS) {
-    try {
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: adminId, text }),
-      });
-    } catch (e) {
-      console.warn("notifyFinalWinnersTelegram:", e.message || e);
-    }
-  }
+  await sendTelegramMessageToAdmins(body);
 }
 
 /**
@@ -5479,7 +5575,7 @@ server.listen(PORT, () => {
   }
   if (TELEGRAM_BOT_TOKEN && TELEGRAM_ADMIN_IDS.size > 0) {
     console.log(
-      "После финала (3-й раунд) бот отправит каждому id из TELEGRAM_ADMIN_IDS username и Telegram ID участников победившей команды (до 2 чел.)."
+      "Админам (TELEGRAM_ADMIN_IDS): уведомления после массового раунда, полуфинала (десятка), финала команд (дуэлянты) и после дуэли — username и Telegram ID проходящих / победителей."
     );
   }
 });
