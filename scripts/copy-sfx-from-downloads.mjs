@@ -37,6 +37,7 @@ const MAP = [
   ["База атакуется.mp3", "alert-base-attack.mp3"],
   ["Последние клетки.mp3", "alert-last-cells.mp3"],
   ["Отрезание территории.mp3", "alert-territory-cut.mp3"],
+  ["pixel step.mp3", "pixel-place.mp3"],
 ];
 
 function tryCopy(fromName, toName) {

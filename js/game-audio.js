@@ -989,6 +989,7 @@ export function playPixelPlace() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
     registerLowPrioritySfx();
+    if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72 })) return;
     const now = ctx.currentTime;
     playFilteredNoiseBurst(sfxBus, now, 0.012, 0.035, 680);
     playOscThrough("sine", 265, 198, 0.045, 0.028, sfxBus, now + 0.001);
