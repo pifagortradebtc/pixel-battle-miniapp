@@ -806,6 +806,23 @@ let pendingMapAction = null;
 let mapHoverGx = -1;
 let mapHoverGy = -1;
 
+/** Попадание в зону боя квантовой фермы (как пунктир 4×4 вокруг якоря 2×2 на карте). */
+function clientGridCellInQuantumFarmBattleZone(gx, gy) {
+  const gxi = gx | 0;
+  const gyi = gy | 0;
+  if (!quantumFarmsMeta.length || gridW < 1 || gridH < 1) return false;
+  if (gxi < 0 || gxi >= gridW || gyi < 0 || gyi >= gridH) return false;
+  for (let i = 0; i < quantumFarmsMeta.length; i++) {
+    const f = quantumFarmsMeta[i];
+    const igx0 = Math.max(0, f.x0 - 1);
+    const igy0 = Math.max(0, f.y0 - 1);
+    const igx1 = Math.min(gridW - 1, f.x0 + f.w);
+    const igy1 = Math.min(gridH - 1, f.y0 + f.h);
+    if (gxi >= igx0 && gxi <= igx1 && gyi >= igy0 && gyi <= igy1) return true;
+  }
+  return false;
+}
+
 const CLIENT_MILITARY_GAP_OWN_MAIN = 4;
 const CLIENT_MILITARY_GAP_ENEMY_MAIN = 6;
 const CLIENT_SPAWN_RECT_GAP = 1;
@@ -8308,6 +8325,19 @@ function placePixel(gx, gy) {
   }
 
   const online = wantOnline && getWsUrl();
+  if (
+    online &&
+    quantumFarmsMeta.length > 0 &&
+    !pendingMapAction &&
+    clientGridCellInQuantumFarmBattleZone(gx, gy)
+  ) {
+    showPlacementFeedback(
+      "Квантовая ферма: вокруг квадрата 2×2 считается зона 4×4. У какой команды в зоне больше закрашенных клеток — та получает +1 квант каждые 5 с с этого узла (при равенстве дохода нет). Держите сушу вокруг точки.",
+      "success",
+      { telegramAlert: false, bannerDurationMs: 8200, skipCooldownChrome: true }
+    );
+    return;
+  }
   if (online && spectatorMode) {
     notifyReject("spectator");
     return;
