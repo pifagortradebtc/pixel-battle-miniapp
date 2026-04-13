@@ -1,20 +1,31 @@
 {
-  "_comment": "Стриминговый фон: положите music/bgm-loop.mp3 (или несколько треков — см. ниже). Копирование из Загрузок: npm run copy-music",
+  "_comment": "playlist — длинные треки подряд (порядок в массиве = порядок воспроизведения). Файлы: music/bgm-01.mp3 … npm run copy-music",
   "version": 1,
-  "crossfadeSec": 2.4,
+  "playlistOrder": "sequential",
+  "crossfadeSec": 2.8,
   "gameplayTransitionCooldownMs": 14000,
   "preRoundCountdownBoostSec": 12,
   "preRoundCountdownGainMul": 1.12,
   "pauseMusicGainMul": 0.48,
   "pauseLowpassHz": 900,
+  "playlist": [
+    { "url": "music/bgm-01.mp3" },
+    { "url": "music/bgm-02.mp3" },
+    { "url": "music/bgm-03.mp3" },
+    { "url": "music/bgm-04.mp3" },
+    { "url": "music/bgm-05.mp3" },
+    { "url": "music/bgm-06.mp3" },
+    { "url": "music/bgm-07.mp3" },
+    { "url": "music/bgm-08.mp3" }
+  ],
   "tracks": {
-    "menu": [{ "url": "music/bgm-loop.mp3" }],
-    "preRound": [{ "url": "music/bgm-loop.mp3" }],
-    "calm": [{ "url": "music/bgm-loop.mp3" }],
-    "tension": [{ "url": "music/bgm-loop.mp3" }],
-    "battle": [{ "url": "music/bgm-loop.mp3" }],
-    "critical": [{ "url": "music/bgm-loop.mp3" }],
-    "postRound": [{ "url": "music/bgm-loop.mp3" }],
-    "final": [{ "url": "music/bgm-loop.mp3" }]
+    "menu": [],
+    "preRound": [],
+    "calm": [],
+    "tension": [],
+    "battle": [],
+    "critical": [],
+    "postRound": [],
+    "final": []
   }
 }

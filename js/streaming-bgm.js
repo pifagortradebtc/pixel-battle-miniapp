@@ -1,6 +1,7 @@
 /**
- * Динамический фон: декодированные треки из music/manifest.json, кроссфейд, анти-повтор, фазы.
- * Пустые списки в manifest → этап не использует стриминг (остаётся процедурная музыка).
+ * Динамический фон: декодированные треки из music/manifest.json, кроссфейд, фазы.
+ * Поле playlist — общий упорядоченный плейлист (под длинные треки подряд); playlistOrder sequential
+ * переключает треки по окончанию файла без зацикливания одного.
  */
 
 import { resolvePublicAssetUrl } from "./asset-url.js";
@@ -30,6 +31,8 @@ const GAMEPLAY_PHASES = new Set(["calm", "tension", "battle", "critical"]);
  *   pauseMusicGainMul: number;
  *   pauseLowpassHz: number;
  *   tracks: Record<string, ManifestTrack[]>;
+ *   playlist: ManifestTrack[];
+ *   playlistOrder: "sequential" | "random";
  * }} BgmManifest
  */
 
@@ -40,6 +43,8 @@ const DEFAULT_MANIFEST = /** @type {BgmManifest} */ ({
   preRoundCountdownGainMul: 1.1,
   pauseMusicGainMul: 0.5,
   pauseLowpassHz: 950,
+  playlist: [],
+  playlistOrder: "sequential",
   tracks: {
     menu: [],
     preRound: [],
@@ -59,10 +64,24 @@ function pickTrackExcluding(tracks, lastUrl) {
   return pool[Math.floor(Math.random() * pool.length)] || null;
 }
 
+/**
+ * @param {ManifestTrack[]} tracks
+ * @param {number} i
+ */
+function pickTrackSequential(tracks, i) {
+  if (!tracks?.length) return null;
+  const t = tracks[((i % tracks.length) + tracks.length) % tracks.length];
+  return t && t.url ? t : null;
+}
+
 export class StreamingBgmDirector {
   constructor() {
     /** @type {BgmManifest} */
-    this.m = { ...DEFAULT_MANIFEST, tracks: { ...DEFAULT_MANIFEST.tracks } };
+    this.m = {
+      ...DEFAULT_MANIFEST,
+      tracks: { ...DEFAULT_MANIFEST.tracks },
+      playlist: [],
+    };
     /** @type {Map<string, AudioBuffer>} */
     this.bufferByUrl = new Map();
     /** @type {AudioContext | null} */
@@ -101,6 +120,29 @@ export class StreamingBgmDirector {
     this.muted = false;
     /** @type {number} */
     this.masterMusicMul = 1;
+    /** Индекс текущего трека в playlist (режим sequential). */
+    this.sequentialCursor = 0;
+  }
+
+  /** @returns {boolean} */
+  usesGlobalPlaylist() {
+    return Array.isArray(this.m.playlist) && this.m.playlist.length > 0;
+  }
+
+  /** @returns {ManifestTrack[]} */
+  getGlobalPlaylist() {
+    return this.usesGlobalPlaylist() ? this.m.playlist : [];
+  }
+
+  /**
+   * Список URL для текущего UI/игрового этапа: общий playlist или tracks[phase].
+   * @param {string} effectivePhase
+   * @returns {ManifestTrack[]}
+   */
+  resolveTrackList(effectivePhase) {
+    if (this.usesGlobalPlaylist()) return this.m.playlist;
+    const list = this.m.tracks[effectivePhase];
+    return Array.isArray(list) ? list : [];
   }
 
   /**
@@ -176,6 +218,14 @@ export class StreamingBgmDirector {
             : this.m.pauseMusicGainMul;
         this.m.pauseLowpassHz =
           typeof j.pauseLowpassHz === "number" && j.pauseLowpassHz > 200 ? j.pauseLowpassHz : this.m.pauseLowpassHz;
+        if (Array.isArray(j.playlist)) {
+          this.m.playlist = j.playlist
+            .filter((x) => x && typeof x.url === "string" && x.url.length)
+            .map((x) => ({ url: x.url, loopStart: x.loopStart, loopEnd: x.loopEnd }));
+        } else {
+          this.m.playlist = [];
+        }
+        this.m.playlistOrder = j.playlistOrder === "random" ? "random" : "sequential";
         if (j.tracks && typeof j.tracks === "object") {
           for (const k of Object.keys(DEFAULT_MANIFEST.tracks)) {
             const arr = Array.isArray(j.tracks[k]) ? j.tracks[k] : [];
@@ -190,6 +240,7 @@ export class StreamingBgmDirector {
     }
 
     const urls = new Set();
+    for (const t of this.m.playlist) urls.add(t.url);
     for (const list of Object.values(this.m.tracks)) {
       for (const t of list) urls.add(t.url);
     }
@@ -268,6 +319,7 @@ export class StreamingBgmDirector {
     if (this.slotA) this.slotA.gain.gain.value = 0.0001;
     if (this.slotB) this.slotB.gain.gain.value = 0.0001;
     this.phase = null;
+    this.sequentialCursor = 0;
     this.applyReactiveBattleMix({
       uiPhase: "menu",
       gameplayIntensity: 0,
@@ -384,14 +436,26 @@ export class StreamingBgmDirector {
       this.lastGameplaySwitchWallMs = nowWall;
     }
 
-    const tracks = this.m.tracks[effectivePhase];
+    const tracks = this.resolveTrackList(effectivePhase);
     if (!tracks?.length) {
       if (this.srcA || this.srcB) this.fadeStreamingOut();
       return false;
     }
 
+    const playing = !!(this.aIsHot ? this.srcA : this.srcB);
+    if (playing && this.usesGlobalPlaylist()) {
+      this.phase = effectivePhase;
+      this.applyPreRoundGain(opts.preRoundSecondsLeft);
+      return true;
+    }
+
     const lastHot = this.aIsHot ? this.lastUrlA : this.lastUrlB;
-    const pick = pickTrackExcluding(tracks, lastHot);
+    let pick = null;
+    if (this.usesGlobalPlaylist() && this.m.playlistOrder === "sequential") {
+      pick = pickTrackSequential(tracks, this.sequentialCursor);
+    } else {
+      pick = pickTrackExcluding(tracks, lastHot);
+    }
     if (!pick) return false;
     const buf = this.bufferByUrl.get(pick.url);
     if (!buf) {
@@ -459,12 +523,38 @@ export class StreamingBgmDirector {
     const cold = this.aIsHot ? this.slotB : this.slotA;
     const hot = this.aIsHot ? this.slotA : this.slotB;
 
+    const pl = this.getGlobalPlaylist();
+    const sequentialAdvance =
+      this.usesGlobalPlaylist() && this.m.playlistOrder === "sequential" && pl.length > 1;
+
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.loop = true;
+    src.loop = !sequentialAdvance;
     if (typeof track.loopStart === "number" && track.loopStart >= 0) src.loopStart = track.loopStart;
     if (typeof track.loopEnd === "number" && track.loopEnd > (track.loopStart || 0)) src.loopEnd = track.loopEnd;
 
+    if (sequentialAdvance) {
+      src.onended = () => {
+        src.onended = null;
+        if (!this.ctx) return;
+        const list = this.getGlobalPlaylist();
+        if (list.length < 2) return;
+        this.sequentialCursor = (this.sequentialCursor + 1) % list.length;
+        const next = pickTrackSequential(list, this.sequentialCursor);
+        if (!next) return;
+        const nextBuf = this.bufferByUrl.get(next.url);
+        if (nextBuf) {
+          this.crossfadeToBuffer(nextBuf, next);
+          return;
+        }
+        void this.loadManifestAndBuffers().then(() => {
+          const b = this.bufferByUrl.get(next.url);
+          if (b) this.crossfadeToBuffer(b, next);
+        });
+      };
+    }
+
+    const prevSrc = this.aIsHot ? this.srcA : this.srcB;
     try {
       this.aIsHot ? this.srcB?.stop() : this.srcA?.stop();
     } catch {
@@ -491,8 +581,12 @@ export class StreamingBgmDirector {
     }
     window.setTimeout(() => {
       try {
-        if (this.aIsHot) this.srcB?.stop();
-        else this.srcA?.stop();
+        if (prevSrc) prevSrc.onended = null;
+        if (this.aIsHot) {
+          this.srcB?.stop();
+        } else {
+          this.srcA?.stop();
+        }
       } catch {
         /* */
       }
@@ -505,11 +599,13 @@ export class StreamingBgmDirector {
   }
 
   hasTracksForPhase(key) {
+    if (this.usesGlobalPlaylist()) return this.m.playlist.length > 0;
     const list = this.m.tracks[key];
     return Array.isArray(list) && list.length > 0;
   }
 
   anyStreamingConfigured() {
+    if (this.m.playlist?.length) return true;
     for (const list of Object.values(this.m.tracks)) {
       if (list && list.length) return true;
     }
@@ -518,8 +614,11 @@ export class StreamingBgmDirector {
 
   /** Процедурные осцилляторы глушим, пока играет стрим с треками для текущей фазы. */
   shouldSuppressProcedural() {
-    if (!this.phase) return false;
-    const list = this.m.tracks[this.phase];
+    const list = this.usesGlobalPlaylist()
+      ? this.m.playlist
+      : this.phase
+        ? this.m.tracks[this.phase]
+        : [];
     if (!list?.length) return false;
     return !!(this.srcA || this.srcB);
   }
