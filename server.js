@@ -277,8 +277,8 @@ const COOLDOWN_MS = 0;
 const ROUND_MS = 100 * 60 * 60 * 1000;
 /** Длина фазы боя текущего раунда в мс (после разминки). */
 let roundDurationMs = ROUND_MS;
-/** Админ-команда бота «test»: фаза боя в каждом раунде одинаковая (1 мин), разминка короткая. */
-const QUICK_TEST_ROUND_BATTLE_MS = 60 * 1000;
+/** Админ-команда бота «test»: фаза боя в каждом раунде одинаковая (2 мин), разминка короткая. */
+const QUICK_TEST_ROUND_BATTLE_MS = 2 * 60 * 1000;
 const QUICK_TEST_WARMUP_MS = 5 * 1000;
 let tournamentQuickTestMode = false;
 
