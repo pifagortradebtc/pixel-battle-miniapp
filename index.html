@@ -661,24 +661,7 @@
 
     <div class="app__main">
       <header class="toolbar">
-        <div class="toolbar__lead" aria-label="Раунд и интервал пикселя">
-          <div class="hud-lead-stack">
-            <span
-              id="round-timer"
-              class="toolbar__round toolbar__round--lead"
-              hidden
-              title="Время до конца текущего раунда"
-            ></span>
-          </div>
-          <div
-            id="toolbar-pixel-timer"
-            class="toolbar__pixel-timer"
-            role="timer"
-            aria-live="polite"
-            title="Время до следующего пикселя"
-          >
-            —
-          </div>
+        <div class="toolbar__lead" aria-label="Баланс и цели">
           <span id="wallet-balance" class="toolbar__wallet toolbar__wallet--lead" hidden title="Игровая валюта — кванты">💰 0 квантов</span>
           <span
             id="toolbar-quantum-objective"
@@ -737,6 +720,25 @@
           >💬</a>
         </div>
         <div class="toolbar__hud-row" aria-live="polite">
+          <div class="toolbar__hud-timers">
+            <div class="hud-lead-stack">
+              <span
+                id="round-timer"
+                class="toolbar__round toolbar__round--lead"
+                hidden
+                title="Время до конца текущего раунда"
+              ></span>
+            </div>
+            <div
+              id="toolbar-pixel-timer"
+              class="toolbar__pixel-timer"
+              role="timer"
+              aria-live="polite"
+              title="Время до следующего пикселя"
+            >
+              —
+            </div>
+          </div>
           <span id="cooldown-label" class="toolbar__cooldown" hidden></span>
           <div
             id="territory-isolation-hud"

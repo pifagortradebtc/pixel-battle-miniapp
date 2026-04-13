@@ -9,8 +9,8 @@
   /* Плавающая шапка и низ — карта на весь экран под ними */
   --toolbar-h: 34px;
   /* Жёсткий потолок высоты шапки: иначе длинный текст + sync --toolbar-h раздувают тёмную полосу на пол-экрана */
-  /* Две строки шапки + ряд таймеров (изоляция, бафф) без обрезки */
-  --toolbar-h-max: 120px;
+  /* Первая строка — кнопки; вторая — все таймеры и статусы (не сжимают меню) */
+  --toolbar-h-max: 140px;
   --hud-bg: rgba(5, 10, 18, 0.42);
   --hud-border: rgba(255, 255, 255, 0.08);
 }
@@ -240,6 +240,21 @@ body {
   min-width: 0;
   width: 100%;
   padding-top: 1px;
+}
+
+/* Раунд + интервал пикселя — только здесь, не в ряду с кнопками */
+.toolbar__hud-timers {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  width: 100%;
+}
+
+.toolbar__hud-timers .hud-lead-stack {
+  min-width: 0;
+  width: 100%;
 }
 
 .territory-isolation-hud {

@@ -9023,7 +9023,7 @@ function placePixel(gx, gy) {
 }
 
 function showCooldown(_ms) {
-  /** Обратный отсчёт и «Готово» только в `#toolbar-pixel-timer` слева — не дублируем в шапке справа. */
+  /** Состояние пикселя — в `#toolbar-pixel-timer` под рядом кнопок (`.toolbar__hud-row`). */
   updateToolbarHud();
 }
 
