@@ -11,7 +11,8 @@
     "generate-earth-poster": "node scripts/generate-earth-poster.mjs",
     "downsample-regions": "node scripts/downsample-regions.mjs",
     "stress": "node scripts/stress-concurrency-sim.mjs",
-    "copy-music": "node scripts/copy-music-from-downloads.mjs"
+    "copy-music": "node scripts/copy-music-from-downloads.mjs",
+    "copy-sfx": "node scripts/copy-sfx-from-downloads.mjs"
   },
   "devDependencies": {
     "sharp": "^0.33.5"
