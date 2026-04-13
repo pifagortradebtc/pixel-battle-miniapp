@@ -533,7 +533,7 @@ let gameFinished = false;
 let eligiblePlayerKeys = new Set();
 /** Восстановление кладов с диска после пересборки сетки (перезапуск в том же раунде). */
 let pendingTreasureRestore = null;
-/** Ключ "x,y" → бонус в квантах (1..200). */
+/** Ключ "x,y" → бонус в квантах (1..50). */
 let treasureQuantByCell = new Map();
 /** Уже выданные клады по ключу клетки. */
 let treasureClaimedKeys = new Set();
@@ -817,7 +817,6 @@ const TEAM_SPAWN_SIZE = 6;
 const TEAM_SPAWN_GAP = 1;
 
 /** Премиум «военная база»: макс. на команду, кулдаун между развёртываниями. */
-const MAX_MILITARY_BASES_PER_TEAM = 2;
 const MILITARY_BASE_COOLDOWN_MS = 120_000;
 /** Мин. зазор (Chebyshev между границами 6×6) от своей главной базы. */
 const MILITARY_MIN_EDGE_GAP_OWN_MAIN = 4;
@@ -1513,8 +1512,6 @@ function rebuildLandFromRound(ri) {
   const h = w;
   gridW = w;
   gridH = h;
-  nukeBombUsesByPlayerThisRound.clear();
-
   if (!baseRegion360 || baseRegion360.length !== BASE_GRID * BASE_GRID) {
     landGrid = null;
     playableGrid = null;
@@ -1624,7 +1621,7 @@ function regenerateMapTreasures() {
     if (Number.isFinite(n) && n >= 0) target = n;
   }
   if (!Number.isFinite(target) || target <= 0) {
-    target = Math.min(900, Math.max(150, Math.floor(playable * 0.006)));
+    target = Math.min(180, Math.max(30, Math.floor(playable * 0.0012)));
   }
   target = Math.min(target | 0, playable);
   if (target <= 0) return;
@@ -1637,7 +1634,7 @@ function applyTreasuresAfterLandRebuild() {
     treasureClaimedKeys = new Set();
     for (const [ks, v] of Object.entries(pendingTreasureRestore.mapTreasures)) {
       const q = Number(v);
-      if (!Number.isFinite(q) || q < 1 || q > 200) continue;
+      if (!Number.isFinite(q) || q < 1 || q > 50) continue;
       const parts = String(ks).split(",");
       const sx = Number(parts[0]);
       const sy = Number(parts[1]);
@@ -1919,11 +1916,6 @@ let quantumFarmLayouts = [];
 let quantumFarmOwnerPrev = [];
 let quantumFarmIncomeTickSeq = 0;
 
-/** Тактическая бомба: не больше N на игрока за текущую карту (сброс при rebuildLandFromRound). */
-const NUKE_BOMB_MAX_PER_PLAYER_PER_MAP = 2;
-/** @type {Map<string, number>} */
-let nukeBombUsesByPlayerThisRound = new Map();
-
 /** Всегда число (0 = пусто/битые данные), чтобы не ломать повторные удары по флагу из‑за string vs number в JSON/Redis. */
 function pixelTeam(val) {
   if (val && typeof val === "object") return Number(val.teamId) | 0;
@@ -2182,14 +2174,14 @@ function applyPlannedCapture(pk, tid, planned) {
  * @param {string} pk
  * @param {string} cellKey "x,y"
  * @param {boolean} [deferRoundStateSave] при true — не вызывать saveRoundState (пакет в claimTreasuresInPlannedCells)
- * @returns {Promise<number>} кванты 1..200 или 0
+ * @returns {Promise<number>} кванты 1..50 или 0
  */
 async function tryClaimMapTreasureForPlayer(pk, cellKey, deferRoundStateSave) {
   const key = typeof cellKey === "string" ? cellKey.trim() : "";
   if (!key || !pk) return 0;
   if (!treasureQuantByCell.has(key) || treasureClaimedKeys.has(key)) return 0;
   const tq = treasureQuantByCell.get(key) | 0;
-  if (tq < 1 || tq > 200) return 0;
+  if (tq < 1 || tq > 50) return 0;
   treasureClaimedKeys.add(key);
   if (!isDevUnlimitedWallet(pk)) {
     await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}` });
@@ -3202,10 +3194,6 @@ function validateMilitaryBasePlacement(teamId, x0, y0) {
   }
   const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
   if (!t) return { ok: false, reason: "no_team" };
-  const existing = getTeamMilitaryOutposts(t);
-  if (existing.length >= MAX_MILITARY_BASES_PER_TEAM) {
-    return { ok: false, reason: "military_max" };
-  }
   const reserved = allSpawnLikeRectsForConflict();
   for (let i = 0; i < reserved.length; i++) {
     const o = reserved[i];
@@ -4982,11 +4970,6 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "water" });
         return;
       }
-      const used = pk ? nukeBombUsesByPlayerThisRound.get(pk) | 0 : 0;
-      if (used >= NUKE_BOMB_MAX_PER_PLAYER_PER_MAP) {
-        safeSend(ws, { type: "purchaseError", reason: "nuke_limit_round" });
-        return;
-      }
       const protectedMask = buildBattleProtectedMask();
       const blast = computeNukeBombBlastCells(
         cx,
@@ -5025,7 +5008,6 @@ wss.on("connection", (ws, req) => {
       for (let i = 0; i < cleared.length; i++) {
         pixels.delete(`${cleared[i][0]},${cleared[i][1]}`);
       }
-      if (pk) nukeBombUsesByPlayerThisRound.set(pk, used + 1);
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "nuke_bomb", { deferSave: true });
       await walletStore.save();
       afterTerritoryMutation();

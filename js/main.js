@@ -806,7 +806,6 @@ let pendingMapAction = null;
 let mapHoverGx = -1;
 let mapHoverGy = -1;
 
-const CLIENT_MILITARY_MAX_BASES = 2;
 const CLIENT_MILITARY_GAP_OWN_MAIN = 4;
 const CLIENT_MILITARY_GAP_ENEMY_MAIN = 6;
 const CLIENT_SPAWN_RECT_GAP = 1;
@@ -3494,9 +3493,6 @@ function notifyPurchaseError(reason) {
     waiting_go: "Покупка сейчас недоступна (обновите клиент или дождитесь старта раунда).",
     nuke_no_effect:
       "Бомба не сработала: в зоне нет территории для очистки (или только защищённые базы 6×6).",
-    nuke_limit_round:
-      "Лимит тактических бомб на эту карту исчерпан (максимум 2 на игрока за раунд).",
-    military_max: "Лимит передовых баз для команды уже достигнут.",
     military_cooldown: "Перед следующим развёртыванием подождите (~2 мин).",
     military_occupied: "Нужна полностью свободная суша 6×6 без чужих пикселей.",
     military_water: "Нельзя разместить на воде.",
@@ -6850,9 +6846,6 @@ function validateClientMilitaryBasePreview(cx, cy) {
       if (!isClientPlayableCell(x, y)) return { ok: false, reason: "military_water" };
       if (pixels.has(`${x},${y}`)) return { ok: false, reason: "military_occupied" };
     }
-  }
-  if (clientMilitaryOutpostRects(tid).length >= CLIENT_MILITARY_MAX_BASES) {
-    return { ok: false, reason: "military_max" };
   }
   const reserved = clientAllSpawnLikeRectsForMilitaryPreview();
   for (let i = 0; i < reserved.length; i++) {
