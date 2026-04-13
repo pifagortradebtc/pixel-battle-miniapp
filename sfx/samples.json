@@ -14,7 +14,6 @@
     "seismic_after": "sfx/seismic-after.mp3",
     "quantum_connect": "sfx/quantum-connect.mp3",
     "quantum_disconnect": "sfx/quantum-disconnect.mp3",
-    "quantum_tick": "sfx/quantum-tick.mp3",
     "treasure": "sfx/treasure.mp3",
     "round_end": "sfx/round-end.mp3",
     "final_victory": "sfx/final-victory.mp3",

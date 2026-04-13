@@ -30,7 +30,6 @@ import {
   playBombExplosion,
   playQuantumConnect,
   playQuantumDisconnect,
-  playQuantumIncomeTick,
   playAlertBaseUnderAttack,
   playAlertLastCells,
   playAlertLastCell,
@@ -4036,7 +4035,6 @@ function refreshPassiveIncomeDisplays() {
 function playQuantumFarmIncomeClientFx(quants) {
   const q = quants | 0;
   if (q < 1 || spectatorMode) return;
-  playQuantumIncomeTick();
   const tid = myTeamId | 0;
   if (!tid) return;
   const tr = getVfxTransform();

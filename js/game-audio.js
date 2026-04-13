@@ -1168,16 +1168,6 @@ export function playQuantumDisconnect() {
   });
 }
 
-export function playQuantumIncomeTick() {
-  resumeAudioContext().then(() => {
-    if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
-    registerLowPrioritySfx();
-    if (playEventSample("quantum_tick", { bus: "sfx", gainMul: 0.72 })) return;
-    const now = ctx.currentTime;
-    playOscThrough("sine", 88, 102, 0.022, 0.055, sfxBus, now);
-  });
-}
-
 export function playAlertBaseUnderAttack() {
   resumeAudioContext().then(() => {
     if (!ctx || !alertBus || settings.muted) return;
