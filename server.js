@@ -1125,7 +1125,7 @@ function teamsForMeta() {
 
 const DYNAMIC_TEAMS_PATH = path.join(ROOT, "data", "dynamic-teams.json");
 
-/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, eliminated?: boolean }[]} */
+/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, eliminated?: boolean, createdByPlayerKey?: string }[]} */
 let dynamicTeams = [];
 let nextTeamId = 1;
 
@@ -1827,6 +1827,39 @@ const teamEffects = new Map();
 function pixelTeam(val) {
   if (val && typeof val === "object") return Number(val.teamId) | 0;
   return Number(val) | 0;
+}
+
+/**
+ * Все известные playerKey победившей команды для уведомления админам.
+ * В дуэли 1×1 teamMemberKeys иногда пуст — добираем из создателя команды, клеток pixels и открытых WS.
+ * @param {number} winnerTeamId
+ * @returns {Set<string>}
+ */
+function collectWinnerTeamPlayerKeys(winnerTeamId) {
+  const tid = winnerTeamId | 0;
+  const out = new Set();
+  const add = (raw) => {
+    const pk = sanitizePlayerKey(raw);
+    if (pk) out.add(pk);
+  };
+  const memberSet = teamMemberKeys.get(tid);
+  if (memberSet) {
+    for (const pk of memberSet) add(pk);
+  }
+  const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
+  if (dt && typeof dt.createdByPlayerKey === "string") add(dt.createdByPlayerKey);
+  for (const val of pixels.values()) {
+    if (pixelTeam(val) !== tid) continue;
+    if (val && typeof val === "object" && val.ownerPlayerKey) add(val.ownerPlayerKey);
+  }
+  if (wss) {
+    for (const c of wss.clients) {
+      if (c.readyState !== 1) continue;
+      if ((c.teamId | 0) !== tid) continue;
+      add(c.playerKey);
+    }
+  }
+  return out;
 }
 
 function cellSetsEqual(a, b) {
@@ -3586,9 +3619,7 @@ async function finalizeGameEnd(winnerRow) {
         : typeof winnerRow.percent === "number" && Number.isFinite(winnerRow.percent)
           ? winnerRow.percent
           : 0;
-    const winnerKeysSnapshot = teamMemberKeys.has(winnerTeamId)
-      ? new Set(teamMemberKeys.get(winnerTeamId))
-      : new Set();
+    const winnerKeysSnapshot = collectWinnerTeamPlayerKeys(winnerTeamId);
 
     eligibleTokenSet = new Set();
     winnerTokensByPlayerKey = {};
@@ -4132,6 +4163,7 @@ wss.on("connection", (ws, req) => {
         eliminated: false,
         spawnX0: spawn.x0,
         spawnY0: spawn.y0,
+        createdByPlayerKey: pkForColor || "",
       });
       saveDynamicTeams();
       paintTeamSpawnArea(id, spawn.x0, spawn.y0, pkForColor || "");
@@ -4747,8 +4779,10 @@ async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, winnerRow)
   const body =
     `Финал Pixel Battle\n` +
     `Победители: «${teamName}» — счёт ${sc} оч., доля доступных очков ${shareStr}%\n` +
-    `Участники победившей команды (${winnerPlayerKeys.size} чел.):\n\n` +
-    (lines.length ? lines.join("\n\n") : "(нет записанных участников — возможно, снимок был пуст)");
+    `Игроки команды-победителя (Telegram / playerKey), найдено: ${winnerPlayerKeys.size}\n\n` +
+    (lines.length
+      ? lines.join("\n\n")
+      : "(не удалось сопоставить playerKey — проверьте, что финалисты заходили из Telegram Mini App)");
   const text = body.slice(0, 4000);
   for (const adminId of TELEGRAM_ADMIN_IDS) {
     try {
