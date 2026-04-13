@@ -950,6 +950,17 @@ export function playMenuChoiceSfx() {
   });
 }
 
+/** Открытие меню: магазин, панель громкости, настройки команды. */
+export function playMenuOpenSfx() {
+  resumeAudioContext().then(() => {
+    if (!ctx || !uiBus || settings.muted) return;
+    if (playEventSample("menu_open", { bus: "ui", gainMul: 0.88 })) return;
+    const now = ctx.currentTime;
+    playFilteredNoiseBurst(uiBus, now, 0.024, 0.032, 480);
+    playOscThrough("sine", 165, 205, 0.026, 0.055, uiBus, now + 0.004);
+  });
+}
+
 export function playUiHover() {
   resumeAudioContext().then(() => {
     if (!ctx || !uiBus || settings.muted || !canPlayLowPrioritySfx()) return;
@@ -1490,6 +1501,7 @@ export function initGameAudio() {
     panel.hidden = !wasHidden;
     if (btn) btn.setAttribute("aria-expanded", wasHidden ? "true" : "false");
     if (!panel.hidden) {
+      playMenuOpenSfx();
       positionAudioPanel();
       syncUi();
     }

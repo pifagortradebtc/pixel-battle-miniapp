@@ -44,6 +44,7 @@ import {
   playBuffTeamSfx,
   playTerritoryExpand,
   playMenuChoiceSfx,
+  playMenuOpenSfx,
 } from "./game-audio.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
@@ -3084,6 +3085,7 @@ function setupCreateTeamUi() {
   });
   document.getElementById("crisis-cta-boost")?.addEventListener("click", () => {
     hideCrisisOverlay();
+    playMenuOpenSfx();
     const root = document.getElementById("shop-overlay");
     if (root) {
       root.querySelectorAll(".game-shop__tab").forEach((t) => {
@@ -3102,6 +3104,7 @@ function setupCreateTeamUi() {
   });
   document.getElementById("crisis-cta-team-recovery")?.addEventListener("click", () => {
     hideCrisisOverlay();
+    playMenuOpenSfx();
     const root = document.getElementById("shop-overlay");
     if (root) {
       root.querySelectorAll(".game-shop__tab").forEach((t) => {
@@ -3211,6 +3214,7 @@ function openTeamSettings() {
   if (teamSettingsName) teamSettingsName.value = t.name || "";
   if (teamSettingsEmojiInput) teamSettingsEmojiInput.value = t.emoji || "";
   syncEmojiPresetHighlight();
+  playMenuOpenSfx();
   teamSettingsOverlay.hidden = false;
 }
 
@@ -5337,6 +5341,7 @@ function setupEconomyUi() {
   });
 
   btnShop?.addEventListener("click", () => {
+    playMenuOpenSfx();
     resetShopPurchaseButtonsUi();
     if (shopOverlay) shopOverlay.hidden = false;
     const bal = document.getElementById("shop-display-balance");

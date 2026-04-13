@@ -17,6 +17,7 @@
  *   4×4 / 6×6 / 12×12 → territory-* → звуки кубов зон
  *   УДАР ПО БАЗЕ / Бомб.. / pixel step → base-hit, bomb, pixel-place
  *   выбор в меню → menu-select → стартовое меню (создать / вступить / выбор команды)
+ *   меню → menu-open → открытие магазина / панели звука / настроек команды
  *
  * Баффы: ориентир — имя файла (личный = личный, команда = команда), см. sfx/samples.json.
  */
@@ -57,6 +58,7 @@ const MAP = [
   ["Отрезание территории.mp3", "alert-territory-cut.mp3"],
   ["pixel step.mp3", "pixel-place.mp3"],
   ["выбор в меню.mp3", "menu-select.mp3"],
+  ["меню.mp3", "menu-open.mp3"],
 ];
 
 function tryCopy(fromName, toName) {
