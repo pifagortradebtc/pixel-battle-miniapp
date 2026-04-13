@@ -149,13 +149,8 @@ function applyBusGains() {
     alertBus.gain.value = ev * 1.06;
     ambientBus.gain.value = ev * 0.28;
   }
-  /* Полная тишина + меньше нагрузки в WebView: граф можно приостановить */
-  try {
-    if (ctx && settings.muted && ctx.state === "running") void ctx.suspend();
-    else if (ctx && !settings.muted && ctx.state === "suspended") void ctx.resume();
-  } catch {
-    /* ignore */
-  }
+  /* Тишина при mute только через gain (master → 0). Не вызываем ctx.suspend():
+ * после снятия mute в Telegram/WebView resume() часто не срабатывает без жеста — «все звуки пропали». */
 }
 
 /**
@@ -1553,6 +1548,12 @@ export function initGameAudio() {
   };
   document.body.addEventListener("pointerdown", resumeOnGesture, { passive: true });
   document.body.addEventListener("keydown", resumeOnGesture, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void resumeAudioContext();
+  });
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) void resumeAudioContext();
+  });
 
   const app = document.getElementById("app");
   if (app) {
