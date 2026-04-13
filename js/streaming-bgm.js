@@ -524,23 +524,31 @@ export class StreamingBgmDirector {
     const hot = this.aIsHot ? this.slotA : this.slotB;
 
     const pl = this.getGlobalPlaylist();
+    const multi = pl.length > 1;
     const sequentialAdvance =
-      this.usesGlobalPlaylist() && this.m.playlistOrder === "sequential" && pl.length > 1;
+      this.usesGlobalPlaylist() && this.m.playlistOrder === "sequential" && multi;
+    const randomAdvance = this.usesGlobalPlaylist() && this.m.playlistOrder === "random" && multi;
+    const advanceOnEnd = sequentialAdvance || randomAdvance;
 
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.loop = !sequentialAdvance;
+    src.loop = !advanceOnEnd;
     if (typeof track.loopStart === "number" && track.loopStart >= 0) src.loopStart = track.loopStart;
     if (typeof track.loopEnd === "number" && track.loopEnd > (track.loopStart || 0)) src.loopEnd = track.loopEnd;
 
-    if (sequentialAdvance) {
+    if (advanceOnEnd) {
       src.onended = () => {
         src.onended = null;
         if (!this.ctx) return;
         const list = this.getGlobalPlaylist();
         if (list.length < 2) return;
-        this.sequentialCursor = (this.sequentialCursor + 1) % list.length;
-        const next = pickTrackSequential(list, this.sequentialCursor);
+        let next = null;
+        if (sequentialAdvance) {
+          this.sequentialCursor = (this.sequentialCursor + 1) % list.length;
+          next = pickTrackSequential(list, this.sequentialCursor);
+        } else {
+          next = pickTrackExcluding(list, track.url);
+        }
         if (!next) return;
         const nextBuf = this.bufferByUrl.get(next.url);
         if (nextBuf) {
