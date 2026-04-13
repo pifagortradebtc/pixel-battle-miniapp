@@ -428,6 +428,8 @@ let seismicBannerHideTimer = null;
 let serverAnnouncementHideTimer = null;
 /** Автоскрытие алертов «база / последняя клетка» (мс). */
 const ALERT_AUTO_HIDE_MS = 2000;
+/** Макс. время показа верхних всплывающих плашек (не закрываем «Магазин» / «База» надолго). */
+const BANNER_MAX_VISIBLE_MS = 5000;
 const ALERT_SWIPE_MIN_PX = 44;
 const ALERT_FLY_OUT_PX = 180;
 
@@ -1234,10 +1236,11 @@ function showPlacementFeedback(text, severity, opts = {}) {
   const skipEventBanner = Object.prototype.hasOwnProperty.call(opts, "skipEventBanner")
     ? opts.skipEventBanner === true
     : !skipCooldownChrome;
-  const hideMs =
+  const rawHide =
     typeof opts.bannerDurationMs === "number" && Number.isFinite(opts.bannerDurationMs) && opts.bannerDurationMs > 0
       ? opts.bannerDurationMs
-      : 5600;
+      : 5000;
+  const hideMs = Math.min(rawHide, BANNER_MAX_VISIBLE_MS);
   let scheduleHide = false;
   if (placementFeedbackBannerEl && text && !skipEventBanner) {
     placementFeedbackBannerEl.textContent = text;
@@ -1591,6 +1594,10 @@ function applyClientTerritoryIsolationFromServer(payload) {
 
 function showTerritoryDramaBanner(text, durationMs = ALERT_AUTO_HIDE_MS, critical = false) {
   if (!territoryDramaBannerEl) return;
+  durationMs = Math.min(
+    typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0 ? durationMs : ALERT_AUTO_HIDE_MS,
+    BANNER_MAX_VISIBLE_MS
+  );
   const title = critical ? "LAST CELL" : "LAST 6 CELLS";
   const sub = String(text || "");
   if (territoryBannerHideTimer) {
@@ -1646,8 +1653,9 @@ function showServerAnnouncementBanner(text, durationMs = 5000) {
   }
   serverAnnouncementBannerEl.textContent = String(text || "");
   serverAnnouncementBannerEl.hidden = false;
-  const d =
+  const dRaw =
     typeof durationMs === "number" && !Number.isNaN(durationMs) && durationMs > 0 ? durationMs : 5000;
+  const d = Math.min(dRaw, BANNER_MAX_VISIBLE_MS);
   serverAnnouncementHideTimer = setTimeout(() => {
     serverAnnouncementHideTimer = null;
     hideServerAnnouncementBannerNow();
@@ -1660,6 +1668,12 @@ function showSeismicWarningBanner(
   durationMs = SEISMIC_WARNING_BANNER_MS
 ) {
   if (!seismicWarningBannerEl) return;
+  durationMs = Math.min(
+    typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0
+      ? durationMs
+      : SEISMIC_WARNING_BANNER_MS,
+    BANNER_MAX_VISIBLE_MS
+  );
   if (seismicBannerHideTimer) {
     clearTimeout(seismicBannerHideTimer);
     seismicBannerHideTimer = null;
@@ -3654,6 +3668,10 @@ function syncFlagCaptureStateFromMeta(flags) {
 function showFlagAlertBanner(text, durationMs = ALERT_AUTO_HIDE_MS) {
   const el = document.getElementById("flag-alert-banner");
   if (!el) return;
+  const hideAfter = Math.min(
+    typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0 ? durationMs : ALERT_AUTO_HIDE_MS,
+    BANNER_MAX_VISIBLE_MS
+  );
   const raw = String(text || "");
   let title = raw;
   let sub = "";
@@ -3683,7 +3701,7 @@ function showFlagAlertBanner(text, durationMs = ALERT_AUTO_HIDE_MS) {
   showFlagAlertBanner._hideTimer = setTimeout(() => {
     showFlagAlertBanner._hideTimer = null;
     hideFlagAlertBannerNow();
-  }, durationMs);
+  }, hideAfter);
 }
 
 function notifyPurchaseError(reason) {
@@ -3723,6 +3741,35 @@ function notifyPurchaseError(reason) {
 }
 
 const ROUND_END_BANNER_MS = 10 * 60 * 1000;
+/** «До конца раунда»: короткие всплытия при смене оценки минут, не висит всю декаду минут. */
+let roundEndHintLastMinuteBucket = /** @type {number | null} */ (null);
+let roundEndHintVisibleUntilMs = 0;
+
+function resetRoundEndHintToastState() {
+  roundEndHintLastMinuteBucket = null;
+  roundEndHintVisibleUntilMs = 0;
+}
+
+/**
+ * @param {number} leftMs
+ * @returns {{ show: boolean, minutes: number }}
+ */
+function computeRoundEndHintToast(leftMs) {
+  if (leftMs <= 0 || leftMs > ROUND_END_BANNER_MS) {
+    resetRoundEndHintToastState();
+    return { show: false, minutes: 0 };
+  }
+  const minutes = Math.max(1, Math.ceil(leftMs / 60000));
+  const now = Date.now();
+  if (roundEndHintLastMinuteBucket !== minutes) {
+    roundEndHintLastMinuteBucket = minutes;
+    roundEndHintVisibleUntilMs = now + BANNER_MAX_VISIBLE_MS;
+  }
+  if (now >= roundEndHintVisibleUntilMs) {
+    return { show: false, minutes };
+  }
+  return { show: true, minutes };
+}
 
 function computeLeaderboardGapHint() {
   if (myTeamId == null || !lastLeaderboardRows.length) return "";
@@ -3751,6 +3798,7 @@ function syncEventBanner() {
   const online = wantOnline && getWsUrl();
   if (!online || spectatorMode || gameFinishedMeta) {
     eventBannerEl.hidden = true;
+    resetRoundEndHintToastState();
     seismicPreviewClient = null;
     seismicAfterglowTremorUntilMs = 0;
     stopBoardSeismicShake();
@@ -3801,11 +3849,11 @@ function syncEventBanner() {
       seismicPreviewClient = null;
     }
     const leftR = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : 0;
-    if (leftR > 0 && leftR <= ROUND_END_BANNER_MS) {
+    const hintR = computeRoundEndHintToast(leftR);
+    if (hintR.show) {
       eventBannerEl.hidden = false;
       eventBannerEl.className = "event-banner event-banner--mini-round";
-      const m = Math.max(1, Math.ceil(leftR / 60000));
-      eventBannerEl.textContent = `⏱ До конца раунда · ещё ~${m} мин`;
+      eventBannerEl.textContent = `\u23f1 До конца раунда · ещё ~${hintR.minutes} мин`;
       return;
     }
     eventBannerEl.hidden = true;
@@ -3822,18 +3870,19 @@ function syncEventBanner() {
     seismicPreviewClient = null;
   }
   if (roundEndsAtMs == null) {
+    resetRoundEndHintToastState();
     eventBannerEl.hidden = true;
     return;
   }
   const left = roundEndsAtMs - Date.now();
-  if (left <= 0 || left > ROUND_END_BANNER_MS) {
+  const hint = computeRoundEndHintToast(left);
+  if (!hint.show) {
     eventBannerEl.hidden = true;
     return;
   }
   eventBannerEl.hidden = false;
   eventBannerEl.className = "event-banner";
-  const m = Math.max(1, Math.ceil(left / 60000));
-  eventBannerEl.textContent = `⏱ До конца раунда · ещё ~${m} мин`;
+  eventBannerEl.textContent = `\u23f1 До конца раунда · ещё ~${hint.minutes} мин`;
 }
 
 function syncClientCooldownFromWalletFields() {

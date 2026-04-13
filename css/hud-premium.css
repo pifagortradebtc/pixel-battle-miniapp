@@ -28,7 +28,8 @@
 /* ——— Leaderboard: glass HUD chip (not a solid panel) ——— */
 .lb-widget {
   position: absolute;
-  z-index: 12;
+  /* Выше полосы .event-banner-stack (z-index 50), чтобы рейтинг не прятался под плашками */
+  z-index: 60;
   /* Зазор от выреза и края WebView (Telegram iOS/Android) */
   left: max(4px, env(safe-area-inset-left, 0px));
   top: calc(var(--safe-top) + var(--toolbar-h) + 4px);
