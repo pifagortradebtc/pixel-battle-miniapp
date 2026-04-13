@@ -1958,6 +1958,8 @@ function checkDuelInstantWin(stats) {
   if (gamePaused || gameFinished || roundEnding || roundIndex !== 3) return;
   if (isWarmupPhaseNow()) return;
   const rows = stats?.rows || [];
+  /* Порог «доля очков ≥ 60%» при одной команде в stats даёт 100% (total = очки лидера) — первый создавший команду «побеждал» до выхода соперника. */
+  if (rows.length < 2) return;
   const top = rows[0];
   if (!top || typeof top.teamId !== "number") return;
   const total =
@@ -1966,6 +1968,22 @@ function checkDuelInstantWin(stats) {
       : 0;
   const sc = typeof top.score === "number" && Number.isFinite(top.score) ? top.score : 0;
   if (total > 0 && sc / total >= DUEL_INSTANT_WIN_SCORE_SHARE - 1e-9) {
+    void finalizeGameEnd(top);
+  }
+}
+
+/** Дуэль: соперник выбыл по территории — один выживший в stats, при этом в dynamicTeams есть устранённые команды. */
+function checkDuelWinByElimination(stats) {
+  if (!isClusterLeader()) return;
+  if (gamePaused || gameFinished || roundEnding || roundIndex !== 3) return;
+  if (isWarmupPhaseNow()) return;
+  const rows = stats?.rows || [];
+  if (rows.length !== 1) return;
+  const top = rows[0];
+  if (!top || typeof top.teamId !== "number") return;
+  const alive = dynamicTeams.filter((t) => !t.solo && !t.eliminated);
+  const eliminated = dynamicTeams.filter((t) => !t.solo && t.eliminated);
+  if (alive.length === 1 && eliminated.length >= 1) {
     void finalizeGameEnd(top);
   }
 }
@@ -3998,6 +4016,7 @@ function afterTerritoryMutation() {
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
   checkDuelInstantWin(st);
+  checkDuelWinByElimination(st);
   scanMilitaryOutpostsVacancyAndExpire(Date.now());
 }
 
@@ -5099,6 +5118,7 @@ setInterval(() => {
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
   checkDuelInstantWin(st);
+  checkDuelWinByElimination(st);
   scheduleStatsBroadcast();
 }, 250);
 
