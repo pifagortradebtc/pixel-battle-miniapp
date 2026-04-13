@@ -531,6 +531,16 @@ let treasureQuantByCell = new Map();
 /** Уже выданные клады по ключу клетки. */
 let treasureClaimedKeys = new Set();
 
+/** Координаты неподобранных кладов для карты (без раскрытия количества квантов). */
+function buildTreasureSpotsForMeta() {
+  const out = [];
+  for (const k of treasureQuantByCell.keys()) {
+    if (treasureClaimedKeys.has(k)) continue;
+    out.push(k);
+  }
+  return out;
+}
+
 function sanitizeTeamName(s) {
   return String(s ?? "")
     .replace(/[\u0000-\u001F<>]/g, "")
@@ -3603,6 +3613,7 @@ async function sendConnectionMeta(ws) {
     flags: buildFlagsSnapshot(),
     tournamentTimeScale: getTournamentTimeScale(),
     territoryIsolation: buildTerritoryIsolationGroupsPayload(isoNow),
+    treasureSpots: buildTreasureSpotsForMeta(),
   });
   safeSend(ws, await buildWalletPayload(ws));
 }
@@ -4695,6 +4706,7 @@ wss.on("connection", (ws, req) => {
             await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}` });
           }
           saveRoundState();
+          broadcast({ type: "treasureClaimed", key });
         }
       }
 

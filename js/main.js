@@ -349,6 +349,9 @@ let prevWalletQuant = null;
 /** @type {Map<string, number>} key "x,y" -> teamId (онлайн) или индекс палитры (локально) */
 const pixels = new Map();
 
+/** Неподобранные клады: ключи "x,y" (сервер не присылает количество квантов). */
+const treasureSpotKeys = new Set();
+
 /** @type {Uint8Array | null} id страны на клетку, 0 = океан */
 let regionCells = null;
 /** @type {Uint8Array | null} RGB шаблон из regions-*.json (длина gridW*gridH*3), если есть — рисуем постер до закраски команд */
@@ -2931,12 +2934,30 @@ function syncDiscussionChatLinks() {
   if (toolbarDiscussionLink) toolbarDiscussionLink.href = url || "#";
 }
 
+function syncTreasureSpotsFromMeta(msg) {
+  if (!Array.isArray(msg.treasureSpots)) return;
+  const gw = typeof msg.grid?.w === "number" ? msg.grid.w | 0 : gridW;
+  const gh = typeof msg.grid?.h === "number" ? msg.grid.h | 0 : gridH;
+  treasureSpotKeys.clear();
+  for (let i = 0; i < msg.treasureSpots.length; i++) {
+    const s = msg.treasureSpots[i];
+    if (typeof s !== "string") continue;
+    const m = /^(\d+),(\d+)$/.exec(s.trim());
+    if (!m) continue;
+    const x = Number(m[1]);
+    const y = Number(m[2]);
+    if (x >= 0 && x < gw && y >= 0 && y < gh) treasureSpotKeys.add(`${x},${y}`);
+  }
+  scheduleDraw({ full: true });
+}
+
 function onMeta(msg) {
   discussionChatUrl =
     typeof msg.discussionChatUrl === "string" && msg.discussionChatUrl.trim()
       ? msg.discussionChatUrl.trim()
       : "";
   syncDiscussionChatLinks();
+  syncTreasureSpotsFromMeta(msg);
 
   teamsMeta = msg.teams || [];
   invalidateTeamColorByIdCache();
@@ -5597,6 +5618,12 @@ function connectWs() {
       applyWalletFromServer(msg);
       return;
     }
+    if (msg.type === "treasureClaimed") {
+      const k = typeof msg.key === "string" ? msg.key.trim() : "";
+      if (k) treasureSpotKeys.delete(k);
+      scheduleDraw({ full: true });
+      return;
+    }
     if (msg.type === "treasureFound") {
       const q = typeof msg.quant === "number" ? msg.quant | 0 : 0;
       if (q > 0) showTreasureFoundOverlay(q);
@@ -6450,6 +6477,23 @@ function draw(time = performance.now(), drawOpts = {}) {
         } else {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
           ctx.fillRect(px, py, cw, ch);
+        }
+      }
+
+      if (online && treasureSpotKeys.has(key)) {
+        const d = Math.max(2, Math.min(cw, ch) * 0.26);
+        const margin = Math.max(1, cell * 0.07);
+        const tcx = px + cw - margin - d * 0.5;
+        const tcy = py + ch - margin - d * 0.5;
+        const pulseT = lite ? 1 : 0.62 + 0.38 * Math.sin(time * 0.0028);
+        ctx.fillStyle = `rgba(255, 210, 55, ${0.78 * pulseT + 0.18})`;
+        ctx.beginPath();
+        ctx.arc(tcx, tcy, d * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        if (!lite) {
+          ctx.strokeStyle = "rgba(95, 55, 8, 0.62)";
+          ctx.lineWidth = Math.max(0.75, cell * 0.038);
+          ctx.stroke();
         }
       }
     }
