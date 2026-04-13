@@ -2074,9 +2074,16 @@ a.overlay__btn {
   pointer-events: none;
 }
 
-/* Смахиваемые алерты остаются интерактивными */
+/* Смахиваемые плашки: жест вверх / влево / вправо (см. attachSwipeDismissSlot в main.js) */
 .event-banner.event-banner--swipe-dismiss {
   pointer-events: auto;
+  touch-action: pan-x pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.event-banner.event-banner--swipe-dismiss.is-alert-fly-out {
+  pointer-events: none;
 }
 
 .event-banner__sub {

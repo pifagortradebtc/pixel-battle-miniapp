@@ -433,11 +433,15 @@ const BANNER_MAX_VISIBLE_MS = 5000;
 const ALERT_SWIPE_MIN_PX = 44;
 const ALERT_FLY_OUT_PX = 180;
 
-/** @type {{ territory: { cleanup: (() => void) | null }; flag: { cleanup: (() => void) | null }; seismic: { cleanup: (() => void) | null } }} */
+/** @type {{ territory: { cleanup: (() => void) | null }; flag: { cleanup: (() => void) | null }; seismic: { cleanup: (() => void) | null }; placement: { cleanup: (() => void) | null }; serverSay: { cleanup: (() => void) | null }; eventBanner: { cleanup: (() => void) | null }; teamBuff: { cleanup: (() => void) | null } }} */
 const swipeDismissSlots = {
   territory: { cleanup: null },
   flag: { cleanup: null },
   seismic: { cleanup: null },
+  placement: { cleanup: null },
+  serverSay: { cleanup: null },
+  eventBanner: { cleanup: null },
+  teamBuff: { cleanup: null },
 };
 
 function detachSwipeDismissSlot(slot) {
@@ -495,7 +499,7 @@ function flyOutDismissibleBanner(el, dirX, dirY, hideNow) {
 
 /**
  * Смахивание влево / вправо / вверх (вниз игнорируем).
- * @param {"territory" | "flag" | "seismic"} slot
+ * @param {"territory" | "flag" | "seismic" | "placement" | "serverSay" | "eventBanner" | "teamBuff"} slot
  */
 function attachSwipeDismissSlot(slot, el, hideNow) {
   detachSwipeDismissSlot(slot);
@@ -553,6 +557,14 @@ function attachSwipeDismissSlot(slot, el, hideNow) {
     if (slot === "seismic" && seismicBannerHideTimer) {
       clearTimeout(seismicBannerHideTimer);
       seismicBannerHideTimer = null;
+    }
+    if (slot === "placement" && placementFeedbackHideTimer) {
+      clearTimeout(placementFeedbackHideTimer);
+      placementFeedbackHideTimer = null;
+    }
+    if (slot === "serverSay" && serverAnnouncementHideTimer) {
+      clearTimeout(serverAnnouncementHideTimer);
+      serverAnnouncementHideTimer = null;
     }
     flyOutDismissibleBanner(el, ux, uy, hideNow);
   };
@@ -1210,12 +1222,15 @@ function hidePlacementFeedbackBanner() {
     clearTimeout(placementFeedbackHideTimer);
     placementFeedbackHideTimer = null;
   }
+  detachSwipeDismissSlot("placement");
   if (placementFeedbackBannerEl) {
+    resetDismissibleBannerNode(placementFeedbackBannerEl);
     placementFeedbackBannerEl.hidden = true;
     placementFeedbackBannerEl.classList.remove(
       "event-banner--feedback-warn",
       "event-banner--feedback-error",
-      "event-banner--feedback-success"
+      "event-banner--feedback-success",
+      "event-banner--swipe-dismiss"
     );
   }
   if (cooldownLabel) {
@@ -1243,11 +1258,15 @@ function showPlacementFeedback(text, severity, opts = {}) {
   const hideMs = Math.min(rawHide, BANNER_MAX_VISIBLE_MS);
   let scheduleHide = false;
   if (placementFeedbackBannerEl && text && !skipEventBanner) {
+    detachSwipeDismissSlot("placement");
+    resetDismissibleBannerNode(placementFeedbackBannerEl);
     placementFeedbackBannerEl.textContent = text;
     placementFeedbackBannerEl.hidden = false;
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-warn", severity === "warn");
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-error", severity === "error");
     placementFeedbackBannerEl.classList.toggle("event-banner--feedback-success", severity === "success" || severity === "ok");
+    placementFeedbackBannerEl.classList.add("event-banner--swipe-dismiss");
+    attachSwipeDismissSlot("placement", placementFeedbackBannerEl, hidePlacementFeedbackBanner);
     scheduleHide = true;
   }
   if (cooldownLabel && text && !skipCooldownChrome) {
@@ -1641,8 +1660,11 @@ function hideServerAnnouncementBannerNow() {
     clearTimeout(serverAnnouncementHideTimer);
     serverAnnouncementHideTimer = null;
   }
+  detachSwipeDismissSlot("serverSay");
+  resetDismissibleBannerNode(serverAnnouncementBannerEl);
   serverAnnouncementBannerEl.hidden = true;
   serverAnnouncementBannerEl.textContent = "";
+  serverAnnouncementBannerEl.classList.remove("event-banner--swipe-dismiss");
 }
 
 function showServerAnnouncementBanner(text, durationMs = 5000) {
@@ -1651,8 +1673,12 @@ function showServerAnnouncementBanner(text, durationMs = 5000) {
     clearTimeout(serverAnnouncementHideTimer);
     serverAnnouncementHideTimer = null;
   }
+  detachSwipeDismissSlot("serverSay");
+  resetDismissibleBannerNode(serverAnnouncementBannerEl);
   serverAnnouncementBannerEl.textContent = String(text || "");
   serverAnnouncementBannerEl.hidden = false;
+  serverAnnouncementBannerEl.classList.add("event-banner--swipe-dismiss");
+  attachSwipeDismissSlot("serverSay", serverAnnouncementBannerEl, hideServerAnnouncementBannerNow);
   const dRaw =
     typeof durationMs === "number" && !Number.isNaN(durationMs) && durationMs > 0 ? durationMs : 5000;
   const d = Math.min(dRaw, BANNER_MAX_VISIBLE_MS);
@@ -3744,10 +3770,86 @@ const ROUND_END_BANNER_MS = 10 * 60 * 1000;
 /** «До конца раунда»: короткие всплытия при смене оценки минут, не висит всю декаду минут. */
 let roundEndHintLastMinuteBucket = /** @type {number | null} */ (null);
 let roundEndHintVisibleUntilMs = 0;
+/** После смаха «до конца раунда» не показываем ту же минуту снова, пока не истечёт окно. */
+let eventBannerDismissedUntilMs = 0;
+let eventBannerDismissedMinuteBucket = /** @type {number | null} */ (null);
+/** Командный бафф: ключ `${until}|${sec}` и время, до которого не показываем после смаха. */
+let teamBuffSwipeSuppressUntilMs = 0;
+let teamBuffSwipeSuppressKey = "";
 
 function resetRoundEndHintToastState() {
   roundEndHintLastMinuteBucket = null;
   roundEndHintVisibleUntilMs = 0;
+  eventBannerDismissedUntilMs = 0;
+  eventBannerDismissedMinuteBucket = null;
+}
+
+function eventBannerRoundHintDismissalBlocks(minutes) {
+  return (
+    eventBannerDismissedMinuteBucket != null &&
+    minutes === eventBannerDismissedMinuteBucket &&
+    Date.now() < eventBannerDismissedUntilMs
+  );
+}
+
+function hideEventBannerRoundHintSwipe() {
+  if (!eventBannerEl) return;
+  const left = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : 0;
+  const m = Math.max(1, Math.ceil(left / 60000));
+  eventBannerDismissedMinuteBucket = m;
+  eventBannerDismissedUntilMs = Date.now() + 75000;
+  detachSwipeDismissSlot("eventBanner");
+  resetDismissibleBannerNode(eventBannerEl);
+  try {
+    delete eventBannerEl.dataset.roundHintTxt;
+  } catch {
+    /* ignore */
+  }
+  eventBannerEl.hidden = true;
+}
+
+function clearEventBannerRoundHintVisual() {
+  if (!eventBannerEl) return;
+  detachSwipeDismissSlot("eventBanner");
+  resetDismissibleBannerNode(eventBannerEl);
+  try {
+    delete eventBannerEl.dataset.roundHintTxt;
+  } catch {
+    /* ignore */
+  }
+  eventBannerEl.hidden = true;
+}
+
+function clearTeamBuffBannerVisual() {
+  if (!teamBuffBannerEl) return;
+  teamBuffSwipeSuppressUntilMs = 0;
+  teamBuffSwipeSuppressKey = "";
+  detachSwipeDismissSlot("teamBuff");
+  resetDismissibleBannerNode(teamBuffBannerEl);
+  try {
+    delete teamBuffBannerEl.dataset.buffBannerKey;
+    delete teamBuffBannerEl.dataset.buffUntil;
+  } catch {
+    /* ignore */
+  }
+  teamBuffBannerEl.hidden = true;
+}
+
+function hideTeamBuffBannerSwipe() {
+  if (!teamBuffBannerEl) return;
+  teamBuffSwipeSuppressKey = teamBuffBannerEl.dataset.buffBannerKey || "";
+  const u = Number(teamBuffBannerEl.dataset.buffUntil);
+  teamBuffSwipeSuppressUntilMs =
+    Number.isFinite(u) && u > Date.now() ? u : Date.now() + 90000;
+  detachSwipeDismissSlot("teamBuff");
+  resetDismissibleBannerNode(teamBuffBannerEl);
+  try {
+    delete teamBuffBannerEl.dataset.buffBannerKey;
+    delete teamBuffBannerEl.dataset.buffUntil;
+  } catch {
+    /* ignore */
+  }
+  teamBuffBannerEl.hidden = true;
 }
 
 /**
@@ -3797,7 +3899,7 @@ function syncEventBanner() {
   if (!eventBannerEl) return;
   const online = wantOnline && getWsUrl();
   if (!online || spectatorMode || gameFinishedMeta) {
-    eventBannerEl.hidden = true;
+    clearEventBannerRoundHintVisual();
     resetRoundEndHintToastState();
     seismicPreviewClient = null;
     seismicAfterglowTremorUntilMs = 0;
@@ -3850,19 +3952,27 @@ function syncEventBanner() {
     }
     const leftR = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : 0;
     const hintR = computeRoundEndHintToast(leftR);
-    if (hintR.show) {
+    if (hintR.show && !eventBannerRoundHintDismissalBlocks(hintR.minutes)) {
+      const txt = `\u23f1 До конца раунда · ещё ~${hintR.minutes} мин`;
+      const needAttach = eventBannerEl.hidden || eventBannerEl.dataset.roundHintTxt !== txt;
       eventBannerEl.hidden = false;
-      eventBannerEl.className = "event-banner event-banner--mini-round";
-      eventBannerEl.textContent = `\u23f1 До конца раунда · ещё ~${hintR.minutes} мин`;
+      eventBannerEl.className = "event-banner event-banner--mini-round event-banner--swipe-dismiss";
+      eventBannerEl.textContent = txt;
+      eventBannerEl.dataset.roundHintTxt = txt;
+      if (needAttach) {
+        detachSwipeDismissSlot("eventBanner");
+        resetDismissibleBannerNode(eventBannerEl);
+        attachSwipeDismissSlot("eventBanner", eventBannerEl, hideEventBannerRoundHintSwipe);
+      }
       return;
     }
-    eventBannerEl.hidden = true;
+    clearEventBannerRoundHintVisual();
     return;
   }
 
   if (ge && ge.active && ge.title && typeof ge.until === "number" && ge.until > Date.now()) {
     /* Активное событие боя: заголовок и таймер только в #event-hud-dock, без закреплённой верхней «золотой» плашки. */
-    eventBannerEl.hidden = true;
+    clearEventBannerRoundHintVisual();
     eventBannerEl.textContent = "";
     return;
   }
@@ -3871,18 +3981,26 @@ function syncEventBanner() {
   }
   if (roundEndsAtMs == null) {
     resetRoundEndHintToastState();
-    eventBannerEl.hidden = true;
+    clearEventBannerRoundHintVisual();
     return;
   }
   const left = roundEndsAtMs - Date.now();
   const hint = computeRoundEndHintToast(left);
-  if (!hint.show) {
-    eventBannerEl.hidden = true;
+  if (!hint.show || eventBannerRoundHintDismissalBlocks(hint.minutes)) {
+    clearEventBannerRoundHintVisual();
     return;
   }
+  const txt = `\u23f1 До конца раунда · ещё ~${hint.minutes} мин`;
+  const needAttach = eventBannerEl.hidden || eventBannerEl.dataset.roundHintTxt !== txt;
   eventBannerEl.hidden = false;
-  eventBannerEl.className = "event-banner";
-  eventBannerEl.textContent = `\u23f1 До конца раунда · ещё ~${hint.minutes} мин`;
+  eventBannerEl.className = "event-banner event-banner--swipe-dismiss";
+  eventBannerEl.textContent = txt;
+  eventBannerEl.dataset.roundHintTxt = txt;
+  if (needAttach) {
+    detachSwipeDismissSlot("eventBanner");
+    resetDismissibleBannerNode(eventBannerEl);
+    attachSwipeDismissSlot("eventBanner", eventBannerEl, hideEventBannerRoundHintSwipe);
+  }
 }
 
 function syncClientCooldownFromWalletFields() {
@@ -4256,26 +4374,52 @@ function syncTeamBuffBanner() {
   if (!teamBuffBannerEl) return;
   const online = wantOnline && getWsUrl();
   if (!online || spectatorMode || gameFinishedMeta || !walletState || myTeamId == null) {
-    teamBuffBannerEl.hidden = true;
+    clearTeamBuffBannerVisual();
     return;
   }
   const te = walletState.teamEffects;
   if (!te || (typeof te.teamId === "number" && te.teamId !== myTeamId)) {
-    teamBuffBannerEl.hidden = true;
+    clearTeamBuffBannerVisual();
     return;
   }
   const until = typeof te.teamRecoveryUntil === "number" ? te.teamRecoveryUntil : 0;
   const now = Date.now();
   if (until <= now) {
-    teamBuffBannerEl.hidden = true;
+    clearTeamBuffBannerVisual();
     return;
   }
   const secRaw = te.teamRecoverySec;
   const sec =
     typeof secRaw === "number" && Number.isFinite(secRaw) && secRaw >= 0 ? secRaw : BASE_ACTION_COOLDOWN_SEC;
+  const buffKey = `${until}|${sec}`;
+  if (teamBuffSwipeSuppressKey === buffKey && now < teamBuffSwipeSuppressUntilMs) {
+    detachSwipeDismissSlot("teamBuff");
+    resetDismissibleBannerNode(teamBuffBannerEl);
+    try {
+      delete teamBuffBannerEl.dataset.buffBannerKey;
+      delete teamBuffBannerEl.dataset.buffUntil;
+    } catch {
+      /* ignore */
+    }
+    teamBuffBannerEl.hidden = true;
+    return;
+  }
+  if (teamBuffSwipeSuppressKey !== buffKey || now >= teamBuffSwipeSuppressUntilMs) {
+    teamBuffSwipeSuppressKey = "";
+    teamBuffSwipeSuppressUntilMs = 0;
+  }
   const left = until - now;
+  const needAttach = teamBuffBannerEl.hidden || teamBuffBannerEl.dataset.buffBannerKey !== buffKey;
   teamBuffBannerEl.hidden = false;
-  teamBuffBannerEl.textContent = `👥 Командное усиление · пиксель каждые ${sec} с · ещё ${formatBuffRemainingMs(left)}`;
+  teamBuffBannerEl.className = "event-banner event-banner--team event-banner--swipe-dismiss";
+  teamBuffBannerEl.textContent = `👥️ Командное усиление · пиксель каждые ${sec} с · ещё ${formatBuffRemainingMs(left)}`;
+  teamBuffBannerEl.dataset.buffBannerKey = buffKey;
+  teamBuffBannerEl.dataset.buffUntil = String(until);
+  if (needAttach) {
+    detachSwipeDismissSlot("teamBuff");
+    resetDismissibleBannerNode(teamBuffBannerEl);
+    attachSwipeDismissSlot("teamBuff", teamBuffBannerEl, hideTeamBuffBannerSwipe);
+  }
 }
 
 function updateActiveBuffBars() {
