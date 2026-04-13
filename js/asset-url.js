@@ -1,8 +1,12 @@
 /**
- * База для статики (sfx/, music/), когда приложение открыто не с корня домена
- * (например /miniapp или /repo-name без завершающего слэша).
- * new URL("sfx/x", "https://host/path") даёт https://host/sfx/x — неверно;
- * нужно https://host/path/sfx/x или https://host/path/…
+ * Абсолютные URL для sfx/, music/.
+ *
+ * Раньше база бралась из window.location — в мини-приложениях (Telegram и др.)
+ * pathname часто не совпадает с реальным каталогом статики, и fetch уходит на
+ * неверный путь → 404 → остаются только процедурные звуки.
+ *
+ * Основной способ: путь относительно этого ES-модуля (лежит в js/), т.е. на
+ * уровень выше — корень приложения рядом с index.html.
  */
 
 /**
@@ -11,11 +15,19 @@
  */
 export function resolvePublicAssetUrl(relPath) {
   const clean = String(relPath || "").replace(/^\/+/, "");
-  let pathname = "";
+  if (!clean) return clean;
+
+  try {
+    return new URL(`../${clean}`, import.meta.url).href;
+  } catch {
+    /* ниже — запасной вариант */
+  }
+
+  let pathname = "/";
   try {
     pathname = new URL(window.location.href).pathname || "/";
   } catch {
-    pathname = "/";
+    /* keep default */
   }
   let basePath = pathname;
   if (!basePath.endsWith("/")) {
