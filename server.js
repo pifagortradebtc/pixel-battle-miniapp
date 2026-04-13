@@ -642,6 +642,17 @@ function setEligibleKeysFromWinnerTeam(teamId, maxKeys) {
   }
 }
 
+/**
+ * Дуэль 1×1: в допуск обязаны попасть оба игрока победившей пары.
+ * `teamMemberKeys` после боя бывает неполным (один ключ) — добираем создателя, владельцев клеток и онлайн WS
+ * (см. collectWinnerTeamPlayerKeys).
+ */
+function setEligibleKeysForDuelFromWinningTeam(teamId) {
+  const keys = [...collectWinnerTeamPlayerKeys(teamId | 0)].map(sanitizePlayerKey).filter(Boolean);
+  keys.sort();
+  eligiblePlayerKeys = new Set(keys.slice(0, 2));
+}
+
 function isPlayerKeyEligibleForCurrentRound(pk) {
   const k = sanitizePlayerKey(pk);
   if (!k) return false;
@@ -4797,7 +4808,7 @@ async function advanceToDuelRound(winnerRow) {
         : typeof winnerRow.percent === "number"
           ? winnerRow.percent
           : 0;
-    setEligibleKeysFromWinnerTeam(winnerTeamId, 2);
+    setEligibleKeysForDuelFromWinningTeam(winnerTeamId);
 
     void notifyTournamentStageAdvancersTelegram({
       stageTitle: "Финал команд завершён",
