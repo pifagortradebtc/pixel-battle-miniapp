@@ -46,6 +46,7 @@ import {
   playMenuChoiceSfx,
   playMenuOpenSfx,
 } from "./game-audio.js";
+import { subscribeStreamingBgmResync } from "./streaming-bgm.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
   getCurrentCooldownMs,
@@ -9286,6 +9287,7 @@ async function bootstrap() {
   await loadRegions();
   loadFromStorage();
   initGameAudio();
+  subscribeStreamingBgmResync(() => syncDynamicBgmFromMain());
   initEventPresentation();
   migrateLegacySessionStorage();
   clearSoloFromSession();

@@ -22,6 +22,28 @@ export const BGM_PHASE = /** @type {const} */ ({
 /** @type {Set<string>} */
 const GAMEPLAY_PHASES = new Set(["calm", "tension", "battle", "critical"]);
 
+/** @type {Set<() => void>} */
+const streamingBgmResyncListeners = new Set();
+
+/**
+ * После появления декодированных буферов нужно снова вызвать sync (иначе первый sync
+ * при пустом плейлисте или до decode случайного трека так и оставляет тишину).
+ */
+export function subscribeStreamingBgmResync(cb) {
+  streamingBgmResyncListeners.add(cb);
+  return () => streamingBgmResyncListeners.delete(cb);
+}
+
+function emitStreamingBgmResync() {
+  for (const fn of streamingBgmResyncListeners) {
+    try {
+      fn();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /**
  * @typedef {{
  *   crossfadeSec: number;
@@ -253,6 +275,7 @@ export class StreamingBgmDirector {
         const ab = await r.arrayBuffer();
         const buf = await this.ctx.decodeAudioData(ab.slice(0));
         this.bufferByUrl.set(url, buf);
+        emitStreamingBgmResync();
       } catch {
         /* skip broken file */
       }
@@ -457,11 +480,15 @@ export class StreamingBgmDirector {
       pick = pickTrackExcluding(tracks, lastHot);
     }
     if (!pick) return false;
-    const buf = this.bufferByUrl.get(pick.url);
+    let buf = this.bufferByUrl.get(pick.url);
     if (!buf) {
       void this.loadManifestAndBuffers();
-      return false;
+      const alt = tracks.find((t) => t && t.url && this.bufferByUrl.has(t.url));
+      if (!alt) return false;
+      pick = alt;
+      buf = this.bufferByUrl.get(pick.url);
     }
+    if (!buf) return false;
 
     if (this.phase === effectivePhase && (this.aIsHot ? this.srcA : this.srcB)) {
       this.applyPreRoundGain(opts.preRoundSecondsLeft);
