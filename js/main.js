@@ -5108,7 +5108,12 @@ function isQuickBuyEntryBlocked(entry) {
   if (!walletState) return true;
   if (!walletState.devUnlimited) {
     const st = walletState.tournamentStage || "MASS_BATTLE";
-    if (st === "DUEL" || st === "GRAND_FINAL") return true;
+    if (st === "GRAND_FINAL") return true;
+    if (st === "DUEL") {
+      const recovery =
+        entry.action === "personalRecovery" || entry.action === "teamRecovery";
+      if (!recovery) return true;
+    }
   }
   if (entry.action === "teamRecovery" && myTeamId == null) return true;
   if (
@@ -5434,18 +5439,21 @@ function updateShopAvailability() {
     MASS_BATTLE: "",
     SEMI_FINAL: "",
     FINAL: "",
-    DUEL: "Дуэль: покупки отключены.",
+    DUEL: "Дуэль: только ускорение пикселя (личное и командное). Зоны и тактика отключены.",
     GRAND_FINAL: "Наблюдение: покупки отключены.",
   };
   const msg = Object.prototype.hasOwnProperty.call(hints, st) ? hints[st] : st;
   shopStageHint.textContent = msg;
   shopStageHint.hidden = !msg;
-  const dis =
-    walletState.devUnlimited === true
-      ? false
-      : st === "GRAND_FINAL" || st === "DUEL" || spectatorMode;
   document.querySelectorAll(".shop-btn").forEach((btn) => {
-    btn.disabled = !!dis || shopPurchaseUiLock;
+    const action = btn.dataset.action || "";
+    const recovery = action === "personalRecovery" || action === "teamRecovery";
+    let blocked = !!shopPurchaseUiLock;
+    if (walletState.devUnlimited !== true) {
+      if (st === "GRAND_FINAL" || spectatorMode) blocked = true;
+      else if (st === "DUEL" && !recovery) blocked = true;
+    }
+    btn.disabled = blocked;
   });
   const effEl = document.getElementById("shop-effective-recovery-hint");
   if (effEl) {

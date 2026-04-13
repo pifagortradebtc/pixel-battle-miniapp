@@ -19,6 +19,7 @@ import {
   getEffectiveRecoverySec,
   quantToUsdt,
   stageAllows,
+  stageAllowsRecoveryPurchases,
   tournamentStage,
 } from "./lib/tournament-economy.js";
 import { createWalletBackend } from "./lib/wallet-backend.js";
@@ -5437,7 +5438,7 @@ wss.on("connection", (ws, req) => {
       }
       const devUnl = isDevUnlimitedWallet(pk);
       const st = tournamentStage(roundIndex, gameFinished);
-      if (!stageAllows(st)) {
+      if (!stageAllowsRecoveryPurchases(st)) {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
@@ -5924,7 +5925,7 @@ wss.on("connection", (ws, req) => {
       }
       const devUnl = isDevUnlimitedWallet(pk);
       const st = tournamentStage(roundIndex, gameFinished);
-      if (!stageAllows(st)) {
+      if (!stageAllowsRecoveryPurchases(st)) {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
