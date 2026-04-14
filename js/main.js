@@ -17,12 +17,6 @@ import {
 } from "./event-presentation.js";
 import {
   initGameAudio,
-  syncReactiveMusic,
-  syncDynamicBgmMusic,
-  computeGameplayMusicIntensity,
-  computeBattleReactive01,
-  getCombatBumpUntil,
-  bumpCombat,
   playUiError,
   playPurchaseSuccess,
   playPixelPlace,
@@ -47,7 +41,6 @@ import {
   registerSpatialAudioListener,
   registerSpatialAmbientAnchor,
 } from "./game-audio.js";
-import { subscribeStreamingBgmResync } from "./streaming-bgm.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
   getCurrentCooldownMs,
@@ -3756,73 +3749,6 @@ function getClientMyMainBaseHpRatio01(nowMs = Date.now()) {
   return computeClientFlagDisplayEffHp(raw, nowMs) / FLAG_BASE_MAX_HP;
 }
 
-function buildClientMusicSnap() {
-  let isolationMyTeam = false;
-  if (myTeamId != null && territoryIsolationCellMeta.size) {
-    for (const m of territoryIsolationCellMeta.values()) {
-      if ((m.teamId | 0) === (myTeamId | 0)) {
-        isolationMyTeam = true;
-        break;
-      }
-    }
-  }
-  const roundLeftMs = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : null;
-  return {
-    now: Date.now(),
-    hasTeam: myTeamId != null,
-    spectator: !!spectatorMode,
-    lastCellUntil: myTerritoryLastCellUntil,
-    territoryDangerUntil: myTerritoryDangerUntil,
-    territoryCellsRemaining: lastTeamDangerCellsRemaining,
-    flagCriticalUntil: myFlagCriticalUntil,
-    flagUnderAttackUntil: myFlagUnderAttackUntil,
-    mainBaseHpRatio: getClientMyMainBaseHpRatio01(),
-    isolationMyTeam,
-    combatBumpUntil: getCombatBumpUntil(),
-    nukeAfterglowUntil: nukeAftermathUntilMs,
-    roundLeftMs,
-    lastOwnPlaceMs: lastPlaceAt,
-  };
-}
-
-function syncReactiveMusicFromMain() {
-  syncReactiveMusic(buildClientMusicSnap());
-}
-
-function syncDynamicBgmFromMain() {
-  const snap = buildClientMusicSnap();
-  /** @type {"menu" | "preRound" | "gameplay" | "postRound" | "final"} */
-  let uiPhase = "gameplay";
-  let preRoundSecondsLeft;
-
-  if (gameFinishedMeta) {
-    uiPhase = "final";
-  } else if (roundEndedOverlayEl && !roundEndedOverlayEl.hidden) {
-    uiPhase = "postRound";
-  } else if (welcomeOverlay && !welcomeOverlay.hidden) {
-    uiPhase = "menu";
-  } else if (wantOnline && getWsUrl() && myTeamId == null && !spectatorMode) {
-    uiPhase = "menu";
-  } else if (tournamentWarmupOverlayEl && !tournamentWarmupOverlayEl.hidden) {
-    uiPhase = "preRound";
-    if (playStartsAtMs != null) {
-      preRoundSecondsLeft = Math.max(0, (playStartsAtMs - Date.now()) / 1000);
-    }
-  }
-
-  const intensity = uiPhase === "gameplay" ? computeGameplayMusicIntensity(snap) : 0;
-  const react = computeBattleReactive01(snap);
-
-  syncDynamicBgmMusic({
-    uiPhase,
-    gameplayIntensity: intensity,
-    preRoundSecondsLeft,
-    gamePaused: !!gamePausedMeta,
-    battlePulse01: react.battlePulse01,
-    sustainDread01: react.sustainDread01,
-  });
-}
-
 function syncFlagCaptureStateFromMeta(flags) {
   /* Не очищаем карту до проверки: иначе при meta без flags вся карта «сбрасывается» в 20/20 для всех баз. */
   if (!Array.isArray(flags)) return;
@@ -4665,8 +4591,6 @@ function updateToolbarHud() {
   updateQuickBuyBuffRings();
   syncToolbarHeightCssVar();
   syncEventBanner();
-  syncDynamicBgmFromMain();
-  syncReactiveMusicFromMain();
   refreshPassiveIncomeDisplays();
 }
 
@@ -4933,7 +4857,6 @@ function applyGlobalPurchaseVfx(msg) {
       const gyi = gy | 0;
       runNukeFlashPresentation(gxi, gyi);
       playBombExplosion();
-      bumpCombat(4500);
       applyNukeAftermathFromEpicenter(gxi, gyi);
       const pos = gridBlastCenterClientPx(gxi, gyi);
       spawnFloatingText(floatFxHost, "УДАР!", pos, "float-fx__pop--raid");
@@ -6449,7 +6372,6 @@ function connectWs() {
       const ecx = typeof msg.cx === "number" && Number.isFinite(msg.cx) ? msg.cx | 0 : NaN;
       const ecy = typeof msg.cy === "number" && Number.isFinite(msg.cy) ? msg.cy | 0 : NaN;
       playBombExplosion();
-      bumpCombat(4500);
       if (Number.isFinite(ecx) && Number.isFinite(ecy)) {
         applyNukeAftermathFromEpicenter(ecx, ecy);
       }
@@ -6552,7 +6474,6 @@ function connectWs() {
                 gy: fgy + 0.5,
                 weight: 0.84,
               });
-              bumpCombat(1600);
             }
           }
           if ((did | 0) === (myTeamId | 0) && hp <= 1) {
@@ -9565,7 +9486,6 @@ function placePixel(gx, gy) {
     if (onEnemyFlag) {
       sendPixelOnline(gx, gy);
       playPixelPlace();
-      bumpCombat(2200);
       updateToolbarHud();
       return;
     }
@@ -9578,7 +9498,6 @@ function placePixel(gx, gy) {
     scheduleDraw({ dirty: { gx0: gx, gy0: gy, gx1: gx, gy1: gy } });
     sendPixelOnline(gx, gy);
     playPixelPlace();
-    bumpCombat(1800);
     updateToolbarHud();
   } else {
     pixels.set(`${gx},${gy}`, selectedColor);
@@ -9866,7 +9785,6 @@ async function bootstrap() {
     return screenToGrid(rect.width * 0.5, rect.height * 0.5);
   });
   registerSpatialAmbientAnchor(() => ({ gx: gridW * 0.5, gy: gridH * 0.5 }));
-  subscribeStreamingBgmResync(() => syncDynamicBgmFromMain());
   initEventPresentation();
   migrateLegacySessionStorage();
   clearSoloFromSession();
