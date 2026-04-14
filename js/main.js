@@ -3146,7 +3146,21 @@ function showWelcomeOverlay() {
   syncWelcomeOpenBrowserCta();
 }
 
-/** Кнопка «в браузере» только в Mini App; видимость обновляем с задержками — на iOS initData иногда приходит после первого кадра. */
+/** Платформы, где открыт именно клиент Telegram (Mini App), а не голый сайт в браузере. */
+const TELEGRAM_MINI_HOST_PLATFORMS = new Set([
+  "ios",
+  "android",
+  "android_x",
+  "ipad",
+  "macos",
+  "tdesktop",
+  "unigram",
+  "linux",
+  "windows",
+  "webk",
+]);
+
+/** Кнопка «в браузере» только в Mini App; видимость обновляем с задержками — на iOS initData / initDataUnsafe иногда пустые в первый момент. */
 function syncWelcomeOpenBrowserCta() {
   try {
     const tg = window.Telegram?.WebApp;
@@ -3157,7 +3171,9 @@ function syncWelcomeOpenBrowserCta() {
     }
     const signed = getTelegramInitDataForServer().trim();
     const uid = tg.initDataUnsafe?.user?.id;
-    welcomeOpenBrowserWrap.hidden = !(signed || uid);
+    const plat = String(tg.platform || "").toLowerCase();
+    const hostMiniApp = TELEGRAM_MINI_HOST_PLATFORMS.has(plat);
+    welcomeOpenBrowserWrap.hidden = !(signed || uid || hostMiniApp);
   } catch {
     /* ignore */
   }
