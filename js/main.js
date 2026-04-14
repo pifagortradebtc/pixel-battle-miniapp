@@ -3143,6 +3143,76 @@ function submitCreateTeam() {
 
 function showWelcomeOverlay() {
   if (welcomeOverlay) welcomeOverlay.hidden = false;
+  syncWelcomeOpenBrowserCta();
+}
+
+/** Кнопка «в браузере» только в Mini App; видимость обновляем с задержками — на iOS initData иногда приходит после первого кадра. */
+function syncWelcomeOpenBrowserCta() {
+  try {
+    const tg = window.Telegram?.WebApp;
+    if (!welcomeOpenBrowserWrap) return;
+    if (!tg) {
+      welcomeOpenBrowserWrap.hidden = true;
+      return;
+    }
+    const signed = getTelegramInitDataForServer().trim();
+    const uid = tg.initDataUnsafe?.user?.id;
+    welcomeOpenBrowserWrap.hidden = !(signed || uid);
+  } catch {
+    /* ignore */
+  }
+}
+
+let welcomeOpenBrowserClickBound = false;
+
+function setupWelcomeOpenBrowserBridge() {
+  if (!btnWelcomeOpenBrowser || welcomeOpenBrowserClickBound) return;
+  welcomeOpenBrowserClickBound = true;
+  btnWelcomeOpenBrowser.addEventListener("click", async () => {
+    const tg = window.Telegram?.WebApp;
+    const initData = getTelegramInitDataForServer().trim();
+    if (!initData) {
+      const m =
+        "Telegram ещё не передал подписанные данные. Подождите секунду и нажмите снова или выберите «Обновить страницу» в меню (⋯).";
+      if (typeof tg?.showAlert === "function") tg.showAlert(m);
+      else alert(m);
+      syncWelcomeOpenBrowserCta();
+      return;
+    }
+    try {
+      const r = await fetch("/api/auth/telegram-bridge-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!j?.ok || typeof j.url !== "string" || !j.url.trim()) {
+        const msg =
+          j?.error === "PUBLIC_BASE_URL not set"
+            ? "На сервере не задан PUBLIC_BASE_URL."
+            : "Не удалось получить ссылку. Попробуйте позже.";
+        if (typeof tg?.showAlert === "function") tg.showAlert(msg);
+        else alert(msg);
+        return;
+      }
+      if (typeof tg?.openLink === "function") {
+        tg.openLink(j.url.trim(), { try_instant_view: false });
+      } else {
+        window.open(j.url.trim(), "_blank", "noopener,noreferrer");
+      }
+    } catch {
+      if (typeof tg?.showAlert === "function") tg.showAlert("Ошибка сети.");
+      else alert("Ошибка сети.");
+    }
+  });
+  syncWelcomeOpenBrowserCta();
+  for (const ms of [0, 50, 200, 500, 1500]) {
+    window.setTimeout(() => syncWelcomeOpenBrowserCta(), ms);
+  }
+  const tg = window.Telegram?.WebApp;
+  if (typeof tg?.onEvent === "function") {
+    tg.onEvent("viewportChanged", () => syncWelcomeOpenBrowserCta());
+  }
 }
 
 function setupWelcomeUi() {
@@ -3191,35 +3261,7 @@ function setupWelcomeUi() {
   welcomeDiscussionLink?.addEventListener("click", openDiscussionChatLink);
   toolbarDiscussionLink?.addEventListener("click", openDiscussionChatLink);
 
-  const tg = window.Telegram?.WebApp;
-  const miniInit = typeof tg?.initData === "string" ? tg.initData.trim() : "";
-  if (welcomeOpenBrowserWrap && btnWelcomeOpenBrowser && miniInit && tg) {
-    welcomeOpenBrowserWrap.hidden = false;
-    btnWelcomeOpenBrowser.addEventListener("click", async () => {
-      try {
-        const r = await fetch("/api/auth/telegram-bridge-token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ initData: miniInit }),
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!j?.ok || typeof j.url !== "string" || !j.url.trim()) {
-          const msg = j?.error === "PUBLIC_BASE_URL not set" ? "На сервере не задан PUBLIC_BASE_URL." : "Не удалось получить ссылку. Попробуйте позже.";
-          if (typeof tg.showAlert === "function") tg.showAlert(msg);
-          else alert(msg);
-          return;
-        }
-        if (typeof tg.openLink === "function") {
-          tg.openLink(j.url.trim(), { try_instant_view: false });
-        } else {
-          window.open(j.url.trim(), "_blank", "noopener,noreferrer");
-        }
-      } catch {
-        if (typeof tg.showAlert === "function") tg.showAlert("Ошибка сети.");
-        else alert("Ошибка сети.");
-      }
-    });
-  }
+  setupWelcomeOpenBrowserBridge();
 }
 
 function setupCreateTeamUi() {
