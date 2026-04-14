@@ -111,16 +111,21 @@
         <div class="tg-promo-bubble" role="status">
           Создай команду, захвати больше территорий, попади в финал и получи 5000 usd.
         </div>
-        <p class="welcome-panel__lead">Чтобы играть, создайте команду или вступите в существующую.</p>
+        <p id="welcome-lead-browser-first" class="welcome-panel__lead" hidden>
+          Сначала откройте игру в обычном браузере — на телефоне так она обычно стабильнее. Дальше вы сможете создать команду или вступить в неё; аккаунт Telegram и кошелёк те же.
+        </p>
+        <p id="welcome-lead-standard" class="welcome-panel__lead">
+          Чтобы играть, создайте команду или вступите в существующую.
+        </p>
         <div id="welcome-open-browser-wrap" class="welcome-open-browser" hidden>
           <p class="welcome-open-browser__text">
-            На телефоне игра часто идёт стабильнее в обычном браузере (Safari / Chrome). Ваш аккаунт и кошелёк те же.
+            Нажмите кнопку ниже — откроется Safari или Chrome с тем же входом, что в Telegram.
           </p>
           <button type="button" id="btn-welcome-open-browser" class="welcome-open-browser__btn">
             Открыть игру в браузере
           </button>
         </div>
-        <div class="welcome-team-choice">
+        <div id="welcome-team-flow" class="welcome-team-choice">
           <button type="button" id="btn-welcome-create" class="welcome-team-btn welcome-team-btn--create">
             <span class="welcome-team-btn__icon" aria-hidden="true">➕</span>
             <span class="welcome-team-btn__text">Создать команду</span>

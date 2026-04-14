@@ -225,6 +225,7 @@ async function tryConsumeTelegramBridgeFromUrl() {
     u.searchParams.delete("tg_bridge");
     const clean = `${u.pathname}${u.search}${u.hash}` || "/";
     window.history.replaceState({}, "", clean);
+    syncWelcomeOnboardingLayout();
   } catch {
     /* ignore */
   }
@@ -307,6 +308,9 @@ const welcomeOverlay = document.getElementById("welcome-overlay");
 const btnWelcomeCreate = document.getElementById("btn-welcome-create");
 const welcomeOpenBrowserWrap = document.getElementById("welcome-open-browser-wrap");
 const btnWelcomeOpenBrowser = document.getElementById("btn-welcome-open-browser");
+const welcomeLeadStandard = document.getElementById("welcome-lead-standard");
+const welcomeLeadBrowserFirst = document.getElementById("welcome-lead-browser-first");
+const welcomeTeamFlow = document.getElementById("welcome-team-flow");
 const btnWelcomeJoin = document.getElementById("btn-welcome-join");
 const btnWelcomeClose = document.getElementById("btn-welcome-close");
 const welcomeDiscussionWrap = document.getElementById("welcome-discussion-wrap");
@@ -3143,7 +3147,7 @@ function submitCreateTeam() {
 
 function showWelcomeOverlay() {
   if (welcomeOverlay) welcomeOverlay.hidden = false;
-  syncWelcomeOpenBrowserCta();
+  syncWelcomeOnboardingLayout();
 }
 
 /** Платформы, где открыт именно клиент Telegram (Mini App), а не голый сайт в браузере. */
@@ -3160,20 +3164,45 @@ const TELEGRAM_MINI_HOST_PLATFORMS = new Set([
   "webk",
 ]);
 
-/** Кнопка «в браузере» только в Mini App; видимость обновляем с задержками — на iOS initData / initDataUnsafe иногда пустые в первый момент. */
-function syncWelcomeOpenBrowserCta() {
+function hasBridgedTelegramInitInSession() {
   try {
-    const tg = window.Telegram?.WebApp;
-    if (!welcomeOpenBrowserWrap) return;
-    if (!tg) {
-      welcomeOpenBrowserWrap.hidden = true;
-      return;
+    return Boolean(sessionStorage.getItem(BRIDGE_INIT_STORAGE_KEY)?.trim());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Только клиент Telegram Mini App, до перехода в браузер: один экран «откройте в браузере», без создания команды внутри WebView.
+ */
+function isWelcomeTelegramMiniBeforeBrowser() {
+  if (hasBridgedTelegramInitInSession()) return false;
+  const tg = window.Telegram?.WebApp;
+  if (!tg) return false;
+  const plat = String(tg.platform || "").toLowerCase();
+  const signed = typeof tg.initData === "string" ? tg.initData.trim() : "";
+  const uid = tg.initDataUnsafe?.user?.id;
+  const hostMiniApp = TELEGRAM_MINI_HOST_PLATFORMS.has(plat);
+  return Boolean(signed || uid || hostMiniApp);
+}
+
+/** Два шага приветствия: в Mini App — только мост в браузер; в браузере — обычные кнопки без моста. */
+function syncWelcomeOnboardingLayout() {
+  try {
+    const miniFirst = isWelcomeTelegramMiniBeforeBrowser();
+    if (miniFirst) {
+      if (welcomeLeadStandard) welcomeLeadStandard.hidden = true;
+      if (welcomeLeadBrowserFirst) welcomeLeadBrowserFirst.hidden = false;
+      if (welcomeTeamFlow) welcomeTeamFlow.hidden = true;
+      if (welcomeOpenBrowserWrap) welcomeOpenBrowserWrap.hidden = false;
+      if (welcomeDiscussionWrap) welcomeDiscussionWrap.hidden = true;
+    } else {
+      if (welcomeLeadBrowserFirst) welcomeLeadBrowserFirst.hidden = true;
+      if (welcomeLeadStandard) welcomeLeadStandard.hidden = false;
+      if (welcomeTeamFlow) welcomeTeamFlow.hidden = false;
+      if (welcomeOpenBrowserWrap) welcomeOpenBrowserWrap.hidden = true;
+      syncDiscussionChatLinks();
     }
-    const signed = getTelegramInitDataForServer().trim();
-    const uid = tg.initDataUnsafe?.user?.id;
-    const plat = String(tg.platform || "").toLowerCase();
-    const hostMiniApp = TELEGRAM_MINI_HOST_PLATFORMS.has(plat);
-    welcomeOpenBrowserWrap.hidden = !(signed || uid || hostMiniApp);
   } catch {
     /* ignore */
   }
@@ -3192,7 +3221,7 @@ function setupWelcomeOpenBrowserBridge() {
         "Telegram ещё не передал подписанные данные. Подождите секунду и нажмите снова или выберите «Обновить страницу» в меню (⋯).";
       if (typeof tg?.showAlert === "function") tg.showAlert(m);
       else alert(m);
-      syncWelcomeOpenBrowserCta();
+      syncWelcomeOnboardingLayout();
       return;
     }
     try {
@@ -3221,13 +3250,13 @@ function setupWelcomeOpenBrowserBridge() {
       else alert("Ошибка сети.");
     }
   });
-  syncWelcomeOpenBrowserCta();
+  syncWelcomeOnboardingLayout();
   for (const ms of [0, 50, 200, 500, 1500]) {
-    window.setTimeout(() => syncWelcomeOpenBrowserCta(), ms);
+    window.setTimeout(() => syncWelcomeOnboardingLayout(), ms);
   }
   const tg = window.Telegram?.WebApp;
   if (typeof tg?.onEvent === "function") {
-    tg.onEvent("viewportChanged", () => syncWelcomeOpenBrowserCta());
+    tg.onEvent("viewportChanged", () => syncWelcomeOnboardingLayout());
   }
 }
 
@@ -3493,7 +3522,9 @@ function syncDevTimeScaleBanner() {
 function syncDiscussionChatLinks() {
   const url = discussionChatUrl;
   const show = Boolean(url);
-  if (welcomeDiscussionWrap) welcomeDiscussionWrap.hidden = !show;
+  if (welcomeDiscussionWrap) {
+    welcomeDiscussionWrap.hidden = !show || isWelcomeTelegramMiniBeforeBrowser();
+  }
   if (toolbarDiscussionLink) toolbarDiscussionLink.hidden = !show;
   if (welcomeDiscussionLink) welcomeDiscussionLink.href = url || "#";
   if (toolbarDiscussionLink) toolbarDiscussionLink.href = url || "#";
