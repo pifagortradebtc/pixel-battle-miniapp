@@ -1143,7 +1143,7 @@ function focusCameraOnTeamSpawn(spawn) {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
   if (cw < 32 || ch < 32) return;
-  const targetScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, 2.4));
+  const targetScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, 2.65));
   scale = targetScale;
   const cell = BASE_CELL * scale;
   const cx = spawn.x0 + spawn.w / 2;
@@ -1153,6 +1153,31 @@ function focusCameraOnTeamSpawn(spawn) {
   sanitizeMapPanOffsets();
   pendingRedrawFull = true;
   scheduleDraw();
+}
+
+/**
+ * После создания/входа в команду canvas может быть ещё 0×0 (оверлеи только что закрылись).
+ * Ждём нормальный размер и центрируем камеру на базе — это первое, что должен видеть игрок.
+ */
+function scheduleFocusOnMyTeamSpawn(spawn, withOnboarding) {
+  if (!spawn) return;
+  let attempts = 0;
+  const maxAttempts = 40;
+  const step = () => {
+    attempts++;
+    const cw = canvas.clientWidth | 0;
+    const ch = canvas.clientHeight | 0;
+    if (cw < 48 || ch < 48) {
+      if (attempts < maxAttempts) {
+        requestAnimationFrame(step);
+        return;
+      }
+    }
+    focusCameraOnTeamSpawn(spawn);
+    if (withOnboarding) startTeamSpawnOnboarding(spawn);
+    drawFull(performance.now());
+  };
+  requestAnimationFrame(step);
 }
 
 function triggerDefeatScreenFlash() {
@@ -1851,8 +1876,7 @@ function maybeOnboardSpawnAfterFull() {
   }
   const sp = getMyTeamSpawn();
   if (!sp) return;
-  focusCameraOnTeamSpawn(sp);
-  startTeamSpawnOnboarding(sp);
+  scheduleFocusOnMyTeamSpawn(sp, true);
 }
 
 /** Нельзя держать/рисовать пиксель (вода по маске или по цвету плаката). */
@@ -6742,17 +6766,11 @@ function connectWs() {
       rebuildTeamList();
       setFooterMode();
       schedulePersist();
-      showReferralSplash();
       lastMyTeamScoreShare = null;
+      window.setTimeout(() => showReferralSplash(), TEAM_SPAWN_ONBOARD_MS);
       {
         const sp = msg.team?.spawn ?? getMyTeamSpawn();
-        if (sp) {
-          requestAnimationFrame(() => {
-            focusCameraOnTeamSpawn(sp);
-            startTeamSpawnOnboarding(sp);
-            drawFull(performance.now());
-          });
-        }
+        if (sp) scheduleFocusOnMyTeamSpawn(sp, true);
       }
       return;
     }
@@ -6886,13 +6904,7 @@ function connectWs() {
                 h: typeof msg.spawn.h === "number" ? msg.spawn.h : 6,
               }
             : getMyTeamSpawn();
-        if (sp) {
-          requestAnimationFrame(() => {
-            focusCameraOnTeamSpawn(sp);
-            startTeamSpawnOnboarding(sp);
-            drawFull(performance.now());
-          });
-        }
+        if (sp) scheduleFocusOnMyTeamSpawn(sp, true);
       }
       return;
     }
@@ -6951,13 +6963,7 @@ function connectWs() {
         try {
           if (myTeamId != null && sessionStorage.getItem(`pixel-battle-spawn-onboard:${myTeamId}`) !== "done") {
             const sp = getMyTeamSpawn();
-            if (sp) {
-              requestAnimationFrame(() => {
-                focusCameraOnTeamSpawn(sp);
-                startTeamSpawnOnboarding(sp);
-                drawFull(performance.now());
-              });
-            }
+            if (sp) scheduleFocusOnMyTeamSpawn(sp, true);
           }
         } catch {
           /* ignore */
@@ -7335,11 +7341,7 @@ function connectWs() {
           w: typeof sp0.w === "number" ? sp0.w : 6,
           h: typeof sp0.h === "number" ? sp0.h : 6,
         };
-        requestAnimationFrame(() => {
-          focusCameraOnTeamSpawn(sp);
-          startTeamSpawnOnboarding(sp);
-          drawFull(performance.now());
-        });
+        scheduleFocusOnMyTeamSpawn(sp, true);
       }
       return;
     }
