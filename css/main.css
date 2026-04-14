@@ -1574,6 +1574,11 @@ body {
   border: 1px solid rgba(99, 102, 241, 0.35);
 }
 
+/* Иначе display:flex перебивает атрибут hidden — в браузере блок «Открыть в браузере» оставался видимым. */
+.welcome-open-browser[hidden] {
+  display: none !important;
+}
+
 .welcome-open-browser__copy {
   margin: 0;
   font-family: inherit;
