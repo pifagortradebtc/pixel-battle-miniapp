@@ -37,7 +37,6 @@ import {
   ROUND_ZERO_POST_GO_WARMUP_MS,
   WARMUP_MS,
   battleDurationForRound,
-  DUEL_INSTANT_WIN_SCORE_SHARE,
 } from "./lib/tournament-flow.js";
 import { aggregateScoresFromPixels } from "./lib/scoring.js";
 import {
@@ -2318,25 +2317,6 @@ function updateTiebreakFromStatsPayload(stats) {
   }
 }
 
-function checkDuelInstantWin(stats) {
-  if (!isClusterLeader()) return;
-  if (gamePaused || gameFinished || roundEnding || roundIndex !== 3) return;
-  if (isWarmupPhaseNow()) return;
-  const rows = stats?.rows || [];
-  /* Порог «доля очков ≥ 60%» при одной команде в stats даёт 100% (total = очки лидера) — первый создавший команду «побеждал» до выхода соперника. */
-  if (rows.length < 2) return;
-  const top = rows[0];
-  if (!top || typeof top.teamId !== "number") return;
-  const total =
-    typeof stats?.totalAvailableScore === "number" && stats.totalAvailableScore > 0
-      ? stats.totalAvailableScore
-      : 0;
-  const sc = typeof top.score === "number" && Number.isFinite(top.score) ? top.score : 0;
-  if (total > 0 && sc / total >= DUEL_INSTANT_WIN_SCORE_SHARE - 1e-9) {
-    void finalizeGameEnd(top);
-  }
-}
-
 /** Дуэль: соперник выбыл по территории — один выживший в stats, при этом в dynamicTeams есть устранённые команды. */
 function checkDuelWinByElimination(stats) {
   if (!isClusterLeader()) return;
@@ -4389,7 +4369,6 @@ function afterTerritoryMutation() {
   syncQuantumFarmStateAfterTerritoryChange();
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
-  checkDuelInstantWin(st);
   checkDuelWinByElimination(st);
   scanMilitaryOutpostsVacancyAndExpire(Date.now());
   schedulePixelsSnapshotSave();
@@ -5627,7 +5606,6 @@ setInterval(() => {
   scanAndEliminateTeamsWithNoTerritory(next);
   const st = buildStatsPayload();
   updateTiebreakFromStatsPayload(st);
-  checkDuelInstantWin(st);
   checkDuelWinByElimination(st);
   scheduleStatsBroadcast();
 }, 250);

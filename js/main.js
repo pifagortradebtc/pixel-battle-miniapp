@@ -224,6 +224,17 @@ async function tryConsumeTelegramBridgeFromUrl() {
   }
 }
 
+/** Синхронно: открыли ссылку с токеном моста (до завершения tryConsumeTelegramBridgeFromUrl) — это уже сценарий «в браузере». */
+function hasTelegramBridgeTokenInUrl() {
+  try {
+    const u = new URL(window.location.href);
+    const t = (u.searchParams.get("tg_bridge") || "").trim();
+    return t.length === 48 && /^[a-f0-9]+$/i.test(t);
+  } catch {
+    return false;
+  }
+}
+
 /** Быстрый выбор эмодзи для команды */
 const EMOJI_PRESETS = [
   "🔥", "🦁", "🐉", "🦅", "🐻", "🐋", "⚡", "🌟", "💎", "🎯", "🚀", "🛡️", "⚔️", "🌊", "🌸", "❄️",
@@ -2081,7 +2092,7 @@ const TOURNAMENT_ROUND_COPY = [
     title: "ФИНАЛ — 1 НА 1",
     splashKicker: "ДУЭЛЬ",
     splashTitle: "ФИНАЛ СТАРТОВАЛ",
-    bodyHtml: `<ul><li><strong>2</strong> игрока — каждый создаёт <strong>свою</strong> команду из одного человека (в дуэль нельзя вступить чужой join)</li><li>Бой до <strong>2 ч</strong>: победа по <strong>захвату базы</strong> соперника <strong>или</strong> по большему счёту к концу таймера</li><li>Без донатов и бустов — только скилл</li><li><strong>База</strong>: удары по клетке флага с начала боя</li><li>Досрочно: если набрали ≥<strong>60%</strong> суммарных очков на карте среди оставшихся команд</li></ul>`,
+    bodyHtml: `<ul><li><strong>2</strong> игрока — каждый создаёт <strong>свою</strong> команду из одного человека (в дуэль нельзя вступить чужой join)</li><li>Бой до <strong>2 ч</strong>: победа только <strong>захватом базы</strong> соперника <strong>или</strong> по <strong>большему счёту</strong>, когда истечёт время</li><li>В магазине — только ускорение пикселя (личное и командное); зоны, бомба и плацдарм отключены</li><li><strong>База</strong>: удары по клетке флага с начала боя</li></ul>`,
   },
 ];
 
@@ -3149,20 +3160,6 @@ function showWelcomeOverlay() {
   syncWelcomeOnboardingLayout();
 }
 
-/** Платформы, где открыт именно клиент Telegram (Mini App), а не голый сайт в браузере. */
-const TELEGRAM_MINI_HOST_PLATFORMS = new Set([
-  "ios",
-  "android",
-  "android_x",
-  "ipad",
-  "macos",
-  "tdesktop",
-  "unigram",
-  "linux",
-  "windows",
-  "webk",
-]);
-
 function hasBridgedTelegramInitInSession() {
   try {
     return Boolean(sessionStorage.getItem(BRIDGE_INIT_STORAGE_KEY)?.trim());
@@ -3172,17 +3169,16 @@ function hasBridgedTelegramInitInSession() {
 }
 
 /**
- * Только клиент Telegram Mini App, до перехода в браузер: один экран «откройте в браузере», без создания команды внутри WebView.
+ * Только настоящий запуск из клиента Telegram Mini App (есть подписанный initData).
+ * Не опираемся на platform / initDataUnsafe без подписи — в обычном браузере SDK даёт ложные срабатывания (второй раз показывалось «откройте в браузере»).
  */
 function isWelcomeTelegramMiniBeforeBrowser() {
   if (hasBridgedTelegramInitInSession()) return false;
+  if (hasTelegramBridgeTokenInUrl()) return false;
   const tg = window.Telegram?.WebApp;
   if (!tg) return false;
-  const plat = String(tg.platform || "").toLowerCase();
   const signed = typeof tg.initData === "string" ? tg.initData.trim() : "";
-  const uid = tg.initDataUnsafe?.user?.id;
-  const hostMiniApp = TELEGRAM_MINI_HOST_PLATFORMS.has(plat);
-  return Boolean(signed || uid || hostMiniApp);
+  return signed.length > 0;
 }
 
 /** Два шага приветствия: в Mini App — пояснение + кнопка «Продолжить в браузере», команды неактивны; в браузере — обычное меню без моста. */
