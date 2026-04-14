@@ -406,8 +406,7 @@ const shopPending = document.getElementById("shop-pending");
 const canvasVfx = document.getElementById("board-vfx");
 const floatFxHost = document.getElementById("float-fx");
 
-/** После успешной покупки в открытом магазине: остальные «Купить» неактивны, на купленной — «✓». */
-let shopPurchaseUiLock = false;
+/** После успешной покупки в открытом магазине: на совпавшей кнопке — «✓»; остальные не отключаются из-за этой покупки — только этап турнира и режим наблюдения. */
 
 /** @type {ReturnType<typeof createBoardVfx> | null} */
 let boardVfx = null;
@@ -726,6 +725,12 @@ let optimisticPixelPending = null;
  * @type {{ kind: string, gx: number, gy: number, size: number, keys: string[], prev: Map<string, ReturnType<typeof snapshotPixelCell>> } | null}
  */
 let optimisticWeaponPending = null;
+
+/** Время последнего исходящего `pixel` — не дублировать SFX «удар по базе» сразу после `playPixelPlace`. */
+let lastOutgoingPixelAtMs = 0;
+
+/** Антиспам: повторный purchaseVfx плацдарма своей команды (сетевой дубль / гонка). */
+let lastMyTeamMilitaryPurchaseVfxAtMs = 0;
 
 /** Кэш id команды → цвет (пересборка только при смене teamsMeta / цвета команды). */
 let teamColorByIdCache = null;
@@ -3180,7 +3185,7 @@ function isWelcomeTelegramMiniBeforeBrowser() {
   return Boolean(signed || uid || hostMiniApp);
 }
 
-/** Два шага приветствия: в Mini App — яркая кнопка «браузер», команды неактивны; в браузере — обычное меню без моста. */
+/** Два шага приветствия: в Mini App — пояснение + кнопка «Продолжить в браузере», команды неактивны; в браузере — обычное меню без моста. */
 function syncWelcomeOnboardingLayout() {
   try {
     const miniFirst = isWelcomeTelegramMiniBeforeBrowser();
@@ -4996,6 +5001,12 @@ function applyGlobalPurchaseVfx(msg) {
   if (kind === "militaryBase" && hasGrid) {
     const gxi = gx | 0;
     const gyi = gy | 0;
+    const nowMs = Date.now();
+    const tid = msg.teamId | 0;
+    if (myTeamId != null && (tid | 0) === (myTeamId | 0)) {
+      if (nowMs - lastMyTeamMilitaryPurchaseVfxAtMs < 2800) return;
+      lastMyTeamMilitaryPurchaseVfxAtMs = nowMs;
+    }
     const col = teamColor(msg.teamId | 0);
     enqueueTerritoryCapturePresentation("militaryBase", teamNameForPresentation(msg.teamId), FLAG_SPAWN_SIZE, {
       scope: /** @type {const} */ ("global"),
@@ -5093,7 +5104,6 @@ function ensureShopBtnDefaultLabels() {
 }
 
 function resetShopPurchaseButtonsUi() {
-  shopPurchaseUiLock = false;
   const root = document.getElementById("shop-overlay");
   if (!root) return;
   ensureShopBtnDefaultLabels();
@@ -5126,19 +5136,14 @@ function shopBtnMatchesPurchase(btn, msg) {
 function applyShopPurchaseSuccessUi(msg) {
   const root = document.getElementById("shop-overlay");
   if (!root || root.hidden) return;
-  ensureShopBtnDefaultLabels();
+  resetShopPurchaseButtonsUi();
   const buttons = Array.from(root.querySelectorAll(".shop-btn"));
   const winner = buttons.find((b) => shopBtnMatchesPurchase(b, msg));
   if (!winner) return;
-  shopPurchaseUiLock = true;
-  for (const btn of buttons) {
-    btn.disabled = true;
-    if (btn === winner) {
-      btn.textContent = "✓";
-      btn.classList.add("game-shop__buy--success");
-      btn.setAttribute("aria-label", "Куплено");
-    }
-  }
+  winner.textContent = "✓";
+  winner.classList.add("game-shop__buy--success");
+  winner.setAttribute("aria-label", "Куплено");
+  updateShopAvailability();
 }
 
 function loadQuickBuyHistory() {
@@ -5595,7 +5600,7 @@ function updateShopAvailability() {
   document.querySelectorAll(".shop-btn").forEach((btn) => {
     const action = btn.dataset.action || "";
     const recovery = action === "personalRecovery" || action === "teamRecovery";
-    let blocked = !!shopPurchaseUiLock;
+    let blocked = false;
     if (walletState.devUnlimited !== true) {
       if (st === "GRAND_FINAL" || spectatorMode) blocked = true;
       else if (st === "DUEL" && !recovery) blocked = true;
@@ -5831,6 +5836,8 @@ function setupEconomyUi() {
         root.querySelectorAll(".game-shop__panel").forEach((p) => {
           p.hidden = p.dataset.panel !== id;
         });
+        resetShopPurchaseButtonsUi();
+        updateShopAvailability();
       });
     });
   })();
@@ -6475,12 +6482,19 @@ function connectWs() {
               const col = aid ? teamColor(aid) : "#ffaa66";
               boardVfx.flagBaseHitImpact(fgx, fgy, col, getVfxTransform());
               flushBoardVfxFrame();
-              playFlagBaseHit({
-                scope: /** @type {const} */ ("local"),
-                gx: fgx + 0.5,
-                gy: fgy + 0.5,
-                weight: 0.84,
-              });
+              const mid = myTeamId | 0;
+              const skipDoubleHitSfx =
+                mid > 0 &&
+                (aid | 0) === mid &&
+                Date.now() - lastOutgoingPixelAtMs < 550;
+              if (!skipDoubleHitSfx) {
+                playFlagBaseHit({
+                  scope: /** @type {const} */ ("local"),
+                  gx: fgx + 0.5,
+                  gy: fgy + 0.5,
+                  weight: 0.84,
+                });
+              }
             }
           }
           if ((did | 0) === (myTeamId | 0) && hp <= 1) {
@@ -7386,6 +7400,7 @@ function connectWs() {
 }
 
 function sendPixelOnline(gx, gy) {
+  lastOutgoingPixelAtMs = Date.now();
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
     ws.send(

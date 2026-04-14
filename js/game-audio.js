@@ -1028,7 +1028,11 @@ export function initGameAudio() {
       "pointerdown",
       (e) => {
         const el = /** @type {HTMLElement} */ (e.target);
-        if (el.closest?.(".toolbar__btn, .shop-btn, .welcome-team-btn, .quick-buy-rail__btn")) {
+        if (
+          el.closest?.(
+            ".toolbar__btn, .shop-btn, .welcome-team-btn, .welcome-open-browser__btn, .quick-buy-rail__btn"
+          )
+        ) {
           playUiClick();
         }
       },

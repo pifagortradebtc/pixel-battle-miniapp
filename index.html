@@ -115,8 +115,17 @@
           Чтобы играть, создайте команду или вступите в существующую.
         </p>
         <div id="welcome-open-browser-wrap" class="welcome-open-browser" hidden>
-          <button type="button" id="btn-welcome-open-browser" class="welcome-open-browser__btn">
-            Чтобы продолжать общаться с командой в Телеграме и заодно играть, чтобы ничего не висло, откройте игру в браузере.
+          <p id="welcome-open-browser-copy" class="welcome-open-browser__copy">
+            Чтобы продолжать общаться с командой в Телеграме и заодно играть, чтобы ничего не висло, откройте игру в
+            браузере.
+          </p>
+          <button
+            type="button"
+            id="btn-welcome-open-browser"
+            class="welcome-open-browser__btn"
+            aria-describedby="welcome-open-browser-copy"
+          >
+            Продолжить в браузере
           </button>
         </div>
         <div id="welcome-team-flow" class="welcome-team-choice">
@@ -315,6 +324,15 @@
   <div id="shop-overlay" class="overlay game-shop-overlay" hidden>
     <div class="game-shop" role="dialog" aria-labelledby="shop-main-title">
       <header class="game-shop__header">
+        <button
+          type="button"
+          id="shop-close"
+          class="game-shop__header-close"
+          aria-label="Закрыть магазин"
+          title="Закрыть"
+        >
+          <span class="game-shop__header-close-icon" aria-hidden="true"></span>
+        </button>
         <div class="game-shop__brand">
           <div>
             <h2 id="shop-main-title" class="game-shop__title">Магазин</h2>
@@ -633,10 +651,6 @@
         <p id="shop-effects" class="game-shop__effects"></p>
         <p id="shop-pending" class="game-shop__pending" hidden></p>
       </div>
-
-      <footer class="game-shop__footer">
-        <button type="button" id="shop-close" class="game-shop__close">Закрыть магазин</button>
-      </footer>
     </div>
   </div>
 

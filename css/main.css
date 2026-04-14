@@ -1564,11 +1564,24 @@ body {
 }
 
 .welcome-open-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin: 12px 0 4px;
   padding: 12px 14px;
   border-radius: 12px;
   background: rgba(99, 102, 241, 0.12);
   border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+.welcome-open-browser__copy {
+  margin: 0;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  color: color-mix(in srgb, var(--tg-text, #e2e8f0) 92%, #94a3b8);
 }
 
 .welcome-open-browser__btn {
@@ -1581,7 +1594,7 @@ body {
   border-radius: 12px;
   font-family: inherit;
   font-size: 0.85rem;
-  font-weight: 600;
+  font-weight: 700;
   line-height: 1.35;
   text-align: center;
   cursor: pointer;
@@ -1589,6 +1602,7 @@ body {
   background: linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%);
   box-shadow: 0 2px 0 rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1);
   transition: filter 0.15s ease, transform 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .welcome-open-browser__btn:hover {
@@ -1599,43 +1613,60 @@ body {
   transform: translateY(1px);
 }
 
-/* Mini App: только заголовок + одна крупная «оранжевая» кнопка; блок команд серые и неактивны */
+/* Mini App: пояснение отдельно от явной кнопки «Продолжить в браузере»; блок команд серые и неактивны */
 .welcome-panel--mini-browser-first .welcome-open-browser {
   margin: 4px 0 14px;
   padding: 0;
   border: none;
   background: transparent;
+  gap: 14px;
 }
 
-.welcome-panel--mini-browser-first .welcome-open-browser__btn {
-  min-height: 5.5rem;
+.welcome-panel--mini-browser-first .welcome-open-browser__copy {
   padding: 18px 16px;
   font-size: 0.98rem;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.38;
   letter-spacing: 0.01em;
   border-radius: 18px;
   color: #1c1008;
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
   background: linear-gradient(155deg, #fde68a 0%, #fbbf24 22%, #f59e0b 48%, #ea580c 78%, #c2410c 100%);
+  border: 2px solid rgba(251, 191, 36, 0.65);
   box-shadow:
-    0 0 0 2px rgba(251, 191, 36, 0.65),
-    0 8px 28px rgba(234, 88, 12, 0.42),
-    0 4px 0 rgba(120, 53, 15, 0.55),
+    0 0 0 1px rgba(120, 53, 15, 0.2),
+    0 6px 20px rgba(234, 88, 12, 0.28),
     inset 0 2px 0 rgba(255, 255, 255, 0.45);
 }
 
+.welcome-panel--mini-browser-first .welcome-open-browser__btn {
+  min-height: 3.25rem;
+  padding: 14px 18px;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-radius: 16px;
+  color: #fffbeb;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  background: linear-gradient(180deg, #f59e0b 0%, #ea580c 45%, #c2410c 100%);
+  box-shadow:
+    0 0 0 2px rgba(254, 243, 199, 0.35),
+    0 6px 0 rgba(120, 53, 15, 0.55),
+    0 10px 24px rgba(234, 88, 12, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
 .welcome-panel--mini-browser-first .welcome-open-browser__btn:hover {
-  filter: brightness(1.06) saturate(1.05);
+  filter: brightness(1.07) saturate(1.05);
 }
 
 .welcome-panel--mini-browser-first .welcome-open-browser__btn:active {
-  transform: translateY(2px);
+  transform: translateY(3px);
   box-shadow:
-    0 0 0 2px rgba(251, 191, 36, 0.5),
-    0 4px 16px rgba(234, 88, 12, 0.35),
+    0 0 0 2px rgba(254, 243, 199, 0.28),
     0 2px 0 rgba(120, 53, 15, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    0 4px 14px rgba(234, 88, 12, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 
 .welcome-team-choice {
