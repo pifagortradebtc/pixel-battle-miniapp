@@ -464,9 +464,6 @@ function parseEnvBoolDefaultTrue(name) {
   return /^(1|true|yes|on)$/i.test(String(raw).trim());
 }
 const TELEGRAM_START_GAME_BUTTON_ENABLED = parseEnvBoolDefaultTrue("TELEGRAM_START_GAME_BUTTON_ENABLED");
-const TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF =
-  (process.env.TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF || "").trim() ||
-  "Спасибо, что заглянули. Вход в игру по кнопке «Старт» пока закрыт — откроем, когда будет готово.";
 
 function getTelegramMiniAppLaunchUrl() {
   if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
@@ -7053,7 +7050,6 @@ async function telegramPollLoop() {
         if (isStartCommand(t)) {
           rememberTelegramSubscriberChat(chatId);
           if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
-            await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF);
             continue;
           }
           const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
@@ -7559,7 +7555,7 @@ server.listen(PORT, () => {
     })();
     if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
       console.log(
-        "[Telegram] /start: кнопка игры выключена (TELEGRAM_START_GAME_BUTTON_ENABLED=false). Отправляется только текст TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF."
+        "[Telegram] /start: кнопка игры выключена (TELEGRAM_START_GAME_BUTTON_ENABLED=false) — ответ пользователю не отправляется."
       );
     } else if (getTelegramMiniAppLaunchUrl()) {
       console.log(
