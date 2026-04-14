@@ -225,6 +225,8 @@ const STATS_BROADCAST_DEBOUNCE_MS = Math.min(
 
 const apiDepositLimiter = new SlidingWindowRateLimiter();
 const apiIpnLimiter = new SlidingWindowRateLimiter();
+/** Выдача одноразовых токенов для открытия игры вне Telegram WebView (мост initData → браузер). */
+const telegramBridgeMintLimiter = new SlidingWindowRateLimiter();
 const wsMsgLimiter = new SlidingWindowRateLimiter();
 const wsPixelBurstLimiter = new SlidingWindowRateLimiter();
 const claimAttemptLimiter = new SlidingWindowRateLimiter();
@@ -4526,6 +4528,98 @@ async function handleApi(req, res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   const clientIp = getClientIpFromReq(req);
 
+  if (req.method === "POST" && url === "/api/auth/telegram-bridge-token") {
+    if (!TELEGRAM_BOT_TOKEN) {
+      res.writeHead(503);
+      res.end(JSON.stringify({ ok: false, error: "telegram not configured" }));
+      return;
+    }
+    if (!PUBLIC_BASE_URL) {
+      res.writeHead(503);
+      res.end(JSON.stringify({ ok: false, error: "PUBLIC_BASE_URL not set" }));
+      return;
+    }
+    if (!telegramBridgeMintLimiter.allow(`bridgemint:${clientIp}`, TELEGRAM_BRIDGE_MINT_PER_HOUR, 3_600_000)) {
+      res.writeHead(429);
+      res.end(JSON.stringify({ ok: false, error: "rate limit" }));
+      return;
+    }
+    let rawBuf;
+    try {
+      rawBuf = await readRequestBody(req);
+    } catch {
+      res.writeHead(413);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    let body;
+    try {
+      body = JSON.parse(rawBuf.toString("utf8"));
+    } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    const initData = typeof body.initData === "string" ? body.initData.trim() : "";
+    if (!initData) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "initData required" }));
+      return;
+    }
+    const v = verifyTelegramWebAppInitData(initData, TELEGRAM_BOT_TOKEN, {
+      maxAgeSec: TELEGRAM_INITDATA_MAX_AGE_SEC,
+    });
+    if (!v) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "bad initData" }));
+      return;
+    }
+    pruneTelegramBridgeTokens();
+    const token = crypto.randomBytes(TELEGRAM_BRIDGE_TOKEN_BYTES).toString("hex");
+    telegramBridgeTokens.set(token, { initData, exp: Date.now() + TELEGRAM_BRIDGE_TOKEN_TTL_MS });
+    const base = PUBLIC_BASE_URL.replace(/\/$/, "");
+    const openUrl = `${base}/?tg_bridge=${encodeURIComponent(token)}`;
+    res.writeHead(200);
+    res.end(JSON.stringify({ ok: true, url: openUrl }));
+    return;
+  }
+
+  if (req.method === "POST" && url === "/api/auth/telegram-bridge-consume") {
+    let rawBuf;
+    try {
+      rawBuf = await readRequestBody(req);
+    } catch {
+      res.writeHead(413);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    let body;
+    try {
+      body = JSON.parse(rawBuf.toString("utf8"));
+    } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false }));
+      return;
+    }
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    if (!token || !/^[a-f0-9]+$/i.test(token) || token.length !== TELEGRAM_BRIDGE_TOKEN_BYTES * 2) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "bad token" }));
+      return;
+    }
+    pruneTelegramBridgeTokens();
+    const entry = telegramBridgeTokens.get(token);
+    if (!entry || entry.exp < Date.now()) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "invalid or expired token" }));
+      return;
+    }
+    telegramBridgeTokens.delete(token);
+    res.writeHead(200);
+    res.end(JSON.stringify({ ok: true, initData: entry.initData }));
+    return;
+  }
+
   if (req.method === "POST" && url === "/api/ipn") {
     if (!apiIpnLimiter.allow(`ipn:${clientIp}`, API_IPN_PER_MIN, 60_000)) {
       res.writeHead(429);
@@ -4765,14 +4859,29 @@ wss = new WebSocketServer({
   },
 });
 
+/** @type {Map<string, { initData: string, exp: number }>} */
+const telegramBridgeTokens = new Map();
+const TELEGRAM_BRIDGE_TOKEN_TTL_MS = 12 * 60 * 1000;
+const TELEGRAM_BRIDGE_TOKEN_BYTES = 24;
+const TELEGRAM_BRIDGE_MINT_PER_HOUR = 48;
+
+function pruneTelegramBridgeTokens() {
+  const now = Date.now();
+  for (const [k, v] of telegramBridgeTokens) {
+    if (v.exp < now) telegramBridgeTokens.delete(k);
+  }
+}
+
 setInterval(() => {
   apiDepositLimiter.prune();
   apiIpnLimiter.prune();
+  telegramBridgeMintLimiter.prune();
   wsMsgLimiter.prune();
   wsPixelBurstLimiter.prune();
   claimAttemptLimiter.prune();
   wsJoinLimiter.prune();
   wsPurchaseLimiter.prune();
+  pruneTelegramBridgeTokens();
 }, 120000);
 
 async function broadcastWalletToAll() {

@@ -1563,6 +1563,46 @@ body {
   opacity: 0.9;
 }
 
+.welcome-open-browser {
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+.welcome-open-browser__text {
+  margin: 0 0 10px;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--tg-hint);
+  text-align: center;
+}
+
+.welcome-open-browser__btn {
+  display: block;
+  width: 100%;
+  padding: 11px 14px;
+  border: none;
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: #fff;
+  background: linear-gradient(145deg, #64748b 0%, #475569 50%, #334155 100%);
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.welcome-open-browser__btn:hover {
+  filter: brightness(1.08);
+}
+
+.welcome-open-browser__btn:active {
+  transform: translateY(1px);
+}
+
 .welcome-team-choice {
   display: flex;
   flex-direction: column;

@@ -185,13 +185,48 @@ function getTelegramUserForServer() {
   return null;
 }
 
+/** После «моста» из Mini App initData хранится в sessionStorage (в обычном браузере нет Telegram.WebApp). */
+const BRIDGE_INIT_STORAGE_KEY = "pixelBattleBridgeInitData";
+
 /** Строка initData для проверки подписи на сервере (привязка аккаунта к Telegram). */
 function getTelegramInitDataForServer() {
+  try {
+    const bridged = sessionStorage.getItem(BRIDGE_INIT_STORAGE_KEY);
+    if (typeof bridged === "string" && bridged.trim()) return bridged;
+  } catch {
+    /* ignore */
+  }
   try {
     const s = window.Telegram?.WebApp?.initData;
     return typeof s === "string" ? s : "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * Открытие ссылки ?tg_bridge=... после перехода из Telegram: одноразовый обмен токена на initData.
+ */
+async function tryConsumeTelegramBridgeFromUrl() {
+  try {
+    const u = new URL(window.location.href);
+    const token = (u.searchParams.get("tg_bridge") || "").trim();
+    if (!token) return;
+    const expectLen = 48;
+    if (!/^[a-f0-9]+$/i.test(token) || token.length !== expectLen) return;
+    const r = await fetch("/api/auth/telegram-bridge-consume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!j || !j.ok || typeof j.initData !== "string" || !j.initData.trim()) return;
+    sessionStorage.setItem(BRIDGE_INIT_STORAGE_KEY, j.initData.trim());
+    u.searchParams.delete("tg_bridge");
+    const clean = `${u.pathname}${u.search}${u.hash}` || "/";
+    window.history.replaceState({}, "", clean);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -270,6 +305,8 @@ const connStatus = document.getElementById("conn-status");
 const btnToolbarSession = document.getElementById("btn-toolbar-session");
 const welcomeOverlay = document.getElementById("welcome-overlay");
 const btnWelcomeCreate = document.getElementById("btn-welcome-create");
+const welcomeOpenBrowserWrap = document.getElementById("welcome-open-browser-wrap");
+const btnWelcomeOpenBrowser = document.getElementById("btn-welcome-open-browser");
 const btnWelcomeJoin = document.getElementById("btn-welcome-join");
 const btnWelcomeClose = document.getElementById("btn-welcome-close");
 const welcomeDiscussionWrap = document.getElementById("welcome-discussion-wrap");
@@ -3153,6 +3190,36 @@ function setupWelcomeUi() {
   });
   welcomeDiscussionLink?.addEventListener("click", openDiscussionChatLink);
   toolbarDiscussionLink?.addEventListener("click", openDiscussionChatLink);
+
+  const tg = window.Telegram?.WebApp;
+  const miniInit = typeof tg?.initData === "string" ? tg.initData.trim() : "";
+  if (welcomeOpenBrowserWrap && btnWelcomeOpenBrowser && miniInit && tg) {
+    welcomeOpenBrowserWrap.hidden = false;
+    btnWelcomeOpenBrowser.addEventListener("click", async () => {
+      try {
+        const r = await fetch("/api/auth/telegram-bridge-token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData: miniInit }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!j?.ok || typeof j.url !== "string" || !j.url.trim()) {
+          const msg = j?.error === "PUBLIC_BASE_URL not set" ? "На сервере не задан PUBLIC_BASE_URL." : "Не удалось получить ссылку. Попробуйте позже.";
+          if (typeof tg.showAlert === "function") tg.showAlert(msg);
+          else alert(msg);
+          return;
+        }
+        if (typeof tg.openLink === "function") {
+          tg.openLink(j.url.trim(), { try_instant_view: false });
+        } else {
+          window.open(j.url.trim(), "_blank", "noopener,noreferrer");
+        }
+      } catch {
+        if (typeof tg.showAlert === "function") tg.showAlert("Ошибка сети.");
+        else alert("Ошибка сети.");
+      }
+    });
+  }
 }
 
 function setupCreateTeamUi() {
@@ -9700,6 +9767,7 @@ function setupGestures() {
 
 async function bootstrap() {
   initTelegram();
+  await tryConsumeTelegramBridgeFromUrl();
   await loadRegions();
   loadFromStorage();
   initGameAudio();
