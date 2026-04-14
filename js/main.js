@@ -301,8 +301,9 @@ const welcomeOverlay = document.getElementById("welcome-overlay");
 const btnWelcomeCreate = document.getElementById("btn-welcome-create");
 const welcomeOpenBrowserWrap = document.getElementById("welcome-open-browser-wrap");
 const btnWelcomeOpenBrowser = document.getElementById("btn-welcome-open-browser");
+const welcomePanel = document.getElementById("welcome-panel");
+const welcomePromoBubble = document.getElementById("welcome-promo-bubble");
 const welcomeLeadStandard = document.getElementById("welcome-lead-standard");
-const welcomeLeadBrowserFirst = document.getElementById("welcome-lead-browser-first");
 const welcomeTeamFlow = document.getElementById("welcome-team-flow");
 const btnWelcomeJoin = document.getElementById("btn-welcome-join");
 const btnWelcomeClose = document.getElementById("btn-welcome-close");
@@ -3179,21 +3180,27 @@ function isWelcomeTelegramMiniBeforeBrowser() {
   return Boolean(signed || uid || hostMiniApp);
 }
 
-/** Два шага приветствия: в Mini App — только мост в браузер; в браузере — обычные кнопки без моста. */
+/** Два шага приветствия: в Mini App — яркая кнопка «браузер», команды неактивны; в браузере — обычное меню без моста. */
 function syncWelcomeOnboardingLayout() {
   try {
     const miniFirst = isWelcomeTelegramMiniBeforeBrowser();
     if (miniFirst) {
+      if (welcomePromoBubble) welcomePromoBubble.hidden = true;
       if (welcomeLeadStandard) welcomeLeadStandard.hidden = true;
-      if (welcomeLeadBrowserFirst) welcomeLeadBrowserFirst.hidden = false;
-      if (welcomeTeamFlow) welcomeTeamFlow.hidden = true;
+      if (welcomeTeamFlow) welcomeTeamFlow.hidden = false;
       if (welcomeOpenBrowserWrap) welcomeOpenBrowserWrap.hidden = false;
       if (welcomeDiscussionWrap) welcomeDiscussionWrap.hidden = true;
+      welcomePanel?.classList.add("welcome-panel--mini-browser-first");
+      btnWelcomeCreate && (btnWelcomeCreate.disabled = true);
+      btnWelcomeJoin && (btnWelcomeJoin.disabled = true);
     } else {
-      if (welcomeLeadBrowserFirst) welcomeLeadBrowserFirst.hidden = true;
+      if (welcomePromoBubble) welcomePromoBubble.hidden = false;
       if (welcomeLeadStandard) welcomeLeadStandard.hidden = false;
       if (welcomeTeamFlow) welcomeTeamFlow.hidden = false;
       if (welcomeOpenBrowserWrap) welcomeOpenBrowserWrap.hidden = true;
+      welcomePanel?.classList.remove("welcome-panel--mini-browser-first");
+      btnWelcomeCreate && (btnWelcomeCreate.disabled = false);
+      btnWelcomeJoin && (btnWelcomeJoin.disabled = false);
       syncDiscussionChatLinks();
     }
   } catch {

@@ -96,7 +96,7 @@
   <!-- Порядок оверлеев: снизу вверх (последний в DOM — поверх остальных). -->
   <div id="welcome-overlay" class="overlay overlay--game-onboarding" hidden>
     <div class="overlay__card overlay__card--settings welcome-card">
-      <div class="welcome-panel" role="dialog" aria-labelledby="welcome-title" aria-modal="true">
+      <div id="welcome-panel" class="welcome-panel" role="dialog" aria-labelledby="welcome-title" aria-modal="true">
         <button
           type="button"
           id="btn-welcome-close"
@@ -108,21 +108,15 @@
         </button>
         <h2 id="welcome-title" class="welcome-panel__title">Пиксельная битва</h2>
         <p class="welcome-panel__subtitle">Соревновательный захват территорий</p>
-        <div class="tg-promo-bubble" role="status">
+        <div id="welcome-promo-bubble" class="tg-promo-bubble" role="status">
           Создай команду, захвати больше территорий, попади в финал и получи 5000 usd.
         </div>
-        <p id="welcome-lead-browser-first" class="welcome-panel__lead" hidden>
-          Сначала откройте игру в обычном браузере — на телефоне так она обычно стабильнее. Дальше вы сможете создать команду или вступить в неё; аккаунт Telegram и кошелёк те же.
-        </p>
         <p id="welcome-lead-standard" class="welcome-panel__lead">
           Чтобы играть, создайте команду или вступите в существующую.
         </p>
         <div id="welcome-open-browser-wrap" class="welcome-open-browser" hidden>
-          <p class="welcome-open-browser__text">
-            Нажмите кнопку ниже — откроется Safari или Chrome с тем же входом, что в Telegram.
-          </p>
           <button type="button" id="btn-welcome-open-browser" class="welcome-open-browser__btn">
-            Открыть игру в браузере
+            Чтобы продолжать общаться с командой в Телеграме и заодно играть, чтобы ничего не висло, откройте игру в браузере.
           </button>
         </div>
         <div id="welcome-team-flow" class="welcome-team-choice">
