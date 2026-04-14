@@ -335,6 +335,88 @@ const PIXEL_BATCH_MAX_CELLS = Math.min(
   Math.max(120, Number(process.env.PIXEL_BATCH_MAX_CELLS) || 800)
 );
 
+/** Рассылка WS/Redis и батч пикселей — до любого вызова broadcast при загрузке модуля (rebuildLandFromRound и т.д.). */
+function broadcastToWebSocketClients(raw) {
+  if (!wss) return;
+  for (const client of wss.clients) {
+    if (client.readyState !== 1) continue;
+    try {
+      client.send(raw);
+    } catch {
+      /* сокет закрыт при отправке */
+    }
+  }
+}
+
+/** Пакетная рассылка клеток: один кадр WS/PubSub на микротаску вместо N сообщений «pixel». */
+/** @type {Map<string, { x: number, y: number, t: number, ownerPlayerKey: string, shieldedUntil: number }>} */
+const pendingPixelBroadcast = new Map();
+let pixelBroadcastFlushScheduled = false;
+
+function publishGameRaw(raw) {
+  broadcastToWebSocketClients(raw);
+  publishRedisGameInternal(raw);
+}
+
+/** Служебные сообщения между инстансами без рассылки сырого JSON клиентам (например обновление кошелька после IPN). */
+function publishRedisGameInternal(raw) {
+  if (!redisGamePublish) return;
+  try {
+    const out = redisGamePublish(raw);
+    if (out && typeof out.then === "function") out.catch((e) => console.warn("[redis publish]", e.message));
+  } catch (e) {
+    console.warn("[redis publish]", e.message);
+  }
+}
+
+function flushPixelBroadcastNow() {
+  if (pendingPixelBroadcast.size === 0) return;
+  const cells = [];
+  for (const v of pendingPixelBroadcast.values()) {
+    cells.push([v.x, v.y, v.t, v.ownerPlayerKey, v.shieldedUntil]);
+  }
+  pendingPixelBroadcast.clear();
+  const chunk = PIXEL_BATCH_MAX_CELLS;
+  for (let i = 0; i < cells.length; i += chunk) {
+    const part = cells.slice(i, i + chunk);
+    publishGameRaw(
+      JSON.stringify({
+        type: "pixelBatch",
+        pixelFormat: "v2",
+        cells: part,
+      })
+    );
+  }
+}
+
+function queuePixelBroadcast(x, y, t, ownerPlayerKey, shieldedUntil) {
+  const xi = x | 0;
+  const yi = y | 0;
+  const tid = t | 0;
+  const opk = String(ownerPlayerKey || "").slice(0, 128);
+  const sh = Number(shieldedUntil) || 0;
+  pendingPixelBroadcast.set(`${xi},${yi}`, {
+    x: xi,
+    y: yi,
+    t: tid,
+    ownerPlayerKey: opk,
+    shieldedUntil: sh,
+  });
+  if (!pixelBroadcastFlushScheduled) {
+    pixelBroadcastFlushScheduled = true;
+    queueMicrotask(() => {
+      pixelBroadcastFlushScheduled = false;
+      flushPixelBroadcastNow();
+    });
+  }
+}
+
+function broadcast(obj) {
+  flushPixelBroadcastNow();
+  const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
+  publishGameRaw(raw);
+}
+
 /** Токен бота и список user id админов (через запятую), которые могут отправить «go» для старта 1-го раунда */
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
 /**
@@ -3444,87 +3526,6 @@ function applyClusterGameReplication(msg) {
     default:
       return;
   }
-}
-
-function broadcastToWebSocketClients(raw) {
-  if (!wss) return;
-  for (const client of wss.clients) {
-    if (client.readyState !== 1) continue;
-    try {
-      client.send(raw);
-    } catch {
-      /* сокет закрыт при отправке */
-    }
-  }
-}
-
-/** Пакетная рассылка клеток: один кадр WS/PubSub на микротаску вместо N сообщений «pixel». */
-/** @type {Map<string, { x: number, y: number, t: number, ownerPlayerKey: string, shieldedUntil: number }>} */
-const pendingPixelBroadcast = new Map();
-let pixelBroadcastFlushScheduled = false;
-
-function publishGameRaw(raw) {
-  broadcastToWebSocketClients(raw);
-  publishRedisGameInternal(raw);
-}
-
-/** Служебные сообщения между инстансами без рассылки сырого JSON клиентам (например обновление кошелька после IPN). */
-function publishRedisGameInternal(raw) {
-  if (!redisGamePublish) return;
-  try {
-    const out = redisGamePublish(raw);
-    if (out && typeof out.then === "function") out.catch((e) => console.warn("[redis publish]", e.message));
-  } catch (e) {
-    console.warn("[redis publish]", e.message);
-  }
-}
-
-function flushPixelBroadcastNow() {
-  if (pendingPixelBroadcast.size === 0) return;
-  const cells = [];
-  for (const v of pendingPixelBroadcast.values()) {
-    cells.push([v.x, v.y, v.t, v.ownerPlayerKey, v.shieldedUntil]);
-  }
-  pendingPixelBroadcast.clear();
-  const chunk = PIXEL_BATCH_MAX_CELLS;
-  for (let i = 0; i < cells.length; i += chunk) {
-    const part = cells.slice(i, i + chunk);
-    publishGameRaw(
-      JSON.stringify({
-        type: "pixelBatch",
-        pixelFormat: "v2",
-        cells: part,
-      })
-    );
-  }
-}
-
-function queuePixelBroadcast(x, y, t, ownerPlayerKey, shieldedUntil) {
-  const xi = x | 0;
-  const yi = y | 0;
-  const tid = t | 0;
-  const opk = String(ownerPlayerKey || "").slice(0, 128);
-  const sh = Number(shieldedUntil) || 0;
-  pendingPixelBroadcast.set(`${xi},${yi}`, {
-    x: xi,
-    y: yi,
-    t: tid,
-    ownerPlayerKey: opk,
-    shieldedUntil: sh,
-  });
-  if (!pixelBroadcastFlushScheduled) {
-    pixelBroadcastFlushScheduled = true;
-    queueMicrotask(() => {
-      pixelBroadcastFlushScheduled = false;
-      flushPixelBroadcastNow();
-    });
-  }
-}
-
-function broadcast(obj) {
-  flushPixelBroadcastNow();
-  const raw = typeof obj === "string" ? obj : JSON.stringify(obj);
-  publishGameRaw(raw);
 }
 
 /** Клетка внутри прямоугольника стартовой базы команды (6×6), даже без пикселя в `pixels`. */
