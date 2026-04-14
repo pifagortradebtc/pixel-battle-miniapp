@@ -454,6 +454,20 @@ const TELEGRAM_START_MESSAGE =
 const TELEGRAM_START_BUTTON_TEXT =
   (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "🕹️ Запустить игру";
 
+/**
+ * Показывать ли в ответ на /start кнопку запуска игры (Mini App).
+ * Если переменная не задана — true (как раньше). Выключить: false / 0 / no / off.
+ */
+function parseEnvBoolDefaultTrue(name) {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return true;
+  return /^(1|true|yes|on)$/i.test(String(raw).trim());
+}
+const TELEGRAM_START_GAME_BUTTON_ENABLED = parseEnvBoolDefaultTrue("TELEGRAM_START_GAME_BUTTON_ENABLED");
+const TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF =
+  (process.env.TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF || "").trim() ||
+  "Спасибо, что заглянули. Вход в игру по кнопке «Старт» пока закрыт — откроем, когда будет готово.";
+
 function getTelegramMiniAppLaunchUrl() {
   if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
   if (TELEGRAM_BOT_USERNAME && TELEGRAM_MINIAPP_SHORT_NAME) {
@@ -7038,6 +7052,10 @@ async function telegramPollLoop() {
 
         if (isStartCommand(t)) {
           rememberTelegramSubscriberChat(chatId);
+          if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
+            await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF);
+            continue;
+          }
           const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
           const startBtn = launchUrl ? buildTelegramStartInlineButton(launchUrl) : null;
           if (startBtn) {
@@ -7539,7 +7557,11 @@ server.listen(PORT, () => {
         console.log("[cluster] Telegram long poll отключён (CLUSTER_LEADER=false на этом инстансе).");
       }
     })();
-    if (getTelegramMiniAppLaunchUrl()) {
+    if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
+      console.log(
+        "[Telegram] /start: кнопка игры выключена (TELEGRAM_START_GAME_BUTTON_ENABLED=false). Отправляется только текст TELEGRAM_START_MESSAGE_WHEN_BUTTON_OFF."
+      );
+    } else if (getTelegramMiniAppLaunchUrl()) {
       console.log(
         "Telegram: команда /start — сообщение с кнопкой «Запустить игру» (TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME)."
       );
