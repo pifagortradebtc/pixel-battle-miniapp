@@ -1030,7 +1030,7 @@ export function initGameAudio() {
         const el = /** @type {HTMLElement} */ (e.target);
         if (
           el.closest?.(
-            ".toolbar__btn, .shop-btn, .welcome-team-btn, .welcome-open-browser__btn, .quick-buy-rail__btn"
+            ".toolbar__btn, .shop-btn, .welcome-team-btn, .quick-buy-rail__btn"
           )
         ) {
           playUiClick();
