@@ -179,6 +179,44 @@ function buildGraph() {
 /** Раньше прижимала музыку под алерты; фона нет — заглушка. */
 function duckMusicForAlert() {}
 
+/**
+ * Два декодированных буфера — один и тот же ассет (частая ошибка: pixel-place скопирован с military-base).
+ * @param {AudioBuffer} a
+ * @param {AudioBuffer} b
+ */
+function detachedAudioBuffersProbablyIdentical(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (Math.abs(a.duration - b.duration) > 0.035) return false;
+  if (a.numberOfChannels !== b.numberOfChannels) return false;
+  if (a.length !== b.length) return false;
+  try {
+    const ca = a.getChannelData(0);
+    const cb = b.getChannelData(0);
+    const n = ca.length | 0;
+    if (n < 64) return false;
+    const step = Math.max(1, Math.floor(n / 1000));
+    let match = 0;
+    let total = 0;
+    for (let i = 0; i < n; i += step) {
+      total++;
+      if (Math.abs(ca[i] - cb[i]) <= 1e-5) match++;
+    }
+    return total > 0 && match / total >= 0.992;
+  } catch {
+    return false;
+  }
+}
+
+/** Убирает pixel_place из кэша, если он совпадает с military_base — иначе каждый тап звучит как деплой FOB. */
+function dropPixelPlaceIfSoundsLikeMilitaryDeploy() {
+  const pp = eventSfxBuffers.get("pixel_place");
+  const mb = eventSfxBuffers.get("military_base");
+  if (pp && mb && detachedAudioBuffersProbablyIdentical(pp, mb)) {
+    eventSfxBuffers.delete("pixel_place");
+  }
+}
+
 async function preloadEventSfxBuffers() {
   if (!ctx) return Promise.resolve();
   if (eventSfxPreloadPromise) return eventSfxPreloadPromise;
@@ -200,6 +238,7 @@ async function preloadEventSfxBuffers() {
           /* файл отсутствует или битый */
         }
       }
+      dropPixelPlaceIfSoundsLikeMilitaryDeploy();
     } catch {
       /* нет манифеста / сеть */
     }
