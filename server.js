@@ -334,7 +334,7 @@ const MAX_PER_TEAM_FINAL = 2;
  */
 const MAX_PLAYERS_ADVANCING_FROM_SEMI = 10;
 
-const ROUND_STATE_PATH = path.join(ROOT, "data", "round-state.json");
+const ROUND_STATE_PATH = path.join(DATA_DIR, "round-state.json");
 /** Снимок карты для восстановления после рестарта (только лидер кластера или одиночный процесс). */
 const PIXELS_SNAPSHOT_PATH = path.join(DATA_DIR, "pixels-snapshot.json");
 const PIXELS_SNAPSHOT_TMP_PATH = path.join(DATA_DIR, "pixels-snapshot.json.tmp");
@@ -1480,7 +1480,7 @@ function teamsForMeta() {
   }));
 }
 
-const DYNAMIC_TEAMS_PATH = path.join(ROOT, "data", "dynamic-teams.json");
+const DYNAMIC_TEAMS_PATH = path.join(DATA_DIR, "dynamic-teams.json");
 
 /** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, eliminated?: boolean, createdByPlayerKey?: string, militaryOutposts?: { x0: number, y0: number }[], lastMilitaryBaseAt?: number }[]} */
 let dynamicTeams = [];
@@ -1531,7 +1531,7 @@ function loadDynamicTeams() {
 
 function saveDynamicTeams() {
   try {
-    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(
       DYNAMIC_TEAMS_PATH,
       JSON.stringify({ nextId: nextTeamId, teams: dynamicTeams }),
@@ -1564,7 +1564,7 @@ function getMaxPerTeam() {
 function saveRoundState() {
   try {
     playStartMs = getPlayStartMs();
-    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true });
     fs.writeFileSync(
       ROUND_STATE_PATH,
       JSON.stringify({
