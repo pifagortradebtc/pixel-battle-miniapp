@@ -2874,6 +2874,11 @@ function rebuildTeamList() {
     btn.disabled = full || duel;
     if (duel) btn.title = "В дуэли 1×1 только своя команда — создайте новую.";
     btn.setAttribute("role", "option");
+    const swatch = document.createElement("span");
+    swatch.className = "team-list__swatch";
+    swatch.setAttribute("aria-hidden", "true");
+    swatch.title = "Цвет команды на карте";
+    swatch.style.backgroundColor = teamColor(t.id);
     const em = document.createElement("span");
     em.className = "team-list__emoji";
     em.textContent = t.emoji || "●";
@@ -2882,6 +2887,7 @@ function rebuildTeamList() {
     const left = document.createElement("span");
     left.style.display = "flex";
     left.style.alignItems = "center";
+    left.appendChild(swatch);
     left.appendChild(em);
     left.appendChild(name);
     const meta = document.createElement("span");

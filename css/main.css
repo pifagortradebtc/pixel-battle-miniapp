@@ -1021,6 +1021,18 @@ body {
   gap: 8px;
 }
 
+.team-list__swatch {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  margin-right: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
 .team-list__emoji {
   font-size: 1.2rem;
   margin-right: 6px;
@@ -1504,6 +1516,16 @@ body {
 
 .overlay--game-onboarding .team-list__btn:active:not(:disabled) {
   transform: scale(0.992);
+}
+
+.overlay--game-onboarding .team-list__swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  border-color: rgba(148, 163, 184, 0.45);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 0 0 1px rgba(0, 0, 0, 0.35);
 }
 
 @media (prefers-reduced-motion: reduce) {
