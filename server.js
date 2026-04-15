@@ -5764,16 +5764,27 @@ wss.on("connection", (ws, req) => {
   ws.telegramVerified = false;
   ws.eligible = !gameFinished && roundIndex === 0;
   ws.eliminated = gameFinished || roundIndex !== 0;
+  /** Первый meta после connect: только один раз и после clientProfile (иначе eligible=false для r>0 затирает корректный meta). */
+  ws._handshakeMetaSent = false;
 
   /**
    * Тяжёлый full + stats по всем пикселям на одном тике блокирует event loop (десятки мс–секунды)
    * и даёт таймаут 502/500 на прокси при всплеске переподключений — уводим в следующие тики.
+   * meta ждём из clientProfile; иначе fallback через несколько секунд (старые клиенты без profile).
    */
   void (async () => {
-    try {
-      await sendConnectionMeta(ws);
-    } catch (e) {
-      console.warn("[ws] sendConnectionMeta:", e?.message || e);
+    const deadline = Date.now() + 4000;
+    while (ws.readyState === 1 && !ws._handshakeMetaSent && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (ws.readyState !== 1) return;
+    if (!ws._handshakeMetaSent) {
+      try {
+        await sendConnectionMeta(ws);
+      } catch (e) {
+        console.warn("[ws] sendConnectionMeta (fallback):", e?.message || e);
+      }
+      ws._handshakeMetaSent = true;
     }
     await new Promise((r) => setImmediate(r));
     if (ws.readyState !== 1) return;
@@ -5816,8 +5827,17 @@ wss.on("connection", (ws, req) => {
 
     if (msg.type === "clientProfile") {
       await rememberPlayerProfile(ws, msg);
-      await sendConnectionMeta(ws);
-      safeSend(ws, await buildWalletPayload(ws));
+      try {
+        await sendConnectionMeta(ws);
+        ws._handshakeMetaSent = true;
+      } catch (e) {
+        console.warn("[ws] sendConnectionMeta:", e?.message || e);
+      }
+      try {
+        safeSend(ws, await buildWalletPayload(ws));
+      } catch (e) {
+        console.warn("[ws] wallet on clientProfile:", e?.message || e);
+      }
       return;
     }
 

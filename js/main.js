@@ -7343,6 +7343,13 @@ function connectWs() {
       else schedulePersist();
       if (wantOnline) {
         requestAnimationFrame(() => maybeOnboardSpawnAfterFull());
+        /* После обрыва: meta мог прийти с устаревшим eligible до clientProfile — повторяем claim и join. */
+        requestAnimationFrame(() => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          tryClaimEligibility();
+          const sess = loadOnlineSession();
+          if (!sess?.solo && sess?.teamId != null && !spectatorMode) tryRestoreSession();
+        });
       }
       return;
     }
