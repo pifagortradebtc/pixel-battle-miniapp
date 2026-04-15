@@ -37,6 +37,23 @@ const DEFAULT_SETTINGS = /** @type {const} */ ({
 /** @type {AudioSettings} */
 let settings = { ...DEFAULT_SETTINGS };
 
+/**
+ * Telegram Mini App на экране «сначала откройте в браузере» — без AudioContext и без BGM,
+ * пока пользователь не откроет игру во внешнем браузере (мост tg_bridge / sessionStorage).
+ */
+let suppressAudioUntilOpenedInBrowser = false;
+
+/**
+ * @param {boolean} suppress true — первый экран Mini App до кнопки «Открыть в браузере»
+ */
+export function setSuppressAudioUntilOpenedInBrowser(suppress) {
+  suppressAudioUntilOpenedInBrowser = !!suppress;
+}
+
+function isAudioPlaybackAllowedInEnvironment() {
+  return !suppressAudioUntilOpenedInBrowser;
+}
+
 /** Синхронизация иконки кнопки в шапке после applyAudioSettings (назначается в initGameAudio). */
 /** @type {(() => void) | undefined} */
 let refreshGameAudioToolbarUi;
@@ -186,6 +203,7 @@ function kickPostResumePreload() {
 }
 
 export function resumeAudioContext() {
+  if (!isAudioPlaybackAllowedInEnvironment()) return Promise.resolve();
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return Promise.resolve();

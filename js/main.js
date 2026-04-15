@@ -18,6 +18,7 @@ import {
 import {
   initGameAudio,
   setGameplayMusicAllowed,
+  setSuppressAudioUntilOpenedInBrowser,
   playUiError,
   playPurchaseSuccess,
   playPixelPlace,
@@ -3405,10 +3406,21 @@ function isWelcomeTelegramMiniBeforeBrowser() {
   return signed.length > 0;
 }
 
+/**
+ * Любой шелл Telegram Mini App до перехода «Открыть в браузере» — без Web Audio (включая BGM).
+ * В обычном браузере после моста объекта WebApp обычно нет.
+ */
+function shouldSuppressGameAudioInTelegramShell() {
+  if (hasBridgedTelegramInitInSession()) return false;
+  if (hasTelegramBridgeTokenInUrl()) return false;
+  return !!window.Telegram?.WebApp;
+}
+
 /** В Mini App — текст + «Открыть в браузере», кнопки команд неактивны; в браузере после моста — полное меню. */
 function syncWelcomeOnboardingLayout() {
+  let miniFirst = false;
   try {
-    const miniFirst = isWelcomeTelegramMiniBeforeBrowser();
+    miniFirst = isWelcomeTelegramMiniBeforeBrowser();
     if (miniFirst) {
       if (welcomePromoBubble) welcomePromoBubble.hidden = true;
       if (welcomeLeadStandard) welcomeLeadStandard.hidden = true;
@@ -3431,6 +3443,7 @@ function syncWelcomeOnboardingLayout() {
   } catch {
     /* ignore */
   }
+  setSuppressAudioUntilOpenedInBrowser(shouldSuppressGameAudioInTelegramShell());
 }
 
 let welcomeOpenBrowserClickBound = false;
@@ -10061,6 +10074,7 @@ function setupGestures() {
 async function bootstrap() {
   initTelegram();
   await tryConsumeTelegramBridgeFromUrl();
+  syncWelcomeOnboardingLayout();
   await loadRegions();
   loadFromStorage();
   initGameAudio();
