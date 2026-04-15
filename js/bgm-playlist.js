@@ -218,6 +218,30 @@ async function startFirstTrackIfNeeded() {
 }
 
 /**
+ * Подгружает первый трек в HTMLAudioElement до старта воспроизведения — меньше задержки,
+ * когда музыка включается в бою или после duck под супероружием.
+ */
+export function prefetchBgmMedia() {
+  void (async () => {
+    const ctx = audioCtx;
+    if (!ctx || started) return;
+    await loadManifest();
+    if (tracks.length < 1) return;
+    ensureElements(ctx);
+    const n = tracks.length;
+    const i = (Math.random() * n) | 0;
+    const url = urlForTrackIndex(i);
+    if (!url || !elA) return;
+    try {
+      elA.src = url;
+      elA.load();
+    } catch {
+      /* ignore */
+    }
+  })();
+}
+
+/**
  * Вызывать после user gesture + audioCtx.running (из game-audio).
  */
 export function tryStartBgmAfterContextReady() {

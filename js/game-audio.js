@@ -16,6 +16,7 @@ import {
   pauseBgmForBackgroundOrOverlay,
   resumeBgmAfterForeground,
   tryStartBgmAfterContextReady,
+  prefetchBgmMedia,
   getBgmProgramPeakCap,
   syncBgmUserMute,
 } from "./bgm-playlist.js";
@@ -97,6 +98,30 @@ let militaryDeployMp3Voice = null;
 const eventSfxBuffers = new Map();
 /** @type {Promise<void> | null} */
 let eventSfxPreloadPromise = null;
+
+/** Сначала в память — тяжёлые покупки / супероружие, чтобы звук не отставал от VFX. */
+const EVENT_SFX_CRITICAL_KEYS = /** @type {const} */ ([
+  "bomb",
+  "territory_12",
+  "territory_6",
+  "territory_4",
+  "military_base",
+  "seismic_warning",
+  "seismic_hit",
+  "seismic_after",
+  "base_capture",
+  "base_hit",
+  "treasure",
+  "buff_personal",
+  "buff_team",
+  "quantum_connect",
+  "quantum_disconnect",
+  "round_end",
+  "final_victory",
+  "alert_base_attack",
+  "alert_last_cells",
+  "alert_territory_cut",
+]);
 
 function loadSettings() {
   try {
@@ -226,16 +251,19 @@ export function resumeAudioContext() {
           () => {
             kickPostResumePreload();
             tryStartBgmAfterContextReady();
+            prefetchBgmMedia();
           },
           () => {
             kickPostResumePreload();
             tryStartBgmAfterContextReady();
+            prefetchBgmMedia();
           }
         );
       }
     }
     kickPostResumePreload();
     tryStartBgmAfterContextReady();
+    prefetchBgmMedia();
     return Promise.resolve();
   } catch {
     /* ignore */
@@ -338,22 +366,39 @@ async function preloadEventSfxBuffers() {
   if (eventSfxPreloadPromise) return eventSfxPreloadPromise;
   eventSfxPreloadPromise = (async () => {
     try {
-      const res = await fetch(resolvePublicAssetUrl("sfx/samples.json"), { cache: "no-store" });
+      const res = await fetch(resolvePublicAssetUrl("sfx/samples.json"), { cache: "force-cache" });
       if (!res.ok) return;
       const j = await res.json();
       const files = j.files && typeof j.files === "object" ? j.files : {};
-      for (const [key, rel] of Object.entries(files)) {
-        if (eventSfxBuffers.has(key)) continue;
+
+      const loadOne = async (key, rel) => {
+        if (eventSfxBuffers.has(key)) return;
         try {
-          const r = await fetch(resolvePublicAssetUrl(String(rel)));
-          if (!r.ok) continue;
+          const r = await fetch(resolvePublicAssetUrl(String(rel)), { cache: "force-cache" });
+          if (!r.ok) return;
           const ab = await r.arrayBuffer();
           const buf = await ctx.decodeAudioData(ab.slice(0));
           eventSfxBuffers.set(key, buf);
         } catch {
           /* файл отсутствует или битый */
         }
+      };
+
+      const criticalTasks = [];
+      for (const key of EVENT_SFX_CRITICAL_KEYS) {
+        const rel = files[key];
+        if (typeof rel === "string" && rel) criticalTasks.push(loadOne(key, rel));
       }
+      await Promise.all(criticalTasks);
+
+      const restTasks = [];
+      for (const [key, rel] of Object.entries(files)) {
+        if (eventSfxBuffers.has(key)) continue;
+        if (typeof rel !== "string" || !rel) continue;
+        restTasks.push(loadOne(key, rel));
+      }
+      await Promise.all(restTasks);
+
       ensurePixelPlaceSampleDistinctFromMilitary();
     } catch {
       /* нет манифеста / сеть */
@@ -1146,6 +1191,14 @@ export function initGameAudio() {
 
   syncUi();
   syncToolbarBtn();
+
+  document.addEventListener(
+    "pointerdown",
+    () => {
+      void resumeAudioContext();
+    },
+    { capture: true, once: true }
+  );
 
   const togglePanel = () => {
     if (!panel) return;
