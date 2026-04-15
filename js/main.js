@@ -1646,6 +1646,29 @@ function isolationGroupIdFromServerGroup(g) {
 }
 
 /**
+ * Тот же изолированный карман, что уже был, только с новыми клетками (коридор к базе / сброс 20 с).
+ * groupId с сервера = canonicalIsolationSig(cells) и меняется на каждый новый пиксель — дедуп только по множеству клеток.
+ * @param {Set<string>} newCells
+ * @param {Set<string>[]} priorCellSets
+ */
+function isolationPocketIsGrowthOrSameAsSomePrior(newCells, priorCellSets) {
+  if (!priorCellSets.length || !newCells.size) return false;
+  for (let i = 0; i < priorCellSets.length; i++) {
+    const oldC = priorCellSets[i];
+    if (!oldC || !oldC.size) continue;
+    let allOldInNew = true;
+    for (const k of oldC) {
+      if (!newCells.has(k)) {
+        allOldInNew = false;
+        break;
+      }
+    }
+    if (allOldInNew && newCells.size >= oldC.size) return true;
+  }
+  return false;
+}
+
+/**
  * Синхронизация изолированных карманов с сервера (meta или territoryIsolationSync).
  * @param {{ serverNow?: number, groups?: unknown[] } | null | undefined} payload
  */
@@ -1653,6 +1676,17 @@ function applyClientTerritoryIsolationFromServer(payload) {
   if (!payload || typeof payload !== "object") {
     clearClientTerritoryIsolation();
     return;
+  }
+  /** @type {Set<string>[]} */
+  const prevIsolationCellSetsMine = [];
+  if (myTeamId != null) {
+    const byGid = new Map();
+    for (const [key, meta] of territoryIsolationCellMeta) {
+      if ((meta.teamId | 0) !== (myTeamId | 0) || !meta.groupId) continue;
+      if (!byGid.has(meta.groupId)) byGid.set(meta.groupId, new Set());
+      byGid.get(meta.groupId).add(key);
+    }
+    for (const s of byGid.values()) prevIsolationCellSetsMine.push(s);
   }
   territoryIsolationCellMeta.clear();
   const clientAtReceive = Date.now();
@@ -1687,6 +1721,16 @@ function applyClientTerritoryIsolationFromServer(payload) {
     const tid = g.teamId | 0;
     const groupId = isolationGroupIdFromServerGroup(g);
     if ((tid | 0) !== (myTeamId | 0) || !groupId) continue;
+
+    const newCells = new Set();
+    const cells = Array.isArray(g.cells) ? g.cells : [];
+    for (let ci = 0; ci < cells.length; ci++) {
+      const c = cells[ci];
+      if (!Array.isArray(c) || c.length < 2) continue;
+      newCells.add(`${c[0] | 0},${c[1] | 0}`);
+    }
+    if (isolationPocketIsGrowthOrSameAsSomePrior(newCells, prevIsolationCellSetsMine)) continue;
+
     if (territoryIsolationWarnedGroupIds.has(groupId)) continue;
     territoryIsolationWarnedGroupIds.add(groupId);
     let exp = parseServerTimeMs(g.expiresAtMs);
