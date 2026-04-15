@@ -3096,27 +3096,80 @@ function buildCreateTeamEmojiPresets() {
   createTeamEmojiInput?.addEventListener("input", syncCreateEmojiPresetHighlight);
 }
 
+function normalizeCreateTeamPaletteHex(s) {
+  let t = String(s || "").trim();
+  if (!t) return "";
+  let h = t.startsWith("#") ? t : `#${t}`;
+  if (h.length === 4 && /^#[0-9a-f]{3}$/i.test(h)) {
+    h = `#${h[1]}${h[1]}${h[2]}${h[2]}${h[3]}${h[3]}`;
+  }
+  return h.toUpperCase();
+}
+
+/** Индексы TEAM_CREATE_PALETTE, уже занятые командами (не eliminated). */
+function getTakenCreateTeamPaletteIndexSet() {
+  const taken = new Set();
+  const paletteUp = TEAM_CREATE_PALETTE.map((hex) => normalizeCreateTeamPaletteHex(hex));
+  if (!teamsMeta || !teamsMeta.length) return taken;
+  for (const t of teamsMeta) {
+    if (t.eliminated) continue;
+    const c = normalizeCreateTeamPaletteHex(t.color);
+    if (!c) continue;
+    const idx = paletteUp.indexOf(c);
+    if (idx >= 0) taken.add(idx);
+  }
+  return taken;
+}
+
+function pickFirstAvailableCreateTeamColorIdx() {
+  const taken = getTakenCreateTeamPaletteIndexSet();
+  for (let i = 0; i < TEAM_CREATE_PALETTE.length; i++) {
+    if (!taken.has(i)) return i;
+  }
+  return 0;
+}
+
+function refreshCreateTeamColorPaletteIfOverlayOpen() {
+  if (!createTeamOverlay || createTeamOverlay.hidden) return;
+  const taken = getTakenCreateTeamPaletteIndexSet();
+  if (taken.has(createTeamColorIdx)) {
+    createTeamColorIdx = pickFirstAvailableCreateTeamColorIdx();
+  }
+  buildCreateTeamColorPalette();
+}
+
 function buildCreateTeamColorPalette() {
   if (!createTeamColorPaletteEl) return;
   createTeamColorPaletteEl.innerHTML = "";
+  const taken = getTakenCreateTeamPaletteIndexSet();
   TEAM_CREATE_PALETTE.forEach((hex, i) => {
+    const isTaken = taken.has(i);
     const b = document.createElement("button");
     b.type = "button";
     b.className = "palette__swatch";
     if (hex.toUpperCase() === "#FFFFFF" || hex.toUpperCase() === "#EEFF41") {
       b.classList.add("palette__swatch--needs-ring");
     }
+    if (isTaken) {
+      b.classList.add("palette__swatch--taken");
+      b.disabled = true;
+      b.setAttribute("aria-disabled", "true");
+      b.title = "Этот цвет уже занят другой командой";
+    }
     b.style.setProperty("--swatch", hex);
     b.setAttribute("role", "option");
-    b.setAttribute("aria-selected", i === createTeamColorIdx ? "true" : "false");
+    b.setAttribute("aria-selected", !isTaken && i === createTeamColorIdx ? "true" : "false");
     b.dataset.index = String(i);
-    b.title = hex;
-    b.addEventListener("click", () => {
-      createTeamColorIdx = i;
-      createTeamColorPaletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
-        el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
+    if (!isTaken) b.title = hex;
+    if (!isTaken) {
+      b.addEventListener("click", () => {
+        createTeamColorIdx = i;
+        createTeamColorPaletteEl.querySelectorAll(".palette__swatch").forEach((el) => {
+          if (el.classList.contains("palette__swatch--taken") || el.disabled) return;
+          el.setAttribute("aria-selected", el.dataset.index === String(i) ? "true" : "false");
+        });
       });
-    });
+    }
     createTeamColorPaletteEl.appendChild(b);
   });
 }
@@ -3133,6 +3186,9 @@ function openCreateTeamOverlay(fromWelcome) {
   if (createTeamEmojiInput) createTeamEmojiInput.value = EMOJI_PRESETS[0] || "🔥";
   syncCreateEmojiPresetHighlight();
   createTeamColorIdx = Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1);
+  if (getTakenCreateTeamPaletteIndexSet().has(createTeamColorIdx)) {
+    createTeamColorIdx = pickFirstAvailableCreateTeamColorIdx();
+  }
   buildCreateTeamColorPalette();
   syncCreateTeamReferralHintVisibility();
   if (createTeamOverlay) createTeamOverlay.hidden = false;
@@ -3159,7 +3215,17 @@ function submitCreateTeam() {
     else alert(msg);
     return;
   }
-  const color = TEAM_CREATE_PALETTE[Math.max(0, Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1))];
+  const ci = Math.max(0, Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1));
+  if (getTakenCreateTeamPaletteIndexSet().has(ci)) {
+    const tg = window.Telegram?.WebApp;
+    const m = "Этот цвет уже занят — выберите другой.";
+    if (typeof tg?.showAlert === "function") tg.showAlert(m);
+    else alert(m);
+    createTeamColorIdx = pickFirstAvailableCreateTeamColorIdx();
+    buildCreateTeamColorPalette();
+    return;
+  }
+  const color = TEAM_CREATE_PALETTE[ci];
   if (!color) {
     const tg = window.Telegram?.WebApp;
     const m = "Выберите цвет команды.";
@@ -3683,6 +3749,7 @@ function onMeta(msg) {
       }
       setFooterMode();
       syncDuelTeamUi();
+      refreshCreateTeamColorPaletteIfOverlayOpen();
     } finally {
       if (msg.territoryIsolation && typeof msg.territoryIsolation === "object") {
         applyClientTerritoryIsolationFromServer(msg.territoryIsolation);
@@ -6716,6 +6783,7 @@ function connectWs() {
       rebuildTeamList();
       updateTeamBadge();
       cacheTeamDisplayInSession();
+      refreshCreateTeamColorPaletteIfOverlayOpen();
       return;
     }
     if (msg.type === "teamsFull") {
@@ -6741,6 +6809,7 @@ function connectWs() {
       rebuildTeamList();
       updateTeamBadge();
       cacheTeamDisplayInSession();
+      refreshCreateTeamColorPaletteIfOverlayOpen();
       scheduleDraw({ full: true });
       return;
     }
