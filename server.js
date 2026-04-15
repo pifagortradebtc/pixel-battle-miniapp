@@ -42,6 +42,7 @@ import {
   API_BASE_SANDBOX,
 } from "./lib/nowpayments-api.js";
 import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
+import { startTelegramPollWhenRedisLockHeld } from "./lib/telegram-poll-redis-lock.mjs";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
 import {
   ROUND_ZERO_POST_GO_WARMUP_MS,
@@ -7696,11 +7697,30 @@ server.listen(PORT, () => {
         console.warn("[Telegram] deleteWebhook:", e?.message || e);
       }
       if (isClusterLeader()) {
-        console.log("[Telegram] long poll запущен (getUpdates).");
-        console.log(
-          "[Telegram] Рассылка: админ пишет в бот «broadcast» или «рассылка» (опционально текст после пробела) — всем, кто нажимал /start; список: data/telegram-bot-subscribers.json"
-        );
-        telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
+        const pollStarted = () => {
+          console.log("[Telegram] long poll запущен (getUpdates).");
+          console.log(
+            "[Telegram] Рассылка: админ пишет в бот «broadcast» или «рассылка» (опционально текст после пробела) — всем, кто нажимал /start; список: data/telegram-bot-subscribers.json"
+          );
+          telegramPollLoop().catch((e) => console.warn("Telegram poll:", e));
+        };
+        if (REDIS_URL) {
+          const lockKey = `${REDIS_GAME_CHANNEL}:telegram-poll`;
+          const instanceId =
+            String(process.env.RENDER_INSTANCE_ID || "").trim() ||
+            `local-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+          void startTelegramPollWhenRedisLockHeld({
+            redisUrl: REDIS_URL,
+            lockKey,
+            instanceId,
+            onLockHeld: pollStarted,
+          });
+          console.log(
+            `[Telegram] ожидание Redis-lock «${lockKey}» (один поллер на кластер; устраняет 409 при деплое Render).`
+          );
+        } else {
+          pollStarted();
+        }
       } else {
         console.log("[cluster] Telegram long poll отключён (CLUSTER_LEADER=false на этом инстансе).");
       }

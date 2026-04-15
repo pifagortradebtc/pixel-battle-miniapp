@@ -1,0 +1,11 @@
+# Инфраструктура Render (Blueprint). Существующий сервис можно привязать к репозиторию с этим файлом
+# или продублировать настройки вручную в Dashboard: Region Frankfurt, Health Check Path /health.
+services:
+  - type: web
+    name: pixel-battle-miniapp
+    runtime: node
+    region: frankfurt
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
