@@ -2776,6 +2776,16 @@ const lastPlace = new WeakMap();
 /** @type {Map<number, number>} teamId -> число игроков */
 const teamPlayerCounts = new Map();
 
+/** Кэш «связь с снабжением» (8-связность от флагов главной базы и плацдармов). До loadRoundState/rebuildLandFromRound → afterTerritoryMutation. */
+let baseConnectedPixelsCacheGen = 0;
+/** @type {Map<number, Set<string>>} */
+const baseConnectedPixelsCacheByTeam = new Map();
+
+function invalidateBaseConnectedPixelsCache() {
+  baseConnectedPixelsCacheGen++;
+  baseConnectedPixelsCacheByTeam.clear();
+}
+
 loadDynamicTeams();
 loadRoundState();
 if (gameFinished) {
@@ -3622,16 +3632,6 @@ function cellInsideTeamSpawnRect(x, y, t) {
     y >= t.spawnY0 &&
     y < t.spawnY0 + TEAM_SPAWN_SIZE
   );
-}
-
-/** Кэш «связь с снабжением» (8-связность от флагов главной базы и плацдармов). */
-let baseConnectedPixelsCacheGen = 0;
-/** @type {Map<number, Set<string>>} */
-const baseConnectedPixelsCacheByTeam = new Map();
-
-function invalidateBaseConnectedPixelsCache() {
-  baseConnectedPixelsCacheGen++;
-  baseConnectedPixelsCacheByTeam.clear();
 }
 
 /**
