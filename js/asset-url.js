@@ -10,12 +10,34 @@
  */
 
 /**
+ * Кодирует относительный путь для URL (пробелы в именах mp3 и т.д.).
+ * @param {string} rel
+ */
+function encodeRelPathSegments(rel) {
+  return String(rel || "")
+    .replace(/^\/+/, "")
+    .split("/")
+    .map((s) => encodeURIComponent(s))
+    .join("/");
+}
+
+/**
  * @param {string} relPath путь вида "sfx/samples.json" или "/sfx/samples.json"
  * @returns {string} абсолютный URL
  */
 export function resolvePublicAssetUrl(relPath) {
   const clean = String(relPath || "").replace(/^\/+/, "");
   if (!clean) return clean;
+
+  if (typeof window !== "undefined" && window.__PIXEL_STATIC_ASSET_BASE__) {
+    try {
+      const base = String(window.__PIXEL_STATIC_ASSET_BASE__).replace(/\/+$/, "");
+      const pathEnc = encodeRelPathSegments(clean);
+      return new URL(pathEnc, `${base}/`).href;
+    } catch {
+      /* fallback ниже */
+    }
+  }
 
   try {
     return new URL(`../${clean}`, import.meta.url).href;

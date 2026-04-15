@@ -113,6 +113,7 @@ const DATA_DIR = (() => {
 })();
 if (process.env.NODE_ENV === "production") {
   console.log(`[data] persistent dir: ${DATA_DIR}`);
+  if (STATIC_ASSET_BASE_URL) console.log(`[assets] STATIC_ASSET_BASE_URL=${STATIC_ASSET_BASE_URL}`);
 }
 /** @type {Awaited<ReturnType<typeof createWalletBackend>>} */
 const walletStore = await createWalletBackend(DATA_DIR);
@@ -222,6 +223,10 @@ const NOWPAYMENTS_PAY_CURRENCY = (process.env.NOWPAYMENTS_PAY_CURRENCY || "usdtb
 /** База суммы счёта: `usdtbsc` = та же сеть, что оплата — на инвойсе ~ровно N USDT, без пересчёта из USD */
 const NOWPAYMENTS_PRICE_CURRENCY = (process.env.NOWPAYMENTS_PRICE_CURRENCY || "usdtbsc").trim().toLowerCase();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.APP_URL || "").replace(/\/$/, "");
+/** Опционально: публичный URL префикса для music/, sfx/ (R2/S3/CDN). Без слэша в конце. */
+const STATIC_ASSET_BASE_URL = (process.env.STATIC_ASSET_BASE_URL || process.env.ASSET_CDN_BASE || "")
+  .trim()
+  .replace(/\/$/, "");
 const NOWPAYMENTS_API_BASE = /^true$/i.test(String(process.env.NOWPAYMENTS_SANDBOX || "").trim())
   ? API_BASE_SANDBOX
   : API_BASE_PROD;
@@ -550,7 +555,7 @@ function getTelegramReferralMetaForHtml() {
 
 function injectTelegramMetaIntoIndexHtml(html) {
   const { bot, app } = getTelegramReferralMetaForHtml();
-  return html
+  let out = html
     .replace(
       /<meta\s+name="pixel-battle-tg-bot"\s+content="[^"]*"\s*\/>/i,
       `<meta name="pixel-battle-tg-bot" content="${escapeHtmlAttr(bot)}" />`
@@ -559,6 +564,14 @@ function injectTelegramMetaIntoIndexHtml(html) {
       /<meta\s+name="pixel-battle-tg-app"\s+content="[^"]*"\s*\/>/i,
       `<meta name="pixel-battle-tg-app" content="${escapeHtmlAttr(app)}" />`
     );
+  if (STATIC_ASSET_BASE_URL) {
+    const baseJson = JSON.stringify(`${STATIC_ASSET_BASE_URL}/`);
+    const snip = `<script>window.__PIXEL_STATIC_ASSET_BASE__=${baseJson};</script>`;
+    if (!out.includes("__PIXEL_STATIC_ASSET_BASE__")) {
+      out = out.replace(/<head(\s[^>]*)?>/i, (m) => `${m}\n  ${snip}`);
+    }
+  }
+  return out;
 }
 
 /** Параметр после /start (реферал и т.д.) → добавляем в ссылку как ?startapp= */
