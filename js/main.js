@@ -3418,7 +3418,14 @@ function submitCreateTeam() {
     else alert(m);
     return;
   }
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    const tg = window.Telegram?.WebApp;
+    const m =
+      "Нет соединения с сервером (WebSocket). Подождите «онлайн» в интерфейсе или обновите страницу. Если не помогает — проверьте, что сервер на Render запущен и Cloudflare пропускает WebSocket.";
+    if (typeof tg?.showAlert === "function") tg.showAlert(m);
+    else alert(m);
+    return;
+  }
   ws.send(
     JSON.stringify({
       type: "createTeam",
