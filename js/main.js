@@ -38,6 +38,7 @@ import {
   playTerritoryExpand,
   playMenuChoiceSfx,
   playMenuOpenSfx,
+  playMilitaryBaseDeploySound,
   registerSpatialAudioListener,
   registerSpatialAmbientAnchor,
 } from "./game-audio.js";
@@ -5103,6 +5104,7 @@ function applyGlobalPurchaseVfx(msg) {
       scope: /** @type {const} */ ("global"),
       weight: 1,
     });
+    playMilitaryBaseDeploySound();
     runMilitaryBaseDeployPresentation(msg.teamId | 0);
     if (boardVfx) {
       boardVfx.militaryBaseDeploy(gxi, gyi, col, tr);

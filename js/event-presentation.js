@@ -325,15 +325,23 @@ function pumpCinematicQueue() {
 }
 
 /**
- * @param {{ title: string; subtitle?: string; theme?: string; holdMs?: number; sound?: string; kicker?: string; spatial?: import("./audio-spatial.js").SpatialSpec }} spec
+ * @param {{ title: string; subtitle?: string; theme?: string; holdMs?: number; sound?: string; kicker?: string; spatial?: import("./audio-spatial.js").SpatialSpec; skipPresentationSting?: boolean }} spec
  */
 export function enqueueBattleCinematic(spec) {
+  const skipSound = spec.skipPresentationSting === true;
+  /** @type {string | null} */
+  let sound = null;
+  if (!skipSound) {
+    if (spec.sound != null && String(spec.sound).trim() !== "") sound = String(spec.sound);
+    else if (spec.theme != null && String(spec.theme).trim() !== "") sound = String(spec.theme);
+    else sound = "default";
+  }
   cinematicQueue.push({
     title: spec.title,
     subtitle: spec.subtitle || "",
     theme: spec.theme || "default",
     holdMs: spec.holdMs,
-    sound: spec.sound || spec.theme || "default",
+    sound,
     kicker: spec.kicker,
     spatial: spec.spatial,
   });
@@ -514,23 +522,34 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size, spatia
     subtitle = `«${name}» — стратегический плацдарм 6×6. Новый фронт на карте.`;
     holdMs = 2800;
   }
+  const spatialFinal =
+    spatial ?? (kind === "militaryBase" ? { scope: /** @type {const} */ ("global"), weight: 1 } : undefined);
+  /* Звук плацдарма — только playMilitaryBaseDeploySound в main (один раз на purchaseVfx). Кинематограф без стинга:
+   * иначе при сбое очереди/повторах military_base.mp3 может «ехать» на каждый пиксель. */
+  if (kind === "militaryBase") {
+    enqueueBattleCinematic({
+      title,
+      subtitle,
+      theme: "gold",
+      holdMs,
+      spatial: spatialFinal,
+      skipPresentationSting: true,
+    });
+    return;
+  }
   const sound =
     kind === "zoneCapture"
       ? "territory_4"
       : kind === "massCapture"
         ? "territory_6"
-        : kind === "zone12Capture"
-          ? "territory_12"
-          : "military_base";
+        : "territory_12";
   enqueueBattleCinematic({
     title,
     subtitle,
     theme: "gold",
     sound,
     holdMs,
-    spatial:
-      spatial ??
-      (kind === "militaryBase" ? { scope: /** @type {const} */ ("global"), weight: 1 } : undefined),
+    spatial: spatialFinal,
   });
 }
 

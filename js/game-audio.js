@@ -208,13 +208,55 @@ function detachedAudioBuffersProbablyIdentical(a, b) {
   }
 }
 
-/** Убирает pixel_place из кэша, если он совпадает с military_base — иначе каждый тап звучит как деплой FOB. */
-function dropPixelPlaceIfSoundsLikeMilitaryDeploy() {
-  const pp = eventSfxBuffers.get("pixel_place");
-  const mb = eventSfxBuffers.get("military_base");
-  if (pp && mb && detachedAudioBuffersProbablyIdentical(pp, mb)) {
-    eventSfxBuffers.delete("pixel_place");
+/** Мягче порог: разные mp3-энкоды одного исходника могут не дотягивать до 0.992. */
+function detachedAudioBuffersProbablyIdenticalLoose(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (Math.abs(a.duration - b.duration) > 0.14) return false;
+  if (a.numberOfChannels !== b.numberOfChannels) return false;
+  if (a.length !== b.length) return false;
+  try {
+    const ca = a.getChannelData(0);
+    const cb = b.getChannelData(0);
+    const n = ca.length | 0;
+    if (n < 64) return false;
+    const step = Math.max(1, Math.floor(n / 900));
+    let match = 0;
+    let total = 0;
+    for (let i = 0; i < n; i += step) {
+      total++;
+      if (Math.abs(ca[i] - cb[i]) <= 1.2e-5) match++;
+    }
+    return total > 0 && match / total >= 0.96;
+  } catch {
+    return false;
   }
+}
+
+const PIXEL_PLACE_CONFLICT_SAMPLE_KEYS = /** @type {const} */ ([
+  "military_base",
+  "territory_4",
+  "territory_6",
+  "territory_12",
+]);
+
+function pixelPlaceBufferConflictsWithDeploySting(pp) {
+  if (!pp) return false;
+  for (let i = 0; i < PIXEL_PLACE_CONFLICT_SAMPLE_KEYS.length; i++) {
+    const o = eventSfxBuffers.get(PIXEL_PLACE_CONFLICT_SAMPLE_KEYS[i]);
+    if (
+      o &&
+      (detachedAudioBuffersProbablyIdentical(pp, o) || detachedAudioBuffersProbablyIdenticalLoose(pp, o))
+    )
+      return true;
+  }
+  return false;
+}
+
+/** Не держим в кэше pixel_place, если он совпадает с тяжёлыми стингами (FOB / зоны). */
+function dropPixelPlaceIfConflictsWithDeploySamples() {
+  const pp = eventSfxBuffers.get("pixel_place");
+  if (pp && pixelPlaceBufferConflictsWithDeploySting(pp)) eventSfxBuffers.delete("pixel_place");
 }
 
 async function preloadEventSfxBuffers() {
@@ -238,7 +280,7 @@ async function preloadEventSfxBuffers() {
           /* файл отсутствует или битый */
         }
       }
-      dropPixelPlaceIfSoundsLikeMilitaryDeploy();
+      dropPixelPlaceIfConflictsWithDeploySamples();
     } catch {
       /* нет манифеста / сеть */
     }
@@ -688,7 +730,10 @@ export function playPixelPlace(spatial) {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
     const spec = spatial ?? { scope: "personal", weight: 1 };
     registerLowPrioritySfx();
-    if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
+    const ppBuf = eventSfxBuffers.get("pixel_place");
+    if (!pixelPlaceBufferConflictsWithDeploySting(ppBuf)) {
+      if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
+    }
     const sm = resolveSpatialMul(spec);
     if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
