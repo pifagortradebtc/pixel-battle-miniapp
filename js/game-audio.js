@@ -50,8 +50,12 @@ let lastEpicStingWallMs = 0;
 let lowPrioritySfxCount = 0;
 /** Последний запуск стинга плацдарма (performance.now): хвост military_base + pixel_place.mp3 сливаются — слышно как «ещё раз база». */
 let lastMilitaryDeployHeardAtPerfMs = 0;
-/** Не класть pixel_place.mp3 поверх хвоста плацдарма / похожего ассета — только короткий процедурный клик. */
-const MILITARY_DEPLOY_PIXEL_MP3_SUPPRESS_MS = 4800;
+/** Окно после деплоя: короткий клик пикселя + обрезка хвоста military_base.mp3 (иначе слышно как повторный стинг). */
+const MILITARY_DEPLOY_PIXEL_MP3_SUPPRESS_MS = 9000;
+
+/** Активный one-shot military_base (MP3) — чтобы при тапе пикселя срезать хвост, а не только убрать второй сэмпл. */
+/** @type {{ source: AudioBufferSourceNode; gain: GainNode } | null} */
+let militaryDeployMp3Voice = null;
 
 /** Сэмплы событий из sfx/samples.json (при отсутствии файла — процедурный fallback). */
 /** @type {Map<string, AudioBuffer>} */
@@ -215,6 +219,26 @@ function ensurePixelPlaceSampleDistinctFromMilitary() {
   const pp = eventSfxBuffers.get("pixel_place");
   const mb = eventSfxBuffers.get("military_base");
   if (pp && mb && audioBuffersLikelySameAsset(pp, mb)) eventSfxBuffers.delete("pixel_place");
+}
+
+function stopMilitaryDeployMp3Tail() {
+  const v = militaryDeployMp3Voice;
+  if (!v || !ctx) return;
+  militaryDeployMp3Voice = null;
+  try {
+    const t = ctx.currentTime;
+    v.gain.gain.cancelScheduledValues(t);
+    const cur = v.gain.gain.value;
+    v.gain.gain.setValueAtTime(Math.max(cur, 0.0001), t);
+    v.gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+    v.source.stop(t + 0.09);
+  } catch {
+    try {
+      v.source.disconnect();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 async function preloadEventSfxBuffers() {
@@ -689,9 +713,10 @@ export function playPixelPlace(spatial) {
     const spec = spatial ?? { scope: "personal", weight: 1 };
     const sm = resolveSpatialMul(spec);
     if (sm < SPATIAL_MIN_AUDIBLE) return;
-    /* Не используем canPlayLowPrioritySfx — см. выше. После плацдарма не берём pixel_place.mp3: длинный хвост military_base + второй MP3 = ощущение повторного деплоя. */
+    /* Не используем canPlayLowPrioritySfx — см. выше. После плацдарма: срезаем хвост military_base и не кладём pixel_place.mp3 — иначе «как будто база снова». */
     const withinDeployTail =
       performance.now() - lastMilitaryDeployHeardAtPerfMs < MILITARY_DEPLOY_PIXEL_MP3_SUPPRESS_MS;
+    if (withinDeployTail) stopMilitaryDeployMp3Tail();
     if (!withinDeployTail && playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
     const now = ctx.currentTime;
     playFilteredNoiseBurst(sfxBus, now, 0.012, 0.035 * sm, 680);
@@ -722,9 +747,30 @@ export function playTerritoryExpand(zoneSide, spatial) {
 export function playMilitaryBaseDeploySound() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
+    stopMilitaryDeployMp3Tail();
     lastMilitaryDeployHeardAtPerfMs = performance.now();
     const spatial = /** @type {const} */ ({ scope: "global", weight: 1 });
-    if (playEventSample("military_base", { bus: "sfx", gainMul: 1, spatial })) return;
+    const buf = eventSfxBuffers.get("military_base");
+    if (buf) {
+      const sm = resolveSpatialMul(spatial);
+      if (sm < SPATIAL_MIN_AUDIBLE) return;
+      const now = ctx.currentTime;
+      const ev = settings.master * settings.effects;
+      let peak = Math.min(0.96, ev * sm * 0.9);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.linearRampToValueAtTime(peak, now + 0.028);
+      src.connect(g);
+      g.connect(sfxBus);
+      militaryDeployMp3Voice = { source: src, gain: g };
+      src.onended = () => {
+        if (militaryDeployMp3Voice && militaryDeployMp3Voice.source === src) militaryDeployMp3Voice = null;
+      };
+      src.start(now);
+      return;
+    }
     const now = ctx.currentTime;
     playOscThrough("sine", 55, 95, 0.048, 0.28, sfxBus, now);
     playFilteredNoiseBurst(sfxBus, now + 0.04, 0.14, 0.022, 380);
