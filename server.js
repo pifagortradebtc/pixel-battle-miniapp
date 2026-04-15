@@ -198,6 +198,8 @@ function shouldInterruptPendingSayPrompt(raw, restartNorm) {
   if (fw === "paint" && parts.length === 1) return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
   if (fw === "restart" || fw === "рестарт") return true;
+  if (restartNorm === "новая игра" || restartNorm === "newgame" || restartNorm === "wipe" || restartNorm === "с нуля")
+    return true;
   if (/^(evt|event|события|событие)\b/iu.test(restartNorm)) return true;
   if (fw === "say") return true;
   if (fw !== "off" && MANUAL_TELEGRAM_CMD_FIRST_WORDS.has(fw)) return true;
@@ -634,6 +636,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "go" || norm === "go" || norm.startsWith("go ")) return true;
   if (fw === "speed") return true;
   if (fw === "restart" || fw === "рестарт") return true;
+  if (norm === "новая игра" || norm === "newgame" || norm === "wipe" || norm === "с нуля") return true;
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
@@ -7366,6 +7369,121 @@ async function applyAdminTrainingScoreReset(telegramUserId) {
 }
 
 /**
+ * Полный «с нуля»: удалить все команды (в т.ч. названия), раунд 0, чистая карта и клады, снять паузу, кошельки как при сбросе тренировки.
+ * Закрытие мини-приложения не очищает серверные данные — только эта команда (или ручное удаление файлов data/).
+ * @param {number} telegramUserId
+ * @returns {Promise<{ ok: true } | { ok: false; reason: string }>}
+ */
+async function applyAdminFullNewGameReset(telegramUserId) {
+  if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
+  logAdminAction({ command: "full_new_game_reset", byTelegramId: telegramUserId });
+
+  if (statsBroadcastTimer != null) {
+    clearTimeout(statsBroadcastTimer);
+    statsBroadcastTimer = null;
+  }
+  if (playStartBroadcastTimer) {
+    clearTimeout(playStartBroadcastTimer);
+    playStartBroadcastTimer = null;
+  }
+
+  gamePaused = false;
+  pauseWallStartedAt = 0;
+  pauseCapturedWarmup = false;
+  warmupPauseExtensionMs = 0;
+
+  teamManualScoreBonus.clear();
+  clearPendingManualSeismicSchedule();
+  manualBattleSlotsByCmd.clear();
+  mstimAltSeasonBurstUntilMs = 0;
+  clearTerritoryIsolationState();
+
+  dynamicTeams = [];
+  nextTeamId = 1;
+  saveDynamicTeams();
+
+  teamMemberKeys.clear();
+  synergyOnlineEpoch++;
+  teamPlayerCounts.clear();
+  clearTeamEffectsMap();
+  pixels.clear();
+  invalidateTeamScoresAggCache();
+
+  roundIndex = 0;
+  gameFinished = false;
+  roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
+  roundStartMs = Date.now();
+  playStartMs = roundStartMs;
+  round0WarmupMs = tournamentQuickTestMode ? QUICK_TEST_WARMUP_MS : WARMUP_MS;
+  roundDurationMs = effectiveBattleDurationForRound(0);
+  applyQuickTestRoundTimingToState();
+  eligibleTokenSet = new Set();
+  eligiblePlayerKeys = new Set();
+  winnerTokensByPlayerKey = {};
+  battleEventsApplied = {};
+  pendingTreasureRestore = null;
+
+  clearTiebreakSnapshots();
+  resetBattleEventsStateForNewBattleRound();
+
+  if (wss) {
+    for (const c of wss.clients) {
+      if (c.readyState !== 1) continue;
+      c.teamId = null;
+      if (typeof c.eliminated === "boolean") c.eliminated = false;
+      applyEligibilityFromServerState(c);
+    }
+  }
+
+  rebuildLandFromRound(0);
+  saveRoundState();
+
+  broadcastTerritoryIsolationSyncIfChanged(Date.now());
+  broadcast({ type: "mstimAltSeasonSync", untilMs: 0 });
+  broadcast({ type: "roundEvent", phase: "end", roundIndex });
+  broadcastTeamManualScoreBonusSync();
+  broadcast({ type: "manualBattleSync", slots: {} });
+  broadcast({ type: "globalEvent", globalEvent: getGlobalEventPayload(Date.now()) });
+  broadcast({
+    type: "gamePauseSync",
+    paused: false,
+    pauseWallStartedAt: 0,
+    round0WarmupMs,
+    roundDurationMs,
+    warmupPauseExtensionMs,
+    roundStartMs,
+    roundEndsAt: roundEndsAtForMeta(),
+    playStartsAt: getPlayStartMs(),
+    warmupEndsAt: getPlayStartMs(),
+  });
+  broadcastTournamentTimeScaleToClients();
+  broadcast(fullPayloadObject());
+  broadcast({ type: "teamsFull", teams: teamsForMeta() });
+  broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+  broadcastStatsImmediate();
+  scheduleStatsBroadcast();
+  schedulePlayStartBroadcast();
+
+  try {
+    if (typeof walletStore.adminResetAllTrainingEconomy === "function") {
+      await walletStore.adminResetAllTrainingEconomy();
+    }
+  } catch (e) {
+    console.warn("[admin] wallet reset full new game:", e?.message || e);
+    return { ok: false, reason: "wallet_reset_failed" };
+  }
+
+  await broadcastWalletPayloadToAllClients();
+  if (wss) {
+    await Promise.all(
+      [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
+    );
+  }
+  schedulePixelsSnapshotSave();
+  return { ok: true };
+}
+
+/**
  * @param {string} callbackQueryId
  * @param {{ text?: string; show_alert?: boolean }} [opts]
  */
@@ -7454,6 +7572,60 @@ async function handleTelegramAdminCallbackQuery(cq) {
     }
     return;
   }
+  if (data === "adm_ng_a") {
+    await telegramAnswerCallbackQuery(cq.id);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        "Новая игра с нуля:\n\n" +
+          "• все команды и их названия удаляются с сервера (файл dynamic-teams.json);\n" +
+          "• раунд снова 0, массовая сетка, карта и клады заново;\n" +
+          "• пауза снимается;\n" +
+          "• балансы кошельков — как при «Сброс тренировки».\n\n" +
+          "Закрыть мини-приложение — не то же самое: список команд хранится на сервере.\n\n" +
+          "Подтвердите:",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "Да, удалить все команды", callback_data: "adm_ng_y" },
+                { text: "Отмена", callback_data: "adm_ng_n" },
+              ],
+            ],
+          },
+        }
+      );
+    }
+    return;
+  }
+  if (data === "adm_ng_n") {
+    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
+    return;
+  }
+  if (data === "adm_ng_y") {
+    if (!isClusterLeader()) {
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Только инстанс с CLUSTER_LEADER=true может сбросить игру.",
+        show_alert: true,
+      });
+      return;
+    }
+    await telegramAnswerCallbackQuery(cq.id, { text: "Выполняю…" });
+    const r = await applyAdminFullNewGameReset(uid);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        r.ok
+          ? "Готово: все команды удалены, игра с нуля (раунд 0). Игрокам нужно заново создать команды."
+          : r.reason === "not_leader"
+            ? "Сброс только на лидере кластера (CLUSTER_LEADER=true)."
+            : r.reason === "wallet_reset_failed"
+              ? "Команды и карта сброшены, но ошибка кошельков — см. лог сервера."
+              : "Сброс не выполнен."
+      );
+    }
+    return;
+  }
   await telegramAnswerCallbackQuery(cq.id);
 }
 
@@ -7515,6 +7687,7 @@ async function telegramPollLoop() {
             if (startBtn) rows.push([startBtn]);
             if (TELEGRAM_ADMIN_IDS.has(uid)) {
               rows.push([{ text: "Сброс тренировки (очки, карта)", callback_data: "adm_rst_a" }]);
+              rows.push([{ text: "Новая игра — удалить все команды", callback_data: "adm_ng_a" }]);
             }
             await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
               reply_markup: { inline_keyboard: rows },
@@ -7865,6 +8038,34 @@ async function telegramPollLoop() {
           continue;
         }
 
+        if (
+          restartNorm === "новая игра" ||
+          restartNorm === "newgame" ||
+          restartNorm === "wipe" ||
+          restartNorm === "с нуля"
+        ) {
+          await telegramSendMessage(
+            chatId,
+            "Новая игра с нуля:\n\n" +
+              "• все команды и названия удаляются с сервера;\n" +
+              "• раунд 0, чистая карта и клады;\n" +
+              "• кошельки обнуляются как при «Сброс тренировки».\n\n" +
+              "Закрытие мини-приложения этого не делает.\n\n" +
+              "Подтвердите:",
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: "Да, всё удалить", callback_data: "adm_ng_y" },
+                    { text: "Отмена", callback_data: "adm_ng_n" },
+                  ],
+                ],
+              },
+            }
+          );
+          continue;
+        }
+
         if (restartNorm === "рестарт" || restartNorm === "restart") {
           if (TELEGRAM_ENABLE_PROCESS_RESTART) {
             await telegramSendMessage(chatId, "Перезапуск приложения…");
@@ -7885,7 +8086,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start (кнопка «Сброс тренировки»), go [часы], teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start (сброс тренировки / новая игра), go [часы], teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
             );
           }
           continue;
