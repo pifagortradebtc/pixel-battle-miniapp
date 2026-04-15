@@ -5486,12 +5486,27 @@ function handlePurchaseOk(msg) {
     }, 280);
   }
   if (kind === "militaryBase") {
+    const mx0 = typeof msg.x0 === "number" && Number.isFinite(msg.x0) ? msg.x0 | 0 : NaN;
+    const my0 = typeof msg.y0 === "number" && Number.isFinite(msg.y0) ? msg.y0 | 0 : NaN;
+    const tidOk = myTeamId != null ? myTeamId | 0 : 0;
+    if (teamsMeta && tidOk && Number.isFinite(mx0) && Number.isFinite(my0)) {
+      teamsMeta = teamsMeta.map((t) => {
+        if ((t.id | 0) !== tidOk) return t;
+        const mos = Array.isArray(t.militaryOutposts) ? t.militaryOutposts.slice() : [];
+        const dup = mos.some((o) => o && (o.x0 | 0) === mx0 && (o.y0 | 0) === my0);
+        if (!dup) {
+          mos.push({ x0: mx0, y0: my0, w: FLAG_SPAWN_SIZE, h: FLAG_SPAWN_SIZE });
+        }
+        return { ...t, militaryOutposts: mos };
+      });
+      drawConnectivityFrameId++;
+    }
     spawnFloatingText(floatFxHost, "ПЛАЦДАРМ ЗАКРЕПЛЁН", { x: flo.x, y: flo.y - 18 }, "float-fx__pop--military");
     setTimeout(() => {
       spawnFloatingText(floatFxHost, "НОВЫЙ ВЕКТОР НА КАРТЕ", { x: flo.x, y: flo.y + 8 }, "float-fx__pop--military-sub");
     }, 420);
     showPlacementFeedback(
-      "Передовая база на карте — расширяйтесь от неё, но держите связь с главной базой.",
+      "Передовая база — те же правила, что у главной 6×6: ставьте рядом с её клетками или с вашей связной территорией.",
       "success",
       { telegramAlert: false }
     );
@@ -6382,7 +6397,7 @@ function setPendingHint() {
     if (pendingMapAction.type === "nukeBomb")
       return "Бомба: тап по эпицентру — хаотичный взрыв ~12×12, территория станет нейтральной";
     if (pendingMapAction.type === "militaryBase")
-      return "Стратегическое развёртывание 6×6: выберите плацдарм на чистой суше — команда получит второй вектор расширения (снабжение по-прежнему от главной базы)";
+      return "Передовая база 6×6: как вторая главная — те же правила расширения (8-соседство, связь с флагом базы/плацдарма). Тап по центру области на чистой суше";
     return "";
   })();
   /** Короткая строка в шапке — иначе длинный текст раздувает toolbar на пол-экрана */

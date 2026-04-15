@@ -4539,20 +4539,20 @@ function notifyTerritoryDramaEvents(prev, next) {
  * Только лидер кластера (или одиночный процесс), иначе дублирование событий.
  */
 function afterTerritoryMutation() {
-  if (gameFinished) return;
-  if (gamePaused) return;
-  if (REDIS_URL && !isClusterLeader()) return;
-  advanceTerritoryIsolationState();
-  const next = computeTeamTerritoryCounts();
-  notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
-  lastTerritoryCountSnapshot = new Map(next);
-  scanAndEliminateTeamsWithNoTerritory(next);
-  syncQuantumFarmStateAfterTerritoryChange();
-  const st = buildStatsPayload();
-  updateTiebreakFromStatsPayload(st);
-  checkDuelWinByElimination(st);
-  scanMilitaryOutpostsVacancyAndExpire(Date.now());
-  schedulePixelsSnapshotSave();
+  if (!gameFinished && !gamePaused && (!REDIS_URL || isClusterLeader())) {
+    advanceTerritoryIsolationState();
+    const next = computeTeamTerritoryCounts();
+    notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
+    lastTerritoryCountSnapshot = new Map(next);
+    scanAndEliminateTeamsWithNoTerritory(next);
+    syncQuantumFarmStateAfterTerritoryChange();
+    const st = buildStatsPayload();
+    updateTiebreakFromStatsPayload(st);
+    checkDuelWinByElimination(st);
+    scanMilitaryOutpostsVacancyAndExpire(Date.now());
+    schedulePixelsSnapshotSave();
+  }
+  /* Всегда: иначе при паузе / раннем return кэш «связь с базой» устаревает — нельзя ставить пиксели от передовой базы. */
   invalidateBaseConnectedPixelsCache();
 }
 
@@ -6683,6 +6683,8 @@ wss.on("connection", (ws, req) => {
       dt.lastMilitaryBaseAt = now;
       saveDynamicTeams();
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "military_base", { deferSave: true });
+      /* Сначала meta с плацдармом — иначе клиенты получают пиксели 6×6 раньше teamsFull и отклоняют ходы как «не рядом». */
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
       paintTeamSpawnArea(tid, x0, y0, pk);
       scheduleStatsBroadcast();
       safeSend(ws, {
@@ -6702,7 +6704,6 @@ wss.on("connection", (ws, req) => {
         gy: y0,
         size: TEAM_SPAWN_SIZE,
       });
-      broadcast({ type: "teamsFull", teams: teamsForMeta() });
       scheduleBroadcastWalletDebounced();
       queuePersistWalletPurchaseWrites(pk);
       return;
