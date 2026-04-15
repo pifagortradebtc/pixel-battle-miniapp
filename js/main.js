@@ -79,6 +79,8 @@ const DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS = 11000;
 /** Подсветка зон событий на карте: ≈ на 40% тусклее (RGB) и прозрачнее (α). */
 const BATTLE_EVENT_OVERLAY_RGB_MUL = 0.6;
 const BATTLE_EVENT_OVERLAY_ALPHA_MUL = 0.6;
+/** Клетка без пикселя игрока: лёгкое затемнение базового цвета карты (пиксели команд читаются ярче). */
+const MAP_FREE_CELL_DIM_ALPHA = 0.14;
 
 function battleEventOverlayRgba(r, g, b, a) {
   const aa = Math.min(1, a * BATTLE_EVENT_OVERLAY_ALPHA_MUL);
@@ -2135,6 +2137,11 @@ function isClientWarmupPhase() {
 function syncAdminGamePauseOverlay() {
   if (!adminGamePauseOverlayEl) return;
   adminGamePauseOverlayEl.hidden = !gamePausedMeta;
+  if (gamePausedMeta) {
+    pendingMapAction = null;
+    setPendingHint();
+  }
+  renderQuickBuyRail();
 }
 
 function syncTournamentWarmupOverlay() {
@@ -5262,7 +5269,7 @@ function recordQuickBuyAfterPurchase(kind, msg) {
   const tier = typeof msg.tierSec === "number" ? msg.tierSec | 0 : 0;
   if (kind === "personalRecovery" && [10, 5, 2, 1].includes(tier)) {
     pushQuickBuyHistory({ action: "personalRecovery", tierSec: tier });
-  } else if (kind === "teamRecovery" && [15, 10, 5, 2, 1].includes(tier)) {
+  } else if (kind === "teamRecovery" && [10, 5, 2, 1].includes(tier)) {
     pushQuickBuyHistory({ action: "teamRecovery", tierSec: tier });
   } else if (kind === "zoneCapture") {
     pushQuickBuyHistory({ action: "zoneCapture" });
@@ -5335,6 +5342,7 @@ function playerCanAffordQuickBuy(entry) {
 
 function isQuickBuyEntryBlocked(entry) {
   if (spectatorMode) return true;
+  if (wantOnline && gamePausedMeta) return true;
   if (!walletState) return true;
   if (!walletState.devUnlimited) {
     const st = walletState.tournamentStage || "MASS_BATTLE";
@@ -5361,6 +5369,10 @@ function isQuickBuyEntryBlocked(entry) {
 }
 
 function executeQuickBuy(entry) {
+  if (wantOnline && gamePausedMeta) {
+    notifyPurchaseError("paused");
+    return;
+  }
   if (isQuickBuyEntryBlocked(entry)) {
     if (walletState && !walletState.devUnlimited && !playerCanAffordQuickBuy(entry)) {
       const q = getQuickBuyPriceQuant(entry);
@@ -5375,7 +5387,7 @@ function executeQuickBuy(entry) {
     wsSendJson({ type: "purchasePersonalRecovery", tierSec: entry.tierSec });
     return;
   }
-  if (entry.action === "teamRecovery" && [15, 10, 5, 2, 1].includes(entry.tierSec)) {
+  if (entry.action === "teamRecovery" && [10, 5, 2, 1].includes(entry.tierSec)) {
     wsSendJson({ type: "purchaseTeamRecovery", tierSec: entry.tierSec });
     return;
   }
@@ -5883,6 +5895,10 @@ function setupEconomyUi() {
   });
 
   document.getElementById("shop-open-deposit")?.addEventListener("click", () => {
+    if (wantOnline && gamePausedMeta) {
+      notifyPurchaseError("paused");
+      return;
+    }
     if (isWalletDevUnlimited()) {
       notifyDevUnlimitedNoDeposit();
       return;
@@ -5895,6 +5911,10 @@ function setupEconomyUi() {
 
   document.querySelectorAll(".shop-topup-pack").forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (wantOnline && gamePausedMeta) {
+        notifyPurchaseError("paused");
+        return;
+      }
       if (isWalletDevUnlimited()) {
         notifyDevUnlimitedNoDeposit();
         return;
@@ -5943,6 +5963,10 @@ function setupEconomyUi() {
 
   document.querySelectorAll(".shop-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (wantOnline && gamePausedMeta) {
+        notifyPurchaseError("paused");
+        return;
+      }
       const action = btn.dataset.action;
       if (action === "personalRecovery") {
         const tier = Number(btn.dataset.tierSec);
@@ -5953,7 +5977,7 @@ function setupEconomyUi() {
       }
       if (action === "teamRecovery") {
         const tier = Number(btn.dataset.tierSec);
-        if ([15, 10, 5, 2, 1].includes(tier)) {
+        if ([10, 5, 2, 1].includes(tier)) {
           wsSendJson({ type: "purchaseTeamRecovery", tierSec: tier });
         }
         return;
@@ -6064,8 +6088,20 @@ function setPendingHint() {
   syncQuickBuyRailMapPending();
 }
 
+/** Покупки с карты / магазина — на паузе сервер всё равно отклонит; не шлём лишнего. */
+const WS_PAUSE_BLOCKED_TYPES = new Set([
+  "purchasePersonalRecovery",
+  "purchaseTeamRecovery",
+  "purchaseZoneCapture",
+  "purchaseMassCapture",
+  "purchaseZone12Capture",
+  "purchaseNukeBomb",
+  "purchaseMilitaryBase",
+]);
+
 function wsSendJson(obj) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (gamePausedMeta && obj && WS_PAUSE_BLOCKED_TYPES.has(obj.type)) return;
   try {
     ws.send(JSON.stringify({ ...obj, playerKey: getOrCreatePlayerKey() }));
   } catch {
@@ -6291,6 +6327,10 @@ function connectWs() {
     }
     if (msg.type === "playRejected") {
       if (msg.reason === "paused") {
+        gamePausedMeta = true;
+        syncAdminGamePauseOverlay();
+        updateRoundTimer();
+        syncTournamentWarmupOverlay();
         notifyReject("paused");
         setFooterMode();
         return;
@@ -6307,6 +6347,17 @@ function connectWs() {
 
     if (msg.type === "gamePauseSync") {
       gamePausedMeta = !!msg.paused;
+      /* Один пакет с актуальными таймстампами — без гонки с отдельным tournamentTimeScale после unpause. */
+      if ("roundEndsAt" in msg) {
+        roundEndsAtMs =
+          msg.roundEndsAt == null || Number.isNaN(Number(msg.roundEndsAt))
+            ? null
+            : Number(msg.roundEndsAt);
+      }
+      const psRaw = msg.playStartsAt ?? msg.warmupEndsAt;
+      if (typeof psRaw === "number" && !Number.isNaN(psRaw)) {
+        playStartsAtMs = psRaw;
+      }
       syncAdminGamePauseOverlay();
       updateRoundTimer();
       syncTournamentWarmupOverlay();
@@ -7468,6 +7519,7 @@ function connectWs() {
 
 function sendPixelOnline(gx, gy) {
   lastOutgoingPixelAtMs = Date.now();
+  if (wantOnline && gamePausedMeta) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {
     ws.send(
@@ -8346,6 +8398,10 @@ function draw(time = performance.now(), drawOpts = {}) {
 
       ctx.fillStyle = base;
       ctx.fillRect(px, py, cw, ch);
+      if (owner === undefined) {
+        ctx.fillStyle = `rgba(0,0,0,${MAP_FREE_CELL_DIM_ALPHA})`;
+        ctx.fillRect(px, py, cw, ch);
+      }
 
       if (owner !== undefined) {
         if (online) {
@@ -9455,6 +9511,10 @@ function placePixel(gx, gy) {
   }
 
   const online = wantOnline && getWsUrl();
+  if (online && gamePausedMeta) {
+    notifyReject("paused");
+    return;
+  }
   if (online && spectatorMode) {
     notifyReject("spectator");
     return;

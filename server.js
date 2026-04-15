@@ -2203,6 +2203,7 @@ function broadcastTournamentTimeScaleToClients() {
     type: "tournamentTimeScale",
     tournamentTimeScale: getTournamentTimeScale(),
     roundStartMs,
+    roundDurationMs,
     round0WarmupMs: getWarmupDurationMs(),
     roundTimerStarted,
     roundEndsAt: roundEndsAtForMeta(),
@@ -2293,7 +2294,7 @@ function schedulePlayStartBroadcast() {
   if (gamePaused) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
   const ps = getPlayStartMs();
-  const delay = ps - Date.now();
+  const delay = ps - effectiveGameClockMs();
   if (delay <= 0) return;
   playStartBroadcastTimer = setTimeout(() => {
     playStartBroadcastTimer = null;
@@ -3450,6 +3451,9 @@ function applyClusterGameReplication(msg) {
     case "tournamentTimeScale": {
       if (typeof msg.roundStartMs === "number" && Number.isFinite(msg.roundStartMs)) {
         roundStartMs = msg.roundStartMs;
+      }
+      if (typeof msg.roundDurationMs === "number" && msg.roundDurationMs >= 1000 && msg.roundDurationMs <= 8760 * 3600000) {
+        roundDurationMs = msg.roundDurationMs;
       }
       if (typeof msg.round0WarmupMs === "number" && Number.isFinite(msg.round0WarmupMs)) {
         const w = Math.round(msg.round0WarmupMs);
@@ -5093,6 +5097,10 @@ function applyAdminPause(telegramUserId) {
     round0WarmupMs,
     roundDurationMs,
     warmupPauseExtensionMs,
+    roundStartMs,
+    roundEndsAt: roundEndsAtForMeta(),
+    playStartsAt: getPlayStartMs(),
+    warmupEndsAt: getPlayStartMs(),
   });
   void Promise.all(
     wss ? [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c)) : []
@@ -5134,6 +5142,10 @@ function applyAdminUnpause(telegramUserId) {
     round0WarmupMs,
     roundDurationMs,
     warmupPauseExtensionMs,
+    roundStartMs,
+    roundEndsAt: roundEndsAtForMeta(),
+    playStartsAt: getPlayStartMs(),
+    warmupEndsAt: getPlayStartMs(),
   });
   broadcastTournamentTimeScaleToClients();
   broadcast({ type: "mstimAltSeasonSync", untilMs: mstimAltSeasonBurstUntilMs });
@@ -5429,7 +5441,7 @@ async function runMaybeEndRound() {
   if (gameFinished) return;
   if (gamePaused) return;
   if (roundIndex === 0 && !roundTimerStarted) return;
-  if (Date.now() < getRoundBattleEndRealMs()) return;
+  if (effectiveGameClockMs() < getRoundBattleEndRealMs()) return;
   /* Авторитетный итог: buildStatsPayload (кэш M×S + full scan при необходимости). */
   const stats = buildStatsPayload();
   const rows = stats.rows || [];
@@ -6429,7 +6441,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }
-      const tier = [15, 10, 5, 2, 1].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
+      const tier = [10, 5, 2, 1].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
       if (!tier) {
         safeSend(ws, { type: "purchaseError", reason: "bad request" });
         return;

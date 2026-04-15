@@ -29,7 +29,7 @@ ws.on("open", () => {
       JSON.stringify({
         type: "purchasePersonalRecovery",
         playerKey: "stress_test_key",
-        tierSec: 15,
+        tierSec: 10,
       })
     );
   }, 5);

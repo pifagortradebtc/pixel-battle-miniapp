@@ -35,10 +35,11 @@
   top: calc(var(--safe-top) + var(--toolbar-h) + 4px);
   /* Уже к краю — меньше заходит к центру карты */
   max-width: min(
-    102px,
+    122px,
     calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 10px)
   );
-  width: min(96px, 19vw);
+  /* Шире, чтобы в строке помещались ранг + эмодзи + 5 букв названия + счёт */
+  width: min(116px, 23vw);
   max-height: min(24vh, 176px);
   display: flex;
   flex-direction: column;
@@ -248,14 +249,14 @@
 }
 
 .lb-row__name {
-  flex: 0 1 auto;
+  /* Имя в JS уже укорочено до 5 символов (+ «…»); даём строке остаток ширины без лишнего clip */
+  flex: 1 1 0;
   min-width: 0;
-  max-width: 6ch;
   font-weight: 600;
   font-size: 0.56rem;
   color: rgba(252, 252, 255, 0.98);
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
 }
@@ -295,9 +296,9 @@
   .lb-widget {
     left: max(3px, env(safe-area-inset-left, 0px));
     top: calc(var(--safe-top) + var(--toolbar-h) + 3px);
-    width: min(94px, 18.5vw);
+    width: min(112px, 22vw);
     max-width: min(
-      100px,
+      118px,
       calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 8px)
     );
     max-height: min(21vh, 160px);
@@ -331,9 +332,9 @@
 /* Очень узкие экраны (маленькие Android, компактный WebView) */
 @media (max-width: 360px) {
   .lb-widget {
-    width: min(90px, calc(26vw + 2px));
+    width: min(108px, calc(28vw + 2px));
     max-width: min(
-      96px,
+      114px,
       calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 6px)
     );
     max-height: min(19vh, 148px);
