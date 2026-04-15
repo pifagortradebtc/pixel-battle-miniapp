@@ -743,6 +743,22 @@ let optimisticWeaponPending = null;
 /** Антиспам: повторный purchaseVfx плацдарма своей команды (сетевой дубль / гонка). */
 let lastMyTeamMilitaryPurchaseVfxAtMs = 0;
 
+/** Повторный звук military_base для того же квадрата 6×6 (дубль сообщения / репликация). */
+let lastMilitaryDeploySoundKey = "";
+let lastMilitaryDeploySoundAtMs = 0;
+
+function playMilitaryBaseDeploySoundOncePerAnchor(teamId, gx, gy) {
+  const tid = teamId | 0;
+  const x = gx | 0;
+  const y = gy | 0;
+  const key = `${tid}:${x}:${y}`;
+  const now = Date.now();
+  if (key === lastMilitaryDeploySoundKey && now - lastMilitaryDeploySoundAtMs < 8000) return;
+  lastMilitaryDeploySoundKey = key;
+  lastMilitaryDeploySoundAtMs = now;
+  playMilitaryBaseDeploySound();
+}
+
 /** Кэш id команды → цвет (пересборка только при смене teamsMeta / цвета команды). */
 let teamColorByIdCache = null;
 /** @type {typeof teamsMeta} */
@@ -5104,7 +5120,7 @@ function applyGlobalPurchaseVfx(msg) {
       scope: /** @type {const} */ ("global"),
       weight: 1,
     });
-    playMilitaryBaseDeploySound();
+    playMilitaryBaseDeploySoundOncePerAnchor(tid, gxi, gyi);
     runMilitaryBaseDeployPresentation(msg.teamId | 0);
     if (boardVfx) {
       boardVfx.militaryBaseDeploy(gxi, gyi, col, tr);

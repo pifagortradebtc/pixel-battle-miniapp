@@ -179,6 +179,40 @@ function buildGraph() {
 /** Раньше прижимала музыку под алерты; фона нет — заглушка. */
 function duckMusicForAlert() {}
 
+/**
+ * Если pixel-place.mp3 на CDN — копия military-base, не кэшируем как pixel_place (будет процедурный fallback).
+ * @param {AudioBuffer} a
+ * @param {AudioBuffer} b
+ */
+function audioBuffersLikelySameAsset(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (Math.abs(a.duration - b.duration) > 0.14) return false;
+  if (a.numberOfChannels !== b.numberOfChannels || a.length !== b.length) return false;
+  try {
+    const ca = a.getChannelData(0);
+    const cb = b.getChannelData(0);
+    const n = ca.length | 0;
+    if (n < 64) return false;
+    const step = Math.max(1, Math.floor(n / 900));
+    let match = 0;
+    let total = 0;
+    for (let i = 0; i < n; i += step) {
+      total++;
+      if (Math.abs(ca[i] - cb[i]) <= 1.2e-5) match++;
+    }
+    return total > 0 && match / total >= 0.96;
+  } catch {
+    return false;
+  }
+}
+
+function ensurePixelPlaceSampleDistinctFromMilitary() {
+  const pp = eventSfxBuffers.get("pixel_place");
+  const mb = eventSfxBuffers.get("military_base");
+  if (pp && mb && audioBuffersLikelySameAsset(pp, mb)) eventSfxBuffers.delete("pixel_place");
+}
+
 async function preloadEventSfxBuffers() {
   if (!ctx) return Promise.resolve();
   if (eventSfxPreloadPromise) return eventSfxPreloadPromise;
@@ -200,6 +234,7 @@ async function preloadEventSfxBuffers() {
           /* файл отсутствует или битый */
         }
       }
+      ensurePixelPlaceSampleDistinctFromMilitary();
     } catch {
       /* нет манифеста / сеть */
     }
@@ -646,10 +681,10 @@ export function playBuffTeamSfx(spatial) {
 /** @param {import("./audio-spatial.js").SpatialSpec | null} [spatial] по умолчанию личный пиксель (полная громкость). */
 export function playPixelPlace(spatial) {
   resumeAudioContext().then(() => {
-    if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
+    if (!ctx || !sfxBus || settings.muted) return;
     const spec = spatial ?? { scope: "personal", weight: 1 };
-    registerLowPrioritySfx();
-    // Только процедурный клик: pixel_place.mp3 на CDN иногда совпадает с military_base — тогда каждый тап рядом с FOB звучит как повторный деплой.
+    /* Не используем canPlayLowPrioritySfx: после military_base / удара по базе гейт глушит клик — слышен только длинный хвост стинга («как будто снова плацдарм»). */
+    if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
     const sm = resolveSpatialMul(spec);
     if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
