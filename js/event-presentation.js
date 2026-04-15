@@ -524,8 +524,7 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size, spatia
   }
   const spatialFinal =
     spatial ?? (kind === "militaryBase" ? { scope: /** @type {const} */ ("global"), weight: 1 } : undefined);
-  /* Звук плацдарма — только playMilitaryBaseDeploySound в main (один раз на purchaseVfx). Кинематограф без стинга:
-   * иначе при сбое очереди/повторах military_base.mp3 может «ехать» на каждый пиксель. */
+  /* Звук плацдарма — playMilitaryBaseDeploySound в applyGlobalPurchaseVfx (purchaseVfx). Кинематограф без стинга. */
   if (kind === "militaryBase") {
     enqueueBattleCinematic({
       title,

@@ -179,86 +179,6 @@ function buildGraph() {
 /** Раньше прижимала музыку под алерты; фона нет — заглушка. */
 function duckMusicForAlert() {}
 
-/**
- * Два декодированных буфера — один и тот же ассет (частая ошибка: pixel-place скопирован с military-base).
- * @param {AudioBuffer} a
- * @param {AudioBuffer} b
- */
-function detachedAudioBuffersProbablyIdentical(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (Math.abs(a.duration - b.duration) > 0.035) return false;
-  if (a.numberOfChannels !== b.numberOfChannels) return false;
-  if (a.length !== b.length) return false;
-  try {
-    const ca = a.getChannelData(0);
-    const cb = b.getChannelData(0);
-    const n = ca.length | 0;
-    if (n < 64) return false;
-    const step = Math.max(1, Math.floor(n / 1000));
-    let match = 0;
-    let total = 0;
-    for (let i = 0; i < n; i += step) {
-      total++;
-      if (Math.abs(ca[i] - cb[i]) <= 1e-5) match++;
-    }
-    return total > 0 && match / total >= 0.992;
-  } catch {
-    return false;
-  }
-}
-
-/** Мягче порог: разные mp3-энкоды одного исходника могут не дотягивать до 0.992. */
-function detachedAudioBuffersProbablyIdenticalLoose(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (Math.abs(a.duration - b.duration) > 0.14) return false;
-  if (a.numberOfChannels !== b.numberOfChannels) return false;
-  if (a.length !== b.length) return false;
-  try {
-    const ca = a.getChannelData(0);
-    const cb = b.getChannelData(0);
-    const n = ca.length | 0;
-    if (n < 64) return false;
-    const step = Math.max(1, Math.floor(n / 900));
-    let match = 0;
-    let total = 0;
-    for (let i = 0; i < n; i += step) {
-      total++;
-      if (Math.abs(ca[i] - cb[i]) <= 1.2e-5) match++;
-    }
-    return total > 0 && match / total >= 0.96;
-  } catch {
-    return false;
-  }
-}
-
-const PIXEL_PLACE_CONFLICT_SAMPLE_KEYS = /** @type {const} */ ([
-  "military_base",
-  "territory_4",
-  "territory_6",
-  "territory_12",
-]);
-
-function pixelPlaceBufferConflictsWithDeploySting(pp) {
-  if (!pp) return false;
-  for (let i = 0; i < PIXEL_PLACE_CONFLICT_SAMPLE_KEYS.length; i++) {
-    const o = eventSfxBuffers.get(PIXEL_PLACE_CONFLICT_SAMPLE_KEYS[i]);
-    if (
-      o &&
-      (detachedAudioBuffersProbablyIdentical(pp, o) || detachedAudioBuffersProbablyIdenticalLoose(pp, o))
-    )
-      return true;
-  }
-  return false;
-}
-
-/** Не держим в кэше pixel_place, если он совпадает с тяжёлыми стингами (FOB / зоны). */
-function dropPixelPlaceIfConflictsWithDeploySamples() {
-  const pp = eventSfxBuffers.get("pixel_place");
-  if (pp && pixelPlaceBufferConflictsWithDeploySting(pp)) eventSfxBuffers.delete("pixel_place");
-}
-
 async function preloadEventSfxBuffers() {
   if (!ctx) return Promise.resolve();
   if (eventSfxPreloadPromise) return eventSfxPreloadPromise;
@@ -280,7 +200,6 @@ async function preloadEventSfxBuffers() {
           /* файл отсутствует или битый */
         }
       }
-      dropPixelPlaceIfConflictsWithDeploySamples();
     } catch {
       /* нет манифеста / сеть */
     }
@@ -730,10 +649,7 @@ export function playPixelPlace(spatial) {
     if (!ctx || !sfxBus || settings.muted || !canPlayLowPrioritySfx()) return;
     const spec = spatial ?? { scope: "personal", weight: 1 };
     registerLowPrioritySfx();
-    const ppBuf = eventSfxBuffers.get("pixel_place");
-    if (!pixelPlaceBufferConflictsWithDeploySting(ppBuf)) {
-      if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
-    }
+    // Только процедурный клик: pixel_place.mp3 на CDN иногда совпадает с military_base — тогда каждый тап рядом с FOB звучит как повторный деплой.
     const sm = resolveSpatialMul(spec);
     if (sm < SPATIAL_MIN_AUDIBLE) return;
     const now = ctx.currentTime;
