@@ -5,6 +5,16 @@
  */
 
 import "dotenv/config";
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  console.error("[unhandledRejection]", msg);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err?.stack || err);
+  process.exit(1);
+});
+
 import http from "http";
 import fs from "fs";
 import path from "path";
@@ -4864,6 +4874,15 @@ async function handleApi(req, res) {
 
 const server = http.createServer((req, res) => {
   const u = (req.url || "").split("?")[0];
+  /* Лёгкий ответ без БД/файлов — для Render Health Checks и диагностики 502 (прокси не достучался до процесса). */
+  if (u === "/health" || u === "/healthz") {
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+    res.end("ok");
+    return;
+  }
   if (u.startsWith("/api/")) {
     handleApi(req, res).catch((e) => {
       res.writeHead(500);
@@ -4874,6 +4893,10 @@ const server = http.createServer((req, res) => {
   }
   serveStatic(req, res);
 });
+
+/* Дольше, чем типичные 60s у LB — иначе «тихие» соединения и WS могут резаться раньше времени. */
+server.keepAliveTimeout = 76_000;
+server.headersTimeout = 78_000;
 
 let wsConnSeq = 0;
 
@@ -4887,6 +4910,23 @@ wss = new WebSocketServer({
     return wsJoinLimiter.allow(`wsjoin:${ip}`, 90, 60_000);
   },
 });
+
+/** Пинг по WebSocket: прокси (Render, nginx) часто рвут «тихие» сокеты через 60–120 с. */
+const WS_APP_PING_INTERVAL_MS = Math.min(
+  120_000,
+  Math.max(15_000, Number(process.env.WS_APP_PING_INTERVAL_MS) || 25_000)
+);
+setInterval(() => {
+  if (!wss) return;
+  for (const client of wss.clients) {
+    if (client.readyState !== 1) continue;
+    try {
+      client.ping();
+    } catch {
+      /* ignore */
+    }
+  }
+}, WS_APP_PING_INTERVAL_MS);
 
 /** @type {Map<string, { initData: string, exp: number }>} */
 const telegramBridgeTokens = new Map();
@@ -5285,7 +5325,31 @@ async function sendConnectionMeta(ws) {
     treasureSpots: buildTreasureSpotsForMeta(),
     quantumFarms: quantumFarmLayouts.map(({ id, x0, y0, w, h }) => ({ id, x0, y0, w, h })),
   });
-  safeSend(ws, await buildWalletPayload(ws));
+  try {
+    safeSend(ws, await buildWalletPayload(ws));
+  } catch (e) {
+    console.warn("[ws] wallet on connect:", e?.message || e);
+    safeSend(ws, {
+      type: "wallet",
+      balanceUSDT: 0,
+      quantFarmIncomeQuantsPer5s: 0,
+      battleEventZoneQuantsPer5s: 0,
+      cooldownMs: BASE_ACTION_COOLDOWN_SEC * 1000,
+      effectiveRecoverySec: BASE_ACTION_COOLDOWN_SEC,
+      personalRecoveryUntil: 0,
+      personalRecoverySec: BASE_ACTION_COOLDOWN_SEC,
+      lastActionAt: 0,
+      lastZoneCaptureAt: 0,
+      lastMassCaptureAt: 0,
+      lastZone12CaptureAt: 0,
+      referralBonusActive: false,
+      globalEvent: getGlobalEventPayload(effectiveGameClockMs()),
+      tournamentStage: tournamentStage(roundIndex, gameFinished),
+      roundIndex,
+      devUnlimited: false,
+      teamEffects: null,
+    });
+  }
 }
 
 /** Финал: победитель дуэли 1v1 — игра окончена. */
@@ -5700,11 +5764,31 @@ wss.on("connection", (ws, req) => {
   ws.eligible = !gameFinished && roundIndex === 0;
   ws.eliminated = gameFinished || roundIndex !== 0;
 
+  /**
+   * Тяжёлый full + stats по всем пикселям на одном тике блокирует event loop (десятки мс–секунды)
+   * и даёт таймаут 502/500 на прокси при всплеске переподключений — уводим в следующие тики.
+   */
   void (async () => {
-    await sendConnectionMeta(ws);
-    safeSend(ws, fullPayloadObject());
-    /* Не broadcastStatsImmediate(): волна входов заставляла бы пересчёт stats и рассылку всем при каждом connect. */
-    safeSend(ws, buildStatsPayload());
+    try {
+      await sendConnectionMeta(ws);
+    } catch (e) {
+      console.warn("[ws] sendConnectionMeta:", e?.message || e);
+    }
+    await new Promise((r) => setImmediate(r));
+    if (ws.readyState !== 1) return;
+    try {
+      safeSend(ws, fullPayloadObject());
+    } catch (e) {
+      console.warn("[ws] full payload:", e?.message || e);
+    }
+    await new Promise((r) => setImmediate(r));
+    if (ws.readyState !== 1) return;
+    try {
+      /* Не broadcastStatsImmediate(): волна входов заставляла бы пересчёт stats и рассылку всем при каждом connect. */
+      safeSend(ws, buildStatsPayload());
+    } catch (e) {
+      console.warn("[ws] stats on connect:", e?.message || e);
+    }
   })();
 
   ws.on("message", (data) => {

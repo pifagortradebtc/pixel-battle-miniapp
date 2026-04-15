@@ -7654,8 +7654,7 @@ function connectWs() {
     stopMapAnimLoop();
     const sess = loadOnlineSession();
     myTeamId = sess?.solo ? null : sess?.teamId ?? null;
-    teamsMeta = null;
-    invalidateTeamColorByIdCache();
+    /* Не сбрасывать teamsMeta: при кратком обрыве иначе «вылет» из команд до прихода meta. */
     if (leaderboardPanel) leaderboardPanel.hidden = true;
     setConnState("error", "нет связи");
     reconnectTimer = setTimeout(connectWs, 3500);
