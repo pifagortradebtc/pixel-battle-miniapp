@@ -24,6 +24,7 @@ import {
   playPixelPlace,
   playFlagBaseHit,
   playBombExplosion,
+  playNukeExplosionSfx,
   playQuantumConnect,
   playQuantumDisconnect,
   playAlertBaseUnderAttack,
@@ -65,7 +66,7 @@ import {
 } from "../lib/flag-capture.js";
 import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
-import { TERRITORY_ISOLATION_GRACE_MS } from "../lib/territory-isolation.js";
+import { TERRITORY_ISOLATION_GRACE_MS, makeGridCellKey, neighborKeysInSet8 } from "../lib/territory-isolation.js";
 import { scoreTeamsAroundFarm, resolveFarmControl } from "../lib/quantum-farms.js";
 
 let gridW = 360;
@@ -79,14 +80,21 @@ const MAP_VIEW_OFFSET_LIM = 8_000_000;
 const DRAW_DETAIL_GRADIENT_MAX_CELLS = 7000;
 /** Ещё тяжелее — без анимированных рёбер между командами (второй полный проход по сетке). */
 const DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS = 11000;
-/** Подсветка зон событий на карте: ≈ на 40% тусклее (RGB) и прозрачнее (α). */
-const BATTLE_EVENT_OVERLAY_RGB_MUL = 0.6;
-const BATTLE_EVENT_OVERLAY_ALPHA_MUL = 0.6;
+/**
+ * Подсветка зон турнира на суше (gold / дуэль / экономика / shift / сжатие / сейсмика).
+ * Раньше было ×0.6 к RGB и α — зоны на карте почти не читались; держим полный цвет и усиливаем α.
+ */
+const BATTLE_EVENT_OVERLAY_RGB_MUL = 1;
+const BATTLE_EVENT_OVERLAY_ALPHA_MUL = 1;
+/** К целевой α из вызовов: заметность на тайле (~×5 к прошлому «двойному» затуханию 0.6²). */
+const BATTLE_EVENT_OVERLAY_ALPHA_BOOST = 1.85;
 /** Клетка без пикселя игрока: лёгкое затемнение базового цвета карты (пиксели команд читаются ярче). */
-const MAP_FREE_CELL_DIM_ALPHA = 0.14;
+const MAP_FREE_CELL_DIM_ALPHA = 0.17;
+/** База из плаката (regionRgb): чуть темнее, чтобы цвета команд контрастнее. */
+const MAP_BASE_RGB_DIM = 0.88;
 
 function battleEventOverlayRgba(r, g, b, a) {
-  const aa = Math.min(1, a * BATTLE_EVENT_OVERLAY_ALPHA_MUL);
+  const aa = Math.min(1, a * BATTLE_EVENT_OVERLAY_ALPHA_MUL * BATTLE_EVENT_OVERLAY_ALPHA_BOOST);
   return `rgba(${Math.round(r * BATTLE_EVENT_OVERLAY_RGB_MUL)},${Math.round(g * BATTLE_EVENT_OVERLAY_RGB_MUL)},${Math.round(b * BATTLE_EVENT_OVERLAY_RGB_MUL)},${aa})`;
 }
 
@@ -360,7 +368,6 @@ const browserTelegramInviteDismiss = document.getElementById("browser-telegram-i
 const leaderboardPanel = document.getElementById("leaderboard-panel");
 const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
-const leaderboardExpandBtn = document.getElementById("leaderboard-expand-btn");
 const roundTimerEl = document.getElementById("round-timer");
 const spectatorBadgeEl = document.getElementById("spectator-badge");
 const walletBalanceEl = document.getElementById("wallet-balance");
@@ -654,6 +661,69 @@ let lastTeamElimVfxAt = 0;
 /** Изоляция территории от базы: клетка → метаданные кармана (сервер). */
 /** @type {Map<string, { expiresAtMs: number, teamId: number, groupId: string }>} */
 let territoryIsolationCellMeta = new Map();
+
+/** Один BFS «связь с базой» на кадр отрисовки (зелёная зона расширения). */
+let drawConnectivityFrameId = 0;
+let baseConnCacheFrameId = -1;
+let baseConnCachedTeam = 0;
+/** @type {Set<string>} */
+let baseConnCachedSet = new Set();
+
+function computeClientBaseConnectedPixelKeys(teamId) {
+  const tid = teamId | 0;
+  if (!tid) return new Set();
+  const vertices = new Set();
+  for (const [k, v] of pixels) {
+    const o = typeof v === "number" ? v : v.teamId;
+    if ((o | 0) === tid) vertices.add(k);
+  }
+  const out = new Set();
+  const stack = [];
+  const neighBuf = [];
+  const sp = clientTeamSpawnRect(tid);
+  if (sp) {
+    const { x: bx, y: by } = flagCellFromSpawn(sp.x0, sp.y0);
+    const mainKey = makeGridCellKey(bx, by);
+    if (vertices.has(mainKey)) {
+      out.add(mainKey);
+      stack.push(mainKey);
+    }
+  }
+  const mos = clientMilitaryOutpostRects(tid);
+  for (let i = 0; i < mos.length; i++) {
+    const r = mos[i];
+    const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
+    const fk = makeGridCellKey(fx, fy);
+    if (vertices.has(fk) && !out.has(fk)) {
+      out.add(fk);
+      stack.push(fk);
+    }
+  }
+  if (!stack.length) return new Set();
+  while (stack.length) {
+    const cur = stack.pop();
+    const neigh = neighborKeysInSet8(cur, vertices, neighBuf);
+    for (let i = 0; i < neigh.length; i++) {
+      const nk = neigh[i];
+      if (out.has(nk)) continue;
+      out.add(nk);
+      stack.push(nk);
+    }
+  }
+  return out;
+}
+
+function getBaseConnSetForDrawFrame(teamId) {
+  const tid = teamId | 0;
+  if (baseConnCacheFrameId === drawConnectivityFrameId && baseConnCachedTeam === tid) {
+    return baseConnCachedSet;
+  }
+  const s = computeClientBaseConnectedPixelKeys(tid);
+  baseConnCacheFrameId = drawConnectivityFrameId;
+  baseConnCachedTeam = tid;
+  baseConnCachedSet = s;
+  return s;
+}
 /** Уже показали предупреждение для groupId кармана (не спамить при каждом sync). */
 const territoryIsolationWarnedGroupIds = new Set();
 /** Смещение времени сервера относительно клиента: serverNow − Date.now() в момент последнего sync изоляции. */
@@ -866,15 +936,8 @@ let lastLeaderboardRows = [];
 let lastStatsPayload = null;
 /** Очки команд на прошлом кадре рейтинга — для лёгкой анимации при росте. */
 const lastLbScoreByTeam = new Map();
-const LB_COMPACT_TOP = 5;
-const LB_EXPANDED_TOP = 12;
-const LB_EXPANDED_STORAGE_KEY = "pb-lb-expanded";
-let leaderboardExpanded = false;
-try {
-  leaderboardExpanded = sessionStorage.getItem(LB_EXPANDED_STORAGE_KEY) === "1";
-} catch {
-  leaderboardExpanded = false;
-}
+/** Сколько строк рейтинга без прокрутки (остальные — только в полном списке на сервере). */
+const LB_TOP_TEAMS_SHOWN = 15;
 /** Сброс кинематографии событий при смене раунда. */
 let lastRoundIndexForPresentation = -1;
 let maxPerTeam = 200;
@@ -893,6 +956,8 @@ let lobbyBeforeGoMeta = false;
 let gameFinishedMeta = false;
 /** С сервера: полная пауза (бот pause / unpause). */
 let gamePausedMeta = false;
+/** Wall-time старта паузы (как на сервере); 0 если не на паузе. Для «Мстим» на паузе таймер замирает. */
+let pauseWallStartedAtMeta = 0;
 
 function syncBackgroundMusicAllowed() {
   const allow = !spectatorMode && !gameFinishedMeta && !gamePausedMeta;
@@ -1123,21 +1188,28 @@ function clientCellInsideAnyMilitaryOutpost(x, y, teamId) {
 }
 
 /**
- * 8-соседство со своей закрашенной клеткой ИЛИ с клеткой внутри прямоугольника базы (даже без пикселя в карте).
- * Совпадает с cellTouchesTeamTerritory на сервере — иначе после смены раунда «база есть в UI, а поставить нельзя».
+ * 8-соседство: своя закрашенная клетка только если в компоненте с флагом главной базы или плацдарма;
+ * иначе — пустые клетки внутри 6×6 базы / плацдарма.
+ * `baseConnOverride` — свежий BFS при клике; иначе кэш на кадр (отрисовка зоны расширения).
+ * Совпадает с cellTouchesTeamTerritory на сервере.
  */
-function cellTouchesTeamTerritoryClient(x, y, teamId) {
+function cellTouchesTeamTerritoryClient(x, y, teamId, baseConnOverride) {
   if (teamId == null) return false;
   const tid = teamId | 0;
   const sp = clientTeamSpawnRect(tid);
+  const baseConn = baseConnOverride ?? getBaseConnSetForDrawFrame(tid);
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0) continue;
       const nx = x + dx;
       const ny = y + dy;
       if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
+      const nk = `${nx},${ny}`;
       const o = clientPixelTeamIdAt(nx, ny);
-      if (o != null && o === tid) return true;
+      if (o != null && o === tid) {
+        if (baseConn.has(nk)) return true;
+        continue;
+      }
       if (sp && clientCellInsideSpawnRect(nx, ny, sp)) return true;
       if (clientCellInsideAnyMilitaryOutpost(nx, ny, tid)) return true;
     }
@@ -1150,6 +1222,7 @@ function cellTouchesTeamTerritoryClient(x, y, teamId) {
  * Совпадает с логикой filterPlannedReachableFromTeam на сервере для покупок зон.
  */
 function filterClientKeysReachableFromTeam(keyStrings, teamId) {
+  const baseConn = computeClientBaseConnectedPixelKeys(teamId | 0);
   const inSet = new Set(keyStrings);
   const seen = new Set();
   const queue = [];
@@ -1158,7 +1231,7 @@ function filterClientKeysReachableFromTeam(keyStrings, teamId) {
     const x = Number(parts[0]);
     const y = Number(parts[1]);
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (cellTouchesTeamTerritoryClient(x, y, teamId) && !seen.has(k)) {
+    if (cellTouchesTeamTerritoryClient(x, y, teamId, baseConn) && !seen.has(k)) {
       seen.add(k);
       queue.push(k);
     }
@@ -1544,6 +1617,25 @@ function clientNukeBlastWouldClearTerritory(cx, cy) {
     if (tid !== 0) return true;
   }
   return false;
+}
+
+/** Один раз на эпицентр ~10 с — не дублировать при позднем purchaseVfx после purchaseOk. */
+let lastNukeFlashDedupeKey = "";
+let lastNukeFlashDedupeAt = 0;
+/** Совпадает с handlePurchaseOk — не дублировать boardVfx / «УДАР!» при позднем purchaseVfx. */
+let lastNukeBoardVfxDedupeKey = "";
+let lastNukeBoardVfxDedupeAt = 0;
+function tryRunNukeFlashPresentation(epicGx, epicGy) {
+  if (!Number.isFinite(epicGx) || !Number.isFinite(epicGy)) {
+    runNukeFlashPresentation(epicGx, epicGy);
+    return;
+  }
+  const k = `${epicGx | 0},${epicGy | 0}`;
+  const t = performance.now();
+  if (k === lastNukeFlashDedupeKey && t - lastNukeFlashDedupeAt < 10_000) return;
+  lastNukeFlashDedupeKey = k;
+  lastNukeFlashDedupeAt = t;
+  runNukeFlashPresentation(epicGx, epicGy);
 }
 
 /** Красная вспышка + тряска силой по близости эпицентра к центру экрана. */
@@ -2093,10 +2185,10 @@ function syncWelcomeForRound() {
 }
 
 function countryColor(regionId) {
-  if (regionId === 0) return "#0a1a32"; /* небо / фон плаката */
-  if (regionId === 1) return `hsl(38 32% 30%)`;
+  if (regionId === 0) return "#071222"; /* вода / небо — темнее, суше контраст */
+  if (regionId === 1) return `hsl(38 32% 23%)`;
   const h = ((regionId - 2) * 53) % 360;
-  return `hsl(${h} 36% 30%)`;
+  return `hsl(${h} 36% 23%)`;
 }
 
 function teamColor(teamId) {
@@ -2650,17 +2742,6 @@ function updateTeamBadge() {
   syncTeamBadgeColorSwatch();
 }
 
-function syncLeaderboardPanelMode() {
-  if (!leaderboardPanel || !leaderboardExpandBtn) return;
-  leaderboardPanel.classList.toggle("lb-widget--expanded", leaderboardExpanded);
-  leaderboardPanel.classList.toggle("lb-widget--compact", !leaderboardExpanded);
-  leaderboardExpandBtn.setAttribute("aria-expanded", leaderboardExpanded ? "true" : "false");
-  leaderboardExpandBtn.setAttribute(
-    "aria-label",
-    leaderboardExpanded ? "Свернуть рейтинг" : "Развернуть полный рейтинг"
-  );
-}
-
 let statsUiThrottleTimer = null;
 /** @type {object | null} */
 let statsUiPending = null;
@@ -2703,11 +2784,9 @@ function renderLeaderboardImmediate(msg) {
   const rows = Array.isArray(msg.rows) ? msg.rows : [];
   lastLeaderboardRows = rows;
   onlineCountEl.textContent = String(msg.online ?? 0);
-  syncLeaderboardPanelMode();
 
   const prevScores = new Map(lastLbScoreByTeam);
-  const topN = leaderboardExpanded ? LB_EXPANDED_TOP : LB_COMPACT_TOP;
-  const slice = rows.slice(0, topN);
+  const slice = rows.slice(0, LB_TOP_TEAMS_SHOWN);
   const myRow = myTeamId != null ? rows.find((r) => (r.teamId | 0) === (myTeamId | 0)) : null;
   const myInSlice = !!(myRow && slice.some((r) => (r.teamId | 0) === (myTeamId | 0)));
 
@@ -2744,19 +2823,17 @@ function renderLeaderboardImmediate(msg) {
     main.append(rankEl, em, name, scoreEl);
     li.append(main);
 
-    if (leaderboardExpanded) {
-      const sub = document.createElement("div");
-      sub.className = "lb-row__sub";
-      const players = typeof row.players === "number" ? row.players : 0;
-      const behind =
-        typeof row.pointsBehindLeader === "number" &&
-        (row.rank | 0) > 1 &&
-        row.pointsBehindLeader > 0
-          ? ` · −${formatHudScore(row.pointsBehindLeader)} до лидера`
-          : "";
-      sub.textContent = `${players} в команде${behind}`;
-      li.append(sub);
-    }
+    const sub = document.createElement("div");
+    sub.className = "lb-row__sub";
+    const players = typeof row.players === "number" ? row.players : 0;
+    const behind =
+      typeof row.pointsBehindLeader === "number" &&
+      (row.rank | 0) > 1 &&
+      row.pointsBehindLeader > 0
+        ? ` · −${formatHudScore(row.pointsBehindLeader)} до лидера`
+        : "";
+    sub.textContent = `${players} в команде${behind}`;
+    li.append(sub);
     leaderboardListEl.appendChild(li);
   }
 
@@ -3691,16 +3768,6 @@ function setupCreateTeamUi() {
   treasureFoundOverlayEl?.addEventListener("click", (e) => {
     if (e.target === treasureFoundOverlayEl) hideTreasureFoundOverlay();
   });
-  leaderboardExpandBtn?.addEventListener("click", () => {
-    leaderboardExpanded = !leaderboardExpanded;
-    try {
-      sessionStorage.setItem(LB_EXPANDED_STORAGE_KEY, leaderboardExpanded ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-    syncLeaderboardPanelMode();
-    if (lastStatsPayload) renderLeaderboardImmediate(lastStatsPayload);
-  });
   roundEndedDismissBtn?.addEventListener("click", hideRoundEndedOverlay);
   btnToolbarBase?.addEventListener("click", () => {
     const sp = getMyTeamSpawn();
@@ -3857,7 +3924,12 @@ function onMeta(msg) {
   maxPerTeam = msg.maxPerTeam ?? 200;
   gameFinishedMeta = !!msg.gameFinished;
   gamePausedMeta = !!msg.gamePaused;
+  pauseWallStartedAtMeta =
+    gamePausedMeta && typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
+      ? msg.pauseWallStartedAt | 0
+      : 0;
   syncAdminGamePauseOverlay();
+  syncClientCooldownFromWalletFields();
   roundEndsAtMs =
     typeof msg.roundEndsAt === "number" && !Number.isNaN(msg.roundEndsAt) ? msg.roundEndsAt : null;
   playStartsAtMs =
@@ -4440,18 +4512,30 @@ function syncEventBanner() {
   }
 }
 
+function isAltSeasonRevengeWallActive(arUntilRaw) {
+  const u = arUntilRaw | 0;
+  if (u <= 0) return false;
+  if (gamePausedMeta && pauseWallStartedAtMeta > 0) {
+    return u > pauseWallStartedAtMeta;
+  }
+  return u > Date.now();
+}
+
 function syncClientCooldownFromWalletFields() {
   if (!walletState) return;
-  const now = Date.now();
   const ge = walletState.globalEvent;
+  const fromGe = typeof ge?.altSeasonRevengeUntilMs === "number" ? ge.altSeasonRevengeUntilMs | 0 : 0;
+  const fromStats =
+    typeof lastStatsGlobalEvent?.altSeasonRevengeUntilMs === "number"
+      ? lastStatsGlobalEvent.altSeasonRevengeUntilMs | 0
+      : 0;
   const arUntil =
-    (typeof ge?.altSeasonRevengeUntilMs === "number" && ge.altSeasonRevengeUntilMs > now
-      ? ge.altSeasonRevengeUntilMs
-      : typeof lastStatsGlobalEvent?.altSeasonRevengeUntilMs === "number" &&
-          lastStatsGlobalEvent.altSeasonRevengeUntilMs > now
-        ? lastStatsGlobalEvent.altSeasonRevengeUntilMs
+    (fromGe && isAltSeasonRevengeWallActive(fromGe)
+      ? fromGe
+      : fromStats && isAltSeasonRevengeWallActive(fromStats)
+        ? fromStats
         : 0) | 0;
-  if (arUntil > now) {
+  if (isAltSeasonRevengeWallActive(arUntil)) {
     walletState.effectiveRecoverySec = 1;
     walletState.cooldownMs = 1000;
     return;
@@ -5151,28 +5235,36 @@ function applyGlobalPurchaseVfx(msg) {
         typeof msg.cellsCleared === "number" && Number.isFinite(msg.cellsCleared)
           ? msg.cellsCleared | 0
           : sample.length;
-      if (boardVfx) {
-        boardVfx.nukeExplosion(gx | 0, gy | 0, tr, sample);
-        flushBoardVfxFrame();
-        requestAnimationFrame(() => flushBoardVfxFrame());
-      }
       const gxi = gx | 0;
       const gyi = gy | 0;
-      runNukeFlashPresentation(gxi, gyi);
-      playBombExplosion();
-      applyNukeAftermathFromEpicenter(gxi, gyi);
-      const pos = gridBlastCenterClientPx(gxi, gyi);
-      spawnFloatingText(floatFxHost, "УДАР!", pos, "float-fx__pop--raid");
-      if (nCleared >= 48) {
-        setTimeout(() => {
-          spawnFloatingText(
-            floatFxHost,
-            "Массовое поражение!",
-            { x: pos.x, y: pos.y - 30 },
-            "float-fx__pop--raid"
-          );
-        }, 240);
+      const dupK = `${gxi},${gyi}`;
+      const nowVfx = performance.now();
+      const skipHeavyNukeFx =
+        dupK === lastNukeBoardVfxDedupeKey && nowVfx - lastNukeBoardVfxDedupeAt < 10_000;
+      if (!skipHeavyNukeFx) {
+        if (boardVfx) {
+          lastNukeBoardVfxDedupeKey = dupK;
+          lastNukeBoardVfxDedupeAt = nowVfx;
+          boardVfx.nukeExplosion(gxi, gyi, tr, sample);
+          flushBoardVfxFrame();
+          requestAnimationFrame(() => flushBoardVfxFrame());
+        }
+        const pos = gridBlastCenterClientPx(gxi, gyi);
+        spawnFloatingText(floatFxHost, "УДАР!", pos, "float-fx__pop--raid");
+        if (nCleared >= 48) {
+          setTimeout(() => {
+            spawnFloatingText(
+              floatFxHost,
+              "Массовое поражение!",
+              { x: pos.x, y: pos.y - 30 },
+              "float-fx__pop--raid"
+            );
+          }, 240);
+        }
       }
+      tryRunNukeFlashPresentation(gxi, gyi);
+      playNukeExplosionSfx(gxi, gyi);
+      applyNukeAftermathFromEpicenter(gxi, gyi);
       const pad = 10;
       scheduleDraw({
         dirty: {
@@ -5355,9 +5447,42 @@ function handlePurchaseOk(msg) {
     spawnFloatingText(floatFxHost, "ЗОНА 12×12", { x: flo.x, y: flo.y - 10 }, "float-fx__pop--raid");
   }
   if (kind === "nukeBomb") {
+    const nx = typeof msg.x === "number" && Number.isFinite(msg.x) ? msg.x | 0 : NaN;
+    const ny = typeof msg.y === "number" && Number.isFinite(msg.y) ? msg.y | 0 : NaN;
+    if (Number.isFinite(nx) && Number.isFinite(ny)) {
+      tryRunNukeFlashPresentation(nx, ny);
+      playNukeExplosionSfx(nx, ny);
+      if (boardVfx) {
+        const tr = getVfxTransform();
+        const sample = Array.isArray(msg.cellsSample) ? msg.cellsSample : [];
+        const t = performance.now();
+        lastNukeBoardVfxDedupeKey = `${nx},${ny}`;
+        lastNukeBoardVfxDedupeAt = t;
+        boardVfx.nukeExplosion(nx, ny, tr, sample);
+        flushBoardVfxFrame();
+        requestAnimationFrame(() => flushBoardVfxFrame());
+      }
+      applyNukeAftermathFromEpicenter(nx, ny);
+      const posOk = gridBlastCenterClientPx(nx, ny);
+      spawnFloatingText(floatFxHost, "УДАР!", posOk, "float-fx__pop--raid");
+      const nClearOk = typeof msg.cells === "number" && Number.isFinite(msg.cells) ? msg.cells | 0 : 0;
+      if (nClearOk >= 48) {
+        setTimeout(() => {
+          spawnFloatingText(
+            floatFxHost,
+            "Массовое поражение!",
+            { x: posOk.x, y: posOk.y - 30 },
+            "float-fx__pop--raid"
+          );
+        }, 240);
+      }
+    } else {
+      tryRunNukeFlashPresentation(NaN, NaN);
+      playNukeExplosionSfx(NaN, NaN);
+    }
     spawnFloatingText(floatFxHost, "☢ БОМБА ЗАПУЩЕНА", { x: flo.x, y: flo.y - 14 }, "float-fx__pop--raid");
     setTimeout(() => {
-      spawnFloatingText(floatFxHost, "Списаны кванты — ждите эффект на карте", { x: flo.x, y: flo.y + 8 }, "float-fx__pop--raid");
+      spawnFloatingText(floatFxHost, "Списаны кванты — эпицентр на карте", { x: flo.x, y: flo.y + 8 }, "float-fx__pop--raid");
     }, 280);
   }
   if (kind === "militaryBase") {
@@ -6379,7 +6504,6 @@ function connectWs() {
       myTeamId = sess?.teamId ?? null;
     }
     if (leaderboardPanel) leaderboardPanel.hidden = false;
-    syncLeaderboardPanelMode();
     setFooterMode();
     updateRoundTimer();
     startMapAnimLoop();
@@ -6545,6 +6669,12 @@ function connectWs() {
 
     if (msg.type === "gamePauseSync") {
       gamePausedMeta = !!msg.paused;
+      pauseWallStartedAtMeta =
+        gamePausedMeta &&
+        typeof msg.pauseWallStartedAt === "number" &&
+        !Number.isNaN(msg.pauseWallStartedAt)
+          ? msg.pauseWallStartedAt | 0
+          : 0;
       /* Один пакет с актуальными таймстампами — без гонки с отдельным tournamentTimeScale после unpause. */
       if ("roundEndsAt" in msg) {
         roundEndsAtMs =
@@ -6560,6 +6690,7 @@ function connectWs() {
       updateRoundTimer();
       syncTournamentWarmupOverlay();
       syncBackgroundMusicAllowed();
+      syncClientCooldownFromWalletFields();
       return;
     }
 
@@ -6607,6 +6738,7 @@ function connectWs() {
       if (msg.globalEvent && typeof msg.globalEvent === "object") {
         if (walletState) walletState.globalEvent = msg.globalEvent;
         lastStatsGlobalEvent = msg.globalEvent;
+        syncClientCooldownFromWalletFields();
       }
       syncEventBanner();
       syncTeamBuffBanner();
@@ -6615,8 +6747,7 @@ function connectWs() {
     }
     if (msg.type === "mstimAltSeasonSync") {
       const u = Number(msg.untilMs) || 0;
-      const now = Date.now();
-      const until = u > now ? u : 0;
+      const until = u > 0 ? u : 0;
       const patch = { altSeasonRevengeUntilMs: until };
       if (walletState) {
         walletState.globalEvent = { ...(walletState.globalEvent || {}), ...patch };
@@ -6722,9 +6853,11 @@ function connectWs() {
       }
       const ecx = typeof msg.cx === "number" && Number.isFinite(msg.cx) ? msg.cx | 0 : NaN;
       const ecy = typeof msg.cy === "number" && Number.isFinite(msg.cy) ? msg.cy | 0 : NaN;
-      playBombExplosion();
       if (Number.isFinite(ecx) && Number.isFinite(ecy)) {
+        playNukeExplosionSfx(ecx, ecy);
         applyNukeAftermathFromEpicenter(ecx, ecy);
+      } else {
+        playBombExplosion();
       }
       seismicAfterglowTremorUntilMs = Math.max(seismicAfterglowTremorUntilMs, Date.now() + 2800);
       applySeismicTremorBodyOverride();
@@ -8513,6 +8646,7 @@ function draw(time = performance.now(), drawOpts = {}) {
     scheduleResizeCanvas();
     return;
   }
+  drawConnectivityFrameId++;
   const stage = canvas.parentElement;
   if (stage && (stage.clientHeight | 0) > 32 && h > 0 && h < (stage.clientHeight | 0) * 0.42) {
     scheduleResizeCanvas();
@@ -8598,7 +8732,10 @@ function draw(time = performance.now(), drawOpts = {}) {
       let base;
       if (regionRgb && regionRgb.length === gridW * gridH * 3) {
         const ri = (gy * gridW + gx) * 3;
-        base = `rgb(${regionRgb[ri]},${regionRgb[ri + 1]},${regionRgb[ri + 2]})`;
+        const d = MAP_BASE_RGB_DIM;
+        base = `rgb(${Math.round(regionRgb[ri] * d)},${Math.round(regionRgb[ri + 1] * d)},${Math.round(
+          regionRgb[ri + 2] * d
+        )})`;
       } else {
         base = countryColor(idx);
       }
@@ -8864,7 +9001,7 @@ function draw(time = performance.now(), drawOpts = {}) {
             const L = layers[li];
             const goldKinds = ["gold_zone", "target_zone", "duel_zone"];
             if (goldKinds.includes(L.kind) && L.rect && pointInRect(gx, gy, L.rect)) {
-              ctx.fillStyle = battleEventOverlayRgba(255, 230, 30, 0.88 + pulseEv * 0.1);
+              ctx.fillStyle = battleEventOverlayRgba(255, 235, 60, 0.92 + pulseEv * 0.08);
               ctx.fillRect(px, py, cw, ch);
             }
             const econKinds = [
@@ -8877,10 +9014,10 @@ function draw(time = performance.now(), drawOpts = {}) {
             if (econKinds.includes(L.kind)) {
               const zone = cellInEconomicLayer(L, gx, gy);
               if (zone === "boom") {
-                ctx.fillStyle = battleEventOverlayRgba(70, 255, 140, 0.58 + pulseEv * 0.18);
+                ctx.fillStyle = battleEventOverlayRgba(80, 255, 150, 0.72 + pulseEv * 0.14);
                 ctx.fillRect(px, py, cw, ch);
               } else if (zone === "rec") {
-                ctx.fillStyle = battleEventOverlayRgba(120, 195, 255, 0.55 + pulseEv * 0.16);
+                ctx.fillStyle = battleEventOverlayRgba(130, 210, 255, 0.68 + pulseEv * 0.12);
                 ctx.fillRect(px, py, cw, ch);
               }
             }
@@ -8888,10 +9025,10 @@ function draw(time = performance.now(), drawOpts = {}) {
           if (compLayer && compLayer.compression) {
             const m = tournamentCompressionMultiplierForCell(gx, gy, gridW, gridH, compLayer.compression);
             if (m < 0.92) {
-              ctx.fillStyle = battleEventOverlayRgba(35, 50, 95, Math.min(0.58, (1 - m) * 0.75));
+              ctx.fillStyle = battleEventOverlayRgba(45, 65, 120, Math.min(0.78, (1 - m) * 0.95));
               ctx.fillRect(px, py, cw, ch);
             } else if (m > 1.08) {
-              ctx.fillStyle = battleEventOverlayRgba(255, 215, 85, Math.min(0.58, (m - 1) * 0.85));
+              ctx.fillStyle = battleEventOverlayRgba(255, 225, 100, Math.min(0.78, (m - 1) * 1.05));
               ctx.fillRect(px, py, cw, ch);
             }
           }
@@ -8917,16 +9054,16 @@ function draw(time = performance.now(), drawOpts = {}) {
           const sw = r.w * cell;
           const sh = r.h * cell;
           const p = 0.92 + pulseEv * 0.08;
-          const padOut = Math.max(5, cell * 0.65);
+          const padOut = Math.max(6, cell * 0.78);
           ctx.save();
-          ctx.strokeStyle = battleEventOverlayRgba(0, 0, 0, 0.65 * blackOutlinePulse + 0.25);
-          ctx.lineWidth = Math.max(6, cell * 0.7);
+          ctx.strokeStyle = battleEventOverlayRgba(0, 0, 0, 0.72 * blackOutlinePulse + 0.28);
+          ctx.lineWidth = Math.max(8, cell * 0.86);
           ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
-          ctx.strokeStyle = battleEventOverlayRgba(255, 220, 40, 0.98 * p);
-          ctx.lineWidth = Math.max(4.5, cell * 0.5);
+          ctx.strokeStyle = battleEventOverlayRgba(255, 228, 55, 0.99 * p);
+          ctx.lineWidth = Math.max(5.5, cell * 0.6);
           ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
-          ctx.strokeStyle = battleEventOverlayRgba(255, 255, 245, 0.9 * p);
-          ctx.lineWidth = Math.max(2.5, cell * 0.24);
+          ctx.strokeStyle = battleEventOverlayRgba(255, 255, 250, 0.96 * p);
+          ctx.lineWidth = Math.max(3.2, cell * 0.3);
           ctx.strokeRect(sx0 + cell * 0.1, sy0 + cell * 0.1, sw - cell * 0.2, sh - cell * 0.2);
           ctx.restore();
         }
@@ -8941,16 +9078,16 @@ function draw(time = performance.now(), drawOpts = {}) {
             const sy0 = offsetY + rr.y0 * cell;
             const sw = rr.w * cell;
             const sh = rr.h * cell;
-            const padOut = Math.max(4, cell * 0.48);
+            const padOut = Math.max(5, cell * 0.58);
             ctx.save();
-            ctx.strokeStyle = battleEventOverlayRgba(0, 0, 0, 0.52 * blackOutlinePulse + 0.22);
-            ctx.lineWidth = Math.max(5, cell * 0.52);
+            ctx.strokeStyle = battleEventOverlayRgba(0, 0, 0, 0.6 * blackOutlinePulse + 0.26);
+            ctx.lineWidth = Math.max(6.5, cell * 0.64);
             ctx.strokeRect(sx0 - padOut, sy0 - padOut, sw + padOut * 2, sh + padOut * 2);
-            ctx.strokeStyle = boom ? battleEventOverlayRgba(30, 255, 110, 0.95) : battleEventOverlayRgba(120, 200, 255, 0.95);
-            ctx.lineWidth = Math.max(3.5, cell * 0.4);
+            ctx.strokeStyle = boom ? battleEventOverlayRgba(40, 255, 125, 0.98) : battleEventOverlayRgba(135, 215, 255, 0.98);
+            ctx.lineWidth = Math.max(4.2, cell * 0.48);
             ctx.strokeRect(sx0 - 2, sy0 - 2, sw + 4, sh + 4);
-            ctx.strokeStyle = boom ? battleEventOverlayRgba(200, 255, 220, 0.55) : battleEventOverlayRgba(220, 235, 255, 0.5);
-            ctx.lineWidth = Math.max(2, cell * 0.18);
+            ctx.strokeStyle = boom ? battleEventOverlayRgba(210, 255, 230, 0.72) : battleEventOverlayRgba(230, 240, 255, 0.68);
+            ctx.lineWidth = Math.max(2.6, cell * 0.22);
             ctx.strokeRect(sx0 + cell * 0.1, sy0 + cell * 0.1, sw - cell * 0.2, sh - cell * 0.2);
             ctx.restore();
           }
@@ -8985,7 +9122,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.clip();
         const grd = ctx.createLinearGradient(sx0 + sw * sweep, sy0, sx0 + sw * (sweep - 0.35), sy0 + sh);
         grd.addColorStop(0, "rgba(255,255,255,0)");
-        grd.addColorStop(0.5, battleEventOverlayRgba(255, 248, 80, 0.92));
+        grd.addColorStop(0.5, battleEventOverlayRgba(255, 252, 120, 0.96));
         grd.addColorStop(1, "rgba(255,255,255,0)");
         ctx.fillStyle = grd;
         ctx.globalCompositeOperation = "source-over";
@@ -9001,9 +9138,9 @@ function draw(time = performance.now(), drawOpts = {}) {
         for (let ring = 0; ring < 4; ring++) {
           const phase = (time * 0.0003 + ring * 0.26) % 1;
           const rad = maxR * (0.16 + phase * 0.82);
-          const a = 0.09 + 0.2 * (1 - phase);
-          ctx.strokeStyle = battleEventOverlayRgba(255, 185, 95, a);
-          ctx.lineWidth = 3 + ring * 0.45;
+          const a = Math.min(0.55, 0.16 + 0.42 * (1 - phase));
+          ctx.strokeStyle = battleEventOverlayRgba(255, 200, 110, a);
+          ctx.lineWidth = 4.2 + ring * 0.58;
           ctx.beginPath();
           ctx.arc(cx, cy, rad, 0, Math.PI * 2);
           ctx.stroke();
@@ -9025,10 +9162,10 @@ function draw(time = performance.now(), drawOpts = {}) {
                 const cw = Math.ceil(cell);
                 const ch = Math.ceil(cell);
                 const pulseS = 0.5 + 0.5 * Math.sin(time * 0.006);
-                ctx.fillStyle = battleEventOverlayRgba(255, 55, 25, 0.32 + pulseS * 0.18);
+                ctx.fillStyle = battleEventOverlayRgba(255, 70, 40, 0.48 + pulseS * 0.22);
                 ctx.fillRect(px, py, cw, ch);
-                ctx.strokeStyle = battleEventOverlayRgba(255, 160, 90, 0.82);
-                ctx.lineWidth = Math.max(1.5, cell * 0.14);
+                ctx.strokeStyle = battleEventOverlayRgba(255, 175, 100, 0.92);
+                ctx.lineWidth = Math.max(2, cell * 0.18);
                 ctx.strokeRect(px + 0.5, py + 0.5, Math.max(1, cw - 1), Math.max(1, ch - 1));
               }
             }
@@ -9838,7 +9975,7 @@ function placePixel(gx, gy) {
       lastPlaceAt = 0;
       return;
     }
-    if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId)) {
+    if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId, computeClientBaseConnectedPixelKeys(myTeamId | 0))) {
       notifyReject(onEnemyFlag ? "enemy_base_not_adjacent" : "not_adjacent");
       lastPlaceAt = 0;
       return;

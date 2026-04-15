@@ -82,6 +82,8 @@ import {
 import {
   TERRITORY_ISOLATION_GRACE_MS,
   computeIsolatedTerritoryGroups,
+  makeGridCellKey,
+  neighborKeysInSet8,
 } from "./lib/territory-isolation.js";
 import { isWorldMapWaterPixel } from "./lib/world-map-water.js";
 import { buildRandomTreasureMap } from "./lib/map-treasures.js";
@@ -742,6 +744,31 @@ function sanitizePlayerKey(s) {
 }
 
 /**
+ * После покупки с deferSave: узкая запись в БД (ledger + economy покупателя), без полного обхода кэша users.
+ */
+async function persistWalletPurchaseWrites(pkRaw) {
+  const pk = sanitizePlayerKey(pkRaw);
+  if (typeof walletStore.persistPurchaseWrites === "function") {
+    await walletStore.persistPurchaseWrites(pk ? [pk] : []);
+  } else {
+    await walletStore.save();
+  }
+}
+
+/**
+ * Не блокировать обработчик WebSocket на Postgres: ответы клиенту уже ушли.
+ * Очередь — без гонок по _pendingLedger и без всплеска параллельных pool.connect().
+ */
+let walletPurchasePersistChain = Promise.resolve();
+
+function queuePersistWalletPurchaseWrites(pkRaw) {
+  const pk = sanitizePlayerKey(pkRaw);
+  walletPurchasePersistChain = walletPurchasePersistChain
+    .then(() => persistWalletPurchaseWrites(pk))
+    .catch((e) => console.warn("[wallet] persist purchase:", e?.message || e));
+}
+
+/**
  * Дебаунс записи economy (lastActionAt и др.) на диск: не блокировать event loop
  * `await walletStore.save()` на каждый пиксель (особенно WalletPg.save() проходил по всему кэшу users).
  */
@@ -1214,7 +1241,7 @@ function buildSynergyMultByTeamMap(snap) {
 }
 
 function getGlobalEventPayload(nowMs = Date.now()) {
-  const arUntil = mstimAltSeasonBurstUntilMs > nowMs ? mstimAltSeasonBurstUntilMs : 0;
+  const arUntil = isMstimAltSeasonBurstActive() ? (mstimAltSeasonBurstUntilMs | 0) : 0;
   const ctx = getBattleEventsContext(nowMs);
   if (!ctx) {
     return {
@@ -2198,18 +2225,23 @@ function effectiveGameClockMs() {
   return Date.now();
 }
 
-function isMstimAltSeasonBurstActive(nowMs = Date.now()) {
-  const t = gamePaused && (pauseWallStartedAt | 0) > 0 ? pauseWallStartedAt | 0 : nowMs;
-  return (mstimAltSeasonBurstUntilMs | 0) > t;
+/** Окно «Мстим за Альт Сезон»: wall-clock, на паузе таймер замирает (until сдвигается при unpause). */
+function isMstimAltSeasonBurstActive() {
+  const until = mstimAltSeasonBurstUntilMs | 0;
+  if (until <= 0) return false;
+  if (gamePaused && (pauseWallStartedAt | 0) > 0) {
+    return until > (pauseWallStartedAt | 0);
+  }
+  return until > Date.now();
 }
 
 function effectivePixelCooldownMs(u, teamFx, st, now) {
-  if (isMstimAltSeasonBurstActive(now)) return MSTIM_PIXEL_COOLDOWN_MS;
+  if (isMstimAltSeasonBurstActive()) return MSTIM_PIXEL_COOLDOWN_MS;
   return getCurrentCooldownMs(u, teamFx, st, now);
 }
 
 function effectiveRecoverySecForWallet(u, teamFx, now) {
-  if (isMstimAltSeasonBurstActive(now)) return 1;
+  if (isMstimAltSeasonBurstActive()) return 1;
   return getEffectiveRecoverySec(u, teamFx, now);
 }
 
@@ -3590,21 +3622,91 @@ function cellInsideTeamSpawnRect(x, y, t) {
   );
 }
 
+/** Кэш «связь с снабжением» (8-связность от флагов главной базы и плацдармов). */
+let baseConnectedPixelsCacheGen = 0;
+/** @type {Map<number, Set<string>>} */
+const baseConnectedPixelsCacheByTeam = new Map();
+
+function invalidateBaseConnectedPixelsCache() {
+  baseConnectedPixelsCacheGen++;
+  baseConnectedPixelsCacheByTeam.clear();
+}
+
 /**
- * 8-соседство: рядом своя закрашенная клетка ИЛИ клетка, лежащая в прямоугольнике базы 6×6.
- * Второе нужно после смены раунда/сетки, если заливка базы в `pixels` не дошла до клиента или частично пуста.
+ * Все закрашенные клетки команды, достижимые от флага главной базы или любого плацдарма 6×6
+ * (те же якоря, что и для 20 с изоляции).
+ */
+function computeBaseConnectedPixelKeysForTeam(teamId) {
+  const tid = teamId | 0;
+  if (!tid) return new Set();
+  const hit = baseConnectedPixelsCacheByTeam.get(tid);
+  if (hit) return hit;
+
+  const vertices = new Set();
+  for (const [k, v] of pixels) {
+    if ((pixelTeam(v) | 0) === tid) vertices.add(k);
+  }
+  const out = new Set();
+  const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
+  if (!t || typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") {
+    baseConnectedPixelsCacheByTeam.set(tid, out);
+    return out;
+  }
+  const stack = [];
+  const neighBuf = [];
+  const { x: bx, y: by } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
+  const mainKey = makeGridCellKey(bx, by);
+  if (vertices.has(mainKey)) {
+    out.add(mainKey);
+    stack.push(mainKey);
+  }
+  for (const o of getTeamMilitaryOutposts(t)) {
+    const { x: fx, y: fy } = flagCellFromSpawn(o.x0, o.y0);
+    const fk = makeGridCellKey(fx, fy);
+    if (vertices.has(fk) && !out.has(fk)) {
+      out.add(fk);
+      stack.push(fk);
+    }
+  }
+  if (!stack.length) {
+    baseConnectedPixelsCacheByTeam.set(tid, out);
+    return out;
+  }
+  while (stack.length) {
+    const cur = stack.pop();
+    const neigh = neighborKeysInSet8(cur, vertices, neighBuf);
+    for (let i = 0; i < neigh.length; i++) {
+      const nk = neigh[i];
+      if (out.has(nk)) continue;
+      out.add(nk);
+      stack.push(nk);
+    }
+  }
+  baseConnectedPixelsCacheByTeam.set(tid, out);
+  return out;
+}
+
+/**
+ * 8-соседство: своя закрашенная клетка только если она в компоненте с якорем главной базы или плацдарма;
+ * иначе — только пустые клетки внутри 6×6 базы / плацдарма.
+ * Отрезанный «мигающий» карман не даёт строить дальше от себя.
  */
 function cellTouchesTeamTerritory(x, y, teamId) {
   const tid = teamId | 0;
   const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
+  const baseConn = computeBaseConnectedPixelKeysForTeam(tid);
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       if (dx === 0 && dy === 0) continue;
       const nx = x + dx;
       const ny = y + dy;
       if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
-      const v = pixels.get(`${nx},${ny}`);
-      if (v != null && pixelTeam(v) === tid) return true;
+      const nk = `${nx},${ny}`;
+      const v = pixels.get(nk);
+      if (v != null && pixelTeam(v) === tid) {
+        if (baseConn.has(nk)) return true;
+        continue;
+      }
       if (t && cellInsideTeamSpawnRect(nx, ny, t)) return true;
       if (t && cellInsideAnyMilitaryOutpostRect(nx, ny, tid)) return true;
     }
@@ -4446,6 +4548,7 @@ function afterTerritoryMutation() {
   checkDuelWinByElimination(st);
   scanMilitaryOutpostsVacancyAndExpire(Date.now());
   schedulePixelsSnapshotSave();
+  invalidateBaseConnectedPixelsCache();
 }
 
 /** @param {Map<number, number> | undefined} byTeam — если уже есть результат computeTeamTerritoryCounts, не второй проход по pixels. */
@@ -5336,6 +5439,7 @@ async function sendConnectionMeta(ws) {
     playStartsAt: warmupEndsAt,
     warmupMs: getWarmupDurationMs(),
     gamePaused: !!gamePaused,
+    pauseWallStartedAt: gamePaused ? pauseWallStartedAt | 0 : 0,
     lobbyBeforeGo: !!(WAIT_FOR_TELEGRAM_GO && roundIndex === 0 && !roundTimerStarted),
     eligible: !!ws.eligible,
     gameFinished: !!gameFinished,
@@ -6153,16 +6257,16 @@ wss.on("connection", (ws, req) => {
       if (!devUnl) {
         await walletStore.recordSpend(pk, quantToUsdt(priceQuant), `personal_recovery_${tier}s`, { deferSave: true });
       }
-      await walletStore.save();
+      safeSend(ws, { type: "purchaseOk", kind: "personalRecovery", tierSec: tier });
+      safeSend(ws, await buildWalletPayload(ws));
       broadcast({
         type: "purchaseVfx",
         kind: "personalRecovery",
         teamId: ws.teamId | 0,
         tierSec: tier,
       });
-      safeSend(ws, { type: "purchaseOk", kind: "personalRecovery", tierSec: tier });
-      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -6217,8 +6321,12 @@ wss.on("connection", (ws, req) => {
       /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от зоны 4×4. */
       u.lastZoneCaptureAt = now;
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_4x4", { deferSave: true });
-      await walletStore.save();
       scheduleStatsBroadcast();
+      safeSend(ws, { type: "purchaseOk", kind: "zoneCapture", cells: connected.length, size: 4 });
+      safeSend(ws, await buildWalletPayload(ws));
+      if (tr.total > 0 && tr.first) {
+        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
+      }
       broadcast({
         type: "purchaseVfx",
         kind: "zoneCapture",
@@ -6227,12 +6335,8 @@ wss.on("connection", (ws, req) => {
         gy: r.y0,
         size: 4,
       });
-      safeSend(ws, { type: "purchaseOk", kind: "zoneCapture", cells: connected.length, size: 4 });
-      safeSend(ws, await buildWalletPayload(ws));
-      if (tr.total > 0 && tr.first) {
-        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
-      }
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -6286,8 +6390,12 @@ wss.on("connection", (ws, req) => {
       /* lastActionAt не трогаем — интервал между обычными пикселями идёт отдельно от масс-захвата 6×6. */
       u.lastMassCaptureAt = now;
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "mass_capture_6x6", { deferSave: true });
-      await walletStore.save();
       scheduleStatsBroadcast();
+      safeSend(ws, { type: "purchaseOk", kind: "massCapture", cells: connected.length, size: 6 });
+      safeSend(ws, await buildWalletPayload(ws));
+      if (tr.total > 0 && tr.first) {
+        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
+      }
       broadcast({
         type: "purchaseVfx",
         kind: "massCapture",
@@ -6296,12 +6404,8 @@ wss.on("connection", (ws, req) => {
         gy: cy - 2,
         size: 6,
       });
-      safeSend(ws, { type: "purchaseOk", kind: "massCapture", cells: connected.length, size: 6 });
-      safeSend(ws, await buildWalletPayload(ws));
-      if (tr.total > 0 && tr.first) {
-        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
-      }
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -6354,8 +6458,12 @@ wss.on("connection", (ws, req) => {
       const tr = await claimTreasuresInPlannedCells(pk, connected);
       u.lastZone12CaptureAt = now;
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "zone_capture_12x12", { deferSave: true });
-      await walletStore.save();
       scheduleStatsBroadcast();
+      safeSend(ws, { type: "purchaseOk", kind: "zone12Capture", cells: connected.length, size: 12 });
+      safeSend(ws, await buildWalletPayload(ws));
+      if (tr.total > 0 && tr.first) {
+        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
+      }
       broadcast({
         type: "purchaseVfx",
         kind: "zone12Capture",
@@ -6364,12 +6472,8 @@ wss.on("connection", (ws, req) => {
         gy: cy - 5,
         size: 12,
       });
-      safeSend(ws, { type: "purchaseOk", kind: "zone12Capture", cells: connected.length, size: 12 });
-      safeSend(ws, await buildWalletPayload(ws));
-      if (tr.total > 0 && tr.first) {
-        safeSend(ws, { type: "treasureFound", quant: tr.total, x: tr.first.x, y: tr.first.y });
-      }
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -6494,9 +6598,10 @@ wss.on("connection", (ws, req) => {
       }
       invalidateTeamScoresAggCache();
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "nuke_bomb", { deferSave: true });
-      await walletStore.save();
       afterTerritoryMutation();
       scheduleStatsBroadcast();
+      safeSend(ws, { type: "purchaseOk", kind: "nukeBomb", cells: cleared.length, x: cx, y: cy });
+      safeSend(ws, await buildWalletPayload(ws));
       broadcast({
         type: "purchaseVfx",
         kind: "nukeBomb",
@@ -6513,9 +6618,8 @@ wss.on("connection", (ws, req) => {
         cy,
         cells: cleared,
       });
-      safeSend(ws, { type: "purchaseOk", kind: "nukeBomb", cells: cleared.length, x: cx, y: cy });
-      safeSend(ws, await buildWalletPayload(ws));
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -6575,18 +6679,8 @@ wss.on("connection", (ws, req) => {
       dt.lastMilitaryBaseAt = now;
       saveDynamicTeams();
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "military_base", { deferSave: true });
-      await walletStore.save();
       paintTeamSpawnArea(tid, x0, y0, pk);
       scheduleStatsBroadcast();
-      broadcast({
-        type: "purchaseVfx",
-        kind: "militaryBase",
-        teamId: tid,
-        gx: x0,
-        gy: y0,
-        size: TEAM_SPAWN_SIZE,
-      });
-      broadcast({ type: "teamsFull", teams: teamsForMeta() });
       safeSend(ws, {
         type: "purchaseOk",
         kind: "militaryBase",
@@ -6596,7 +6690,17 @@ wss.on("connection", (ws, req) => {
         total: getTeamMilitaryOutposts(dt).length,
       });
       safeSend(ws, await buildWalletPayload(ws));
+      broadcast({
+        type: "purchaseVfx",
+        kind: "militaryBase",
+        teamId: tid,
+        gx: x0,
+        gy: y0,
+        size: TEAM_SPAWN_SIZE,
+      });
+      broadcast({ type: "teamsFull", teams: teamsForMeta() });
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -6642,7 +6746,8 @@ wss.on("connection", (ws, req) => {
       if (!devUnl) {
         await walletStore.recordSpend(pk, quantToUsdt(priceQuant), `team_recovery_${tier}s`, { deferSave: true });
       }
-      await walletStore.save();
+      safeSend(ws, { type: "purchaseOk", kind: "teamRecovery", tierSec: tier });
+      safeSend(ws, await buildWalletPayload(ws));
       broadcast({
         type: "teamEffect",
         teamId: tid,
@@ -6650,8 +6755,8 @@ wss.on("connection", (ws, req) => {
         until: fx.teamRecoveryUntil,
         teamRecoverySec: fx.teamRecoverySec,
       });
-      safeSend(ws, { type: "purchaseOk", kind: "teamRecovery", tierSec: tier });
       scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
       return;
     }
 
@@ -7097,7 +7202,7 @@ async function handleTelegramPaintCommand(chatId, telegramUid) {
 
 /**
  * Ручное включение событий карты (только TELEGRAM_ADMIN_IDS, только лидер кластера).
- * Сообщения: evt gold, gold, gold 45 (минут, иначе 20 мин по умолчанию), gold off, evt off, seismic, evt help.
+ * Сообщения: evt gold, gold, gold 45 (минут, иначе 20 мин по умолчанию), gold off, evt off (в т.ч. speed / «Мстим»), seismic, evt help.
  */
 async function handleTelegramManualBattleCommand(chatId, lineRaw) {
   if (!isClusterLeader()) {
@@ -7124,10 +7229,18 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
     return;
   }
   if (parts[0] === "off" && parts.length === 1) {
+    clearPendingManualSeismicSchedule();
     manualBattleSlotsByCmd.clear();
+    mstimAltSeasonBurstUntilMs = 0;
     saveRoundState();
+    broadcast({ type: "mstimAltSeasonSync", untilMs: 0 });
+    broadcast({ type: "roundEvent", phase: "end", roundIndex });
     broadcastManualBattleSyncAndStats();
-    await telegramSendMessage(chatId, "Все ручные события сняты.");
+    void broadcastWalletPayloadToAllClients();
+    await telegramSendMessage(
+      chatId,
+      "Все ручные события сняты. Режим «Мстим за Альт Сезон» (speed), если был включён, тоже выключен."
+    );
     return;
   }
   const cmd0 = normalizeManualBattleCmdKey(parts[0]);
@@ -7206,6 +7319,143 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
   );
 }
 
+/**
+ * Сброс тренировки: карта → только базы, очки территории 0, ручные бонусы админа 0, кошельки 0, клады заново, события/мстим сняты.
+ * @param {number} telegramUserId
+ * @returns {Promise<{ ok: true } | { ok: false; reason: string }>}
+ */
+async function applyAdminTrainingScoreReset(telegramUserId) {
+  if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
+  logAdminAction({ command: "reset_training_scores", byTelegramId: telegramUserId });
+
+  teamManualScoreBonus.clear();
+  clearPendingManualSeismicSchedule();
+  manualBattleSlotsByCmd.clear();
+  mstimAltSeasonBurstUntilMs = 0;
+  clearTerritoryIsolationState();
+
+  resetMassRoundBattlefieldAfterWarmup();
+  regenerateMapTreasures();
+  saveRoundState();
+
+  broadcastTerritoryIsolationSyncIfChanged(Date.now());
+  broadcast({ type: "mstimAltSeasonSync", untilMs: 0 });
+  broadcast({ type: "roundEvent", phase: "end", roundIndex });
+  broadcastTeamManualScoreBonusSync();
+  broadcast({ type: "manualBattleSync", slots: {} });
+  broadcast({ type: "globalEvent", globalEvent: getGlobalEventPayload(Date.now()) });
+  scheduleStatsBroadcast();
+
+  try {
+    if (typeof walletStore.adminResetAllTrainingEconomy === "function") {
+      await walletStore.adminResetAllTrainingEconomy();
+    }
+  } catch (e) {
+    console.warn("[admin] wallet reset training:", e?.message || e);
+    return { ok: false, reason: "wallet_reset_failed" };
+  }
+
+  await broadcastWalletPayloadToAllClients();
+  if (wss) {
+    await Promise.all(
+      [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
+    );
+  }
+  return { ok: true };
+}
+
+/**
+ * @param {string} callbackQueryId
+ * @param {{ text?: string; show_alert?: boolean }} [opts]
+ */
+async function telegramAnswerCallbackQuery(callbackQueryId, opts = {}) {
+  if (!TELEGRAM_BOT_TOKEN || !callbackQueryId) return;
+  const body = {
+    callback_query_id: callbackQueryId,
+    text: opts.text != null ? String(opts.text).slice(0, 200) : undefined,
+    show_alert: !!opts.show_alert,
+  };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      console.warn("Telegram answerCallbackQuery:", d.description || res.status);
+    }
+  } catch (e) {
+    console.warn("Telegram answerCallbackQuery:", e?.message || e);
+  }
+}
+
+/** @param {{ id: string; from?: { id?: number }; message?: { chat?: { id?: number } }; data?: string }} cq */
+async function handleTelegramAdminCallbackQuery(cq) {
+  const uid = cq.from?.id;
+  const chatId = cq.message?.chat?.id;
+  const data = String(cq.data || "");
+  if (uid == null || !TELEGRAM_ADMIN_IDS.has(uid)) {
+    await telegramAnswerCallbackQuery(cq.id, { text: "Недоступно", show_alert: true });
+    return;
+  }
+  if (data === "adm_rst_a") {
+    await telegramAnswerCallbackQuery(cq.id);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        "Сброс тренировки:\n\n" +
+          "• карта — только базы 6×6;\n" +
+          "• очки с территории и ручные бонусы (teams +N) — 0;\n" +
+          "• балансы USDT и таймеры действий у всех игроков в экономике — сброс;\n" +
+          "• сокровища на карте — заново;\n" +
+          "• события evt / Мстим (speed) — выключены.\n\n" +
+          "Подтвердите:",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "Да, обнулить", callback_data: "adm_rst_y" },
+                { text: "Отмена", callback_data: "adm_rst_n" },
+              ],
+            ],
+          },
+        }
+      );
+    }
+    return;
+  }
+  if (data === "adm_rst_n") {
+    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
+    return;
+  }
+  if (data === "adm_rst_y") {
+    if (!isClusterLeader()) {
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Только инстанс с CLUSTER_LEADER=true может сбросить состояние игры.",
+        show_alert: true,
+      });
+      return;
+    }
+    await telegramAnswerCallbackQuery(cq.id, { text: "Выполняю…" });
+    const r = await applyAdminTrainingScoreReset(uid);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        r.ok
+          ? "Готово: тренировочные очки и карта сброшены, кошельки обнулены (реферальные привязки сохранены)."
+          : r.reason === "not_leader"
+            ? "Сброс возможен только на лидере кластера (CLUSTER_LEADER=true)."
+            : r.reason === "wallet_reset_failed"
+              ? "Карта сброшена, но ошибка при сбросе кошельков — см. лог сервера."
+              : "Сброс не выполнен."
+      );
+    }
+    return;
+  }
+  await telegramAnswerCallbackQuery(cq.id);
+}
+
 async function telegramPollLoop() {
   if (!TELEGRAM_BOT_TOKEN) return;
   let offset = 0;
@@ -7234,6 +7484,16 @@ async function telegramPollLoop() {
       }
       for (const u of data.result || []) {
         offset = u.update_id + 1;
+        const cq = u.callback_query;
+        if (cq && cq.id) {
+          const cuid = cq.from?.id;
+          if (cuid != null && TELEGRAM_ADMIN_IDS.has(cuid)) {
+            await handleTelegramAdminCallbackQuery(cq);
+          } else {
+            await telegramAnswerCallbackQuery(cq.id, { text: "Недоступно", show_alert: true });
+          }
+          continue;
+        }
         const msg = u.message || u.edited_message;
         if (!msg || typeof msg.text !== "string") continue;
         const uid = msg.from?.id;
@@ -7248,11 +7508,15 @@ async function telegramPollLoop() {
             TELEGRAM_START_GAME_BUTTON_ENABLED && launchUrl
               ? buildTelegramStartInlineButton(launchUrl)
               : null;
-          if (startBtn) {
+          if (startBtn || TELEGRAM_ADMIN_IDS.has(uid)) {
+            /** @type {{ text: string; url?: string; web_app?: { url: string }; callback_data?: string }[][]} */
+            const rows = [];
+            if (startBtn) rows.push([startBtn]);
+            if (TELEGRAM_ADMIN_IDS.has(uid)) {
+              rows.push([{ text: "Сброс тренировки (очки, карта)", callback_data: "adm_rst_a" }]);
+            }
             await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
-              reply_markup: {
-                inline_keyboard: [[startBtn]],
-              },
+              reply_markup: { inline_keyboard: rows },
             });
           } else if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
             await telegramSendMessage(
@@ -7356,6 +7620,7 @@ async function telegramPollLoop() {
             mstimAltSeasonBurstUntilMs = 0;
             saveRoundState();
             broadcast({ type: "mstimAltSeasonSync", untilMs: 0 });
+            broadcast({ type: "roundEvent", phase: "end", roundIndex });
             scheduleStatsBroadcast();
             await broadcastWalletPayloadToAllClients();
             await telegramSendMessage(chatId, "«Мстим за Альт Сезон» выключено (интервал пикселя — обычный).");
@@ -7619,7 +7884,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start, go [часы], teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start (кнопка «Сброс тренировки»), go [часы], teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, restart, evt help, gold…"
             );
           }
           continue;

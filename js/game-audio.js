@@ -17,6 +17,7 @@ import {
   resumeBgmAfterForeground,
   tryStartBgmAfterContextReady,
   prefetchBgmMedia,
+  isBgmSessionActive,
   getBgmProgramPeakCap,
   syncBgmUserMute,
 } from "./bgm-playlist.js";
@@ -260,6 +261,11 @@ export function resumeAudioContext() {
           }
         );
       }
+    }
+    /* Уже играет BGM — не дергать старт/prefetch на каждый pointerdown (иначе гонки и лишняя работа). */
+    if (ctx.state === "running" && isBgmSessionActive()) {
+      kickPostResumePreload();
+      return Promise.resolve();
     }
     kickPostResumePreload();
     tryStartBgmAfterContextReady();
@@ -951,6 +957,21 @@ export function playBombExplosion() {
     }
     playPresentationSting("nuke-bomb", nuke);
   });
+}
+
+/** Один звук на эпицентр ~10 с: purchaseOk приходит раньше broadcast, отложенный purchaseVfx/nukeBombImpact не дублируют. */
+let lastNukeExplosionDedupeKey = "";
+let lastNukeExplosionDedupeAt = 0;
+
+export function playNukeExplosionSfx(gx, gy) {
+  const x = Number.isFinite(gx) ? gx | 0 : -9_000_000;
+  const y = Number.isFinite(gy) ? gy | 0 : -9_000_000;
+  const key = `${x},${y}`;
+  const now = performance.now();
+  if (key === lastNukeExplosionDedupeKey && now - lastNukeExplosionDedupeAt < 10_000) return;
+  lastNukeExplosionDedupeKey = key;
+  lastNukeExplosionDedupeAt = now;
+  playBombExplosion();
 }
 
 export function playQuantumConnect() {

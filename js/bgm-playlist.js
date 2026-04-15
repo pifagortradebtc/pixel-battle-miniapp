@@ -1,5 +1,5 @@
 /**
- * Фоновый плейлист: shuffle без подряд повторов, кроссфейд, пауза в фоне / админ-паузе.
+ * Фоновая музыка: один выбранный трек за сессию, зацикливание без автосмены на следующий файл.
  * Два HTMLAudioElement + MediaElementSource (без создания новых Audio() на каждый трек).
  */
 
@@ -36,7 +36,9 @@ let manifestPromise = null;
 let leadSlot = 0;
 let lastPick = -1;
 let started = false;
-/** Игра «в бою» (не наблюдатель, не финал) — можно вести плейлист */
+/** Сериализация: каждый клик вызывает resumeAudioContext → без этого несколько startFirstTrackIfNeeded параллельно перезаписывали src и «меняли трек». */
+let bgmStartInFlight = false;
+/** Игра «в бою» (не наблюдатель, не финал) — можно играть BGM */
 let gameplayAllowed = false;
 /** Админ-пауза или вкладка в фоне — только пауза элементов */
 let suspendedBySystem = false;
@@ -51,6 +53,8 @@ function ensureElements(ctx) {
   elB.crossOrigin = "anonymous";
   elA.preload = "auto";
   elB.preload = "auto";
+  elA.loop = true;
+  elB.loop = true;
 
   gA = ctx.createGain();
   gB = ctx.createGain();
@@ -99,14 +103,12 @@ function loadManifest() {
 }
 
 /**
- * Случайный индекс, не совпадающий с предыдущим (если треков ≥ 2).
+ * Случайный индекс при старте сессии; при зацикливании тот же трек не меняем.
  */
-function pickNextIndex() {
+function pickInitialTrackIndex() {
   const n = tracks.length;
   if (n <= 0) return -1;
-  if (n === 1) return 0;
-  let i = (Math.random() * n) | 0;
-  if (i === lastPick) i = (i + 1) % n;
+  const i = (Math.random() * n) | 0;
   lastPick = i;
   return i;
 }
@@ -124,9 +126,16 @@ function slotElements(slot) {
 
 function onTrackEnded(slot) {
   if (!gameplayAllowed || suspendedBySystem) return;
-  /* ended пришёл с неактивного слота (кроссфейд) — игнор */
   if (slot !== leadSlot) return;
-  void crossfadeToNext();
+  /* При loop=true событие обычно не приходит; запасной перезапуск для капризных WebView. */
+  const el = slot === 0 ? elA : elB;
+  if (!el?.src) return;
+  try {
+    el.currentTime = 0;
+    void el.play();
+  } catch {
+    void crossfadeToNext();
+  }
 }
 
 /**
@@ -136,7 +145,8 @@ async function crossfadeToNext() {
   const ctx = audioCtx;
   if (!ctx || !elA || !elB || !gA || !gB || tracks.length < 1) return;
 
-  const nextI = pickNextIndex();
+  let nextI = lastPick;
+  if (nextI < 0 || nextI >= tracks.length) nextI = pickInitialTrackIndex();
   if (nextI < 0) return;
   const url = urlForTrackIndex(nextI);
   if (!url) return;
@@ -186,34 +196,40 @@ async function crossfadeToNext() {
 async function startFirstTrackIfNeeded() {
   const ctx = audioCtx;
   if (!ctx || !gameplayAllowed || suspendedBySystem || started) return;
-  await loadManifest();
-  if (tracks.length < 1) return;
-  ensureElements(ctx);
-  started = true;
-  lastPick = -1;
-  const i = pickNextIndex();
-  const url = urlForTrackIndex(i);
-  if (!url) return;
-
-  leadSlot = 0;
+  if (bgmStartInFlight) return;
+  bgmStartInFlight = true;
   try {
-    elB?.pause();
-    if (gB) {
-      const t = ctx.currentTime;
-      gB.gain.cancelScheduledValues(t);
-      gB.gain.setValueAtTime(0, t);
+    await loadManifest();
+    if (tracks.length < 1) return;
+    ensureElements(ctx);
+    lastPick = -1;
+    const i = pickInitialTrackIndex();
+    const url = urlForTrackIndex(i);
+    if (!url) return;
+
+    started = true;
+    leadSlot = 0;
+    try {
+      elB?.pause();
+      if (gB) {
+        const t = ctx.currentTime;
+        gB.gain.cancelScheduledValues(t);
+        gB.gain.setValueAtTime(0, t);
+      }
+      if (elA && gA) {
+        elA.src = url;
+        elA.load();
+        const t = ctx.currentTime;
+        gA.gain.cancelScheduledValues(t);
+        gA.gain.setValueAtTime(0, t);
+        gA.gain.linearRampToValueAtTime(1, t + FADE_IN_SEC);
+        await elA.play();
+      }
+    } catch {
+      started = false;
     }
-    if (elA && gA) {
-      elA.src = url;
-      elA.load();
-      const t = ctx.currentTime;
-      gA.gain.cancelScheduledValues(t);
-      gA.gain.setValueAtTime(0, t);
-      gA.gain.linearRampToValueAtTime(1, t + FADE_IN_SEC);
-      await elA.play();
-    }
-  } catch {
-    started = false;
+  } finally {
+    bgmStartInFlight = false;
   }
 }
 
@@ -224,7 +240,7 @@ async function startFirstTrackIfNeeded() {
 export function prefetchBgmMedia() {
   void (async () => {
     const ctx = audioCtx;
-    if (!ctx || started) return;
+    if (!ctx || started || bgmStartInFlight) return;
     await loadManifest();
     if (tracks.length < 1) return;
     ensureElements(ctx);
@@ -246,6 +262,11 @@ export function prefetchBgmMedia() {
  */
 export function tryStartBgmAfterContextReady() {
   void startFirstTrackIfNeeded();
+}
+
+/** Уже идёт воспроизведение после успешного старта (для resumeAudioContext без лишних вызовов на каждый клик). */
+export function isBgmSessionActive() {
+  return started;
 }
 
 /**

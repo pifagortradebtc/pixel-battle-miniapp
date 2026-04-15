@@ -643,7 +643,7 @@
   <div id="app" class="app">
     <aside
       id="leaderboard-panel"
-      class="lb-widget lb-widget--compact"
+      class="lb-widget"
       hidden
       aria-label="Рейтинг команд"
     >
@@ -652,16 +652,6 @@
         <span class="lb-widget__online" title="Игроков онлайн"
           ><span id="online-count">0</span></span
         >
-        <button
-          type="button"
-          id="leaderboard-expand-btn"
-          class="lb-widget__toggle"
-          aria-expanded="false"
-          aria-controls="leaderboard-list"
-          aria-label="Развернуть полный рейтинг"
-        >
-          <span class="lb-widget__toggle-icon" aria-hidden="true"></span>
-        </button>
       </div>
       <ol id="leaderboard-list" class="lb-widget__list" role="list"></ol>
     </aside>

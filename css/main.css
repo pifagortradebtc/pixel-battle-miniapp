@@ -2308,29 +2308,41 @@ a.overlay__btn {
   animation: none;
 }
 
-/* В потоке стека под тулбаром (как остальные плашки) */
+/* Сообщение админа из бота: по центру экрана, крупнее и контрастнее остальных плашек */
 .event-banner--server-say {
-  position: relative;
-  left: auto;
-  right: auto;
-  top: auto;
-  z-index: auto;
-  width: 100%;
-  max-width: 100%;
-  margin: 0;
+  position: fixed;
+  z-index: 75;
+  left: max(14px, env(safe-area-inset-left, 0px));
+  right: max(14px, env(safe-area-inset-right, 0px));
+  top: max(14px, env(safe-area-inset-top, 0px));
+  bottom: max(14px, env(safe-area-inset-bottom, 0px));
+  width: min(92vw, 440px);
+  max-width: min(92vw, 440px);
+  height: fit-content;
+  max-height: min(72vh, 360px);
+  overflow: auto;
+  margin: auto;
   box-sizing: border-box;
-  color: #f8fafc;
-  font-size: clamp(0.75rem, 2.8vw, 0.95rem);
+  border-radius: 16px;
+  border: 2px solid rgba(253, 224, 71, 0.75);
+  color: #fffef5;
+  font-size: clamp(1.05rem, 4.5vw, 1.42rem);
   font-weight: 800;
-  letter-spacing: 0.02em;
-  line-height: 1.4;
-  padding: 10px 14px 11px;
+  letter-spacing: 0.03em;
+  line-height: 1.38;
+  padding: 18px 20px 19px;
   white-space: pre-wrap;
   word-break: break-word;
-  background: linear-gradient(90deg, rgba(30, 58, 138, 0.96), rgba(67, 56, 202, 0.93), rgba(30, 58, 138, 0.96));
-  border-bottom: 1px solid rgba(199, 210, 254, 0.45);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
-  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.35);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.2) 0%, transparent 42%),
+    linear-gradient(90deg, rgba(49, 46, 196, 0.98), rgba(99, 102, 241, 0.96), rgba(79, 70, 229, 0.98));
+  text-shadow:
+    0 0 18px rgba(255, 255, 255, 0.35),
+    0 2px 4px rgba(0, 0, 0, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.12) inset,
+    0 12px 40px rgba(15, 23, 42, 0.55),
+    0 0 48px rgba(129, 140, 248, 0.45);
 }
 
 .event-banner--seismic-warn {
