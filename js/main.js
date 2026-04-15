@@ -739,9 +739,6 @@ let optimisticPixelPending = null;
  */
 let optimisticWeaponPending = null;
 
-/** Время последнего исходящего `pixel` — не дублировать SFX «удар по базе» сразу после `playPixelPlace`. */
-let lastOutgoingPixelAtMs = 0;
-
 /** Антиспам: повторный purchaseVfx плацдарма своей команды (сетевой дубль / гонка). */
 let lastMyTeamMilitaryPurchaseVfxAtMs = 0;
 
@@ -6620,12 +6617,10 @@ function connectWs() {
               const col = aid ? teamColor(aid) : "#ffaa66";
               boardVfx.flagBaseHitImpact(fgx, fgy, col, getVfxTransform());
               flushBoardVfxFrame();
-              const mid = myTeamId | 0;
-              const skipDoubleHitSfx =
-                mid > 0 &&
-                (aid | 0) === mid &&
-                Date.now() - lastOutgoingPixelAtMs < 550;
-              if (!skipDoubleHitSfx) {
+              /* У атакующей команды уже был playPixelPlace на тапе; «удар по базе» не дублировать
+               * (иначе после плацдарма каждый удар по флагу врага звучит как тяжёлый стинг). */
+              const iAmOnAttackingTeam = myTeamId != null && (aid | 0) === (myTeamId | 0);
+              if (!iAmOnAttackingTeam) {
                 playFlagBaseHit({
                   scope: /** @type {const} */ ("local"),
                   gx: fgx + 0.5,
@@ -7518,7 +7513,6 @@ function connectWs() {
 }
 
 function sendPixelOnline(gx, gy) {
-  lastOutgoingPixelAtMs = Date.now();
   if (wantOnline && gamePausedMeta) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   try {

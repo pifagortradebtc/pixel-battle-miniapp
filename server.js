@@ -3489,6 +3489,10 @@ function applyClusterGameReplication(msg) {
     case "gamePauseSync": {
       gamePaused = !!msg.paused;
       if (typeof msg.pauseCapturedWarmup === "boolean") pauseCapturedWarmup = msg.pauseCapturedWarmup;
+      if (gamePaused && typeof msg.pauseWallStartedAt === "number" && Number.isFinite(msg.pauseWallStartedAt)) {
+        const pw = msg.pauseWallStartedAt | 0;
+        if (pw > 0) pauseWallStartedAt = pw;
+      }
       if (typeof msg.round0WarmupMs === "number" && Number.isFinite(msg.round0WarmupMs)) {
         const w = Math.round(msg.round0WarmupMs);
         if (w >= 5000 && w <= 600000) round0WarmupMs = w;
@@ -5048,6 +5052,26 @@ function parseTeamsTelegramAddPoints(body) {
   return { ok: true, teamName: name, points };
 }
 
+/**
+ * Сколько миллисекунд реального времени прошло с момента pause (для сдвига конца боя / разминки).
+ * Если pauseWallStartedAt потерян (0), раньше получалось d ≈ Date.now() и roundDurationMs упиралось в 8760ч.
+ */
+function msElapsedSincePauseWallOrZero() {
+  const start = pauseWallStartedAt | 0;
+  const nowWall = Date.now();
+  const MIN_START = 946684800000; /* 2000-01-01 UTC — отсекаем мусор и start=0 */
+  if (!start || start > nowWall || start < MIN_START) {
+    if (gamePaused) {
+      console.warn(
+        "[pause] unpause: invalid or missing pauseWallStartedAt; skip extending timers (start=%s)",
+        start
+      );
+    }
+    return 0;
+  }
+  return nowWall - start;
+}
+
 function shiftManualBattleSlotsAfterPause(d, pauseStart) {
   const ps = pauseStart | 0;
   const dd = d | 0;
@@ -5093,6 +5117,7 @@ function applyAdminPause(telegramUserId) {
   broadcast({
     type: "gamePauseSync",
     paused: true,
+    pauseWallStartedAt: pauseWallStartedAt | 0,
     pauseCapturedWarmup: wasWarmup,
     round0WarmupMs,
     roundDurationMs,
@@ -5118,7 +5143,7 @@ function applyAdminUnpause(telegramUserId) {
   if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
   if (!gamePaused) return { ok: false, reason: "not_paused" };
   const start = pauseWallStartedAt | 0;
-  const d = Math.max(0, Date.now() - start);
+  const d = msElapsedSincePauseWallOrZero();
   if (pauseCapturedWarmup) {
     if (roundIndex === 0) {
       const w = (round0WarmupMs | 0) + d;
@@ -5139,6 +5164,7 @@ function applyAdminUnpause(telegramUserId) {
   broadcast({
     type: "gamePauseSync",
     paused: false,
+    pauseWallStartedAt: 0,
     round0WarmupMs,
     roundDurationMs,
     warmupPauseExtensionMs,
