@@ -48,6 +48,10 @@ let lastBaseHitWallMs = 0;
 /** Длинные кинематографические стинги — не засыпать UI мелочью сразу после. */
 let lastEpicStingWallMs = 0;
 let lowPrioritySfxCount = 0;
+/** Последний запуск стинга плацдарма (performance.now): хвост military_base + pixel_place.mp3 сливаются — слышно как «ещё раз база». */
+let lastMilitaryDeployHeardAtPerfMs = 0;
+/** Не класть pixel_place.mp3 поверх хвоста плацдарма / похожего ассета — только короткий процедурный клик. */
+const MILITARY_DEPLOY_PIXEL_MP3_SUPPRESS_MS = 4800;
 
 /** Сэмплы событий из sfx/samples.json (при отсутствии файла — процедурный fallback). */
 /** @type {Map<string, AudioBuffer>} */
@@ -683,10 +687,12 @@ export function playPixelPlace(spatial) {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
     const spec = spatial ?? { scope: "personal", weight: 1 };
-    /* Не используем canPlayLowPrioritySfx: после military_base / удара по базе гейт глушит клик — слышен только длинный хвост стинга («как будто снова плацдарм»). */
-    if (playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
     const sm = resolveSpatialMul(spec);
     if (sm < SPATIAL_MIN_AUDIBLE) return;
+    /* Не используем canPlayLowPrioritySfx — см. выше. После плацдарма не берём pixel_place.mp3: длинный хвост military_base + второй MP3 = ощущение повторного деплоя. */
+    const withinDeployTail =
+      performance.now() - lastMilitaryDeployHeardAtPerfMs < MILITARY_DEPLOY_PIXEL_MP3_SUPPRESS_MS;
+    if (!withinDeployTail && playEventSample("pixel_place", { bus: "sfx", gainMul: 0.72, spatial: spec })) return;
     const now = ctx.currentTime;
     playFilteredNoiseBurst(sfxBus, now, 0.012, 0.035 * sm, 680);
     playOscThrough("sine", 265, 198, 0.045 * sm, 0.028, sfxBus, now + 0.001);
@@ -716,6 +722,7 @@ export function playTerritoryExpand(zoneSide, spatial) {
 export function playMilitaryBaseDeploySound() {
   resumeAudioContext().then(() => {
     if (!ctx || !sfxBus || settings.muted) return;
+    lastMilitaryDeployHeardAtPerfMs = performance.now();
     const spatial = /** @type {const} */ ({ scope: "global", weight: 1 });
     if (playEventSample("military_base", { bus: "sfx", gainMul: 1, spatial })) return;
     const now = ctx.currentTime;
