@@ -105,7 +105,15 @@ const WS_PATH = "/ws";
 /** @type {import("ws").WebSocketServer | null} */
 let wss = null;
 
-const DATA_DIR = path.join(ROOT, "data");
+/** Render Disk и др.: абсолютный путь к постоянной папке (например /var/data). Иначе — ./data рядом с server.js. */
+const DATA_DIR = (() => {
+  const raw = String(process.env.PIXEL_BATTLE_DATA_DIR || process.env.RENDER_DISK_PATH || "").trim();
+  if (raw && path.isAbsolute(raw)) return path.normalize(raw);
+  return path.join(ROOT, "data");
+})();
+if (process.env.NODE_ENV === "production") {
+  console.log(`[data] persistent dir: ${DATA_DIR}`);
+}
 /** @type {Awaited<ReturnType<typeof createWalletBackend>>} */
 const walletStore = await createWalletBackend(DATA_DIR);
 
