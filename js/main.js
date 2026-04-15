@@ -17,6 +17,7 @@ import {
 } from "./event-presentation.js";
 import {
   initGameAudio,
+  setGameplayMusicAllowed,
   playUiError,
   playPurchaseSuccess,
   playPixelPlace,
@@ -891,6 +892,11 @@ let lobbyBeforeGoMeta = false;
 let gameFinishedMeta = false;
 /** С сервера: полная пауза (бот pause / unpause). */
 let gamePausedMeta = false;
+
+function syncBackgroundMusicAllowed() {
+  const allow = !spectatorMode && !gameFinishedMeta && !gamePausedMeta;
+  setGameplayMusicAllowed(allow);
+}
 /** После leaveTeam открыть список команд (кнопка «Вступить», уже не в команде) */
 let pendingLeaveToTeamList = false;
 /** После leaveTeam открыть форму «Новая команда» (кнопка «Создать», пока ещё в команде) */
@@ -1874,12 +1880,71 @@ function tryPlayTeamEliminationVfx(msg) {
   const gx = Number(msg.destroyGx);
   const gy = Number(msg.destroyGy);
   if (!boardVfx || !Number.isFinite(gx) || !Number.isFinite(gy)) return;
-  const key = `${tid}:${gx},${gy}`;
   const now = Date.now();
+  /* Один взрыв на команду: flagCaptured и teamEliminated приходят подряд с разными координатами. */
+  const key = `${tid}`;
   if (lastTeamElimVfxKey === key && now - lastTeamElimVfxAt < 900) return;
   lastTeamElimVfxKey = key;
   lastTeamElimVfxAt = now;
   boardVfx.defeatExplosion(gx | 0, gy | 0, msg.teamColor || "#ff3344", getVfxTransform());
+}
+
+/** Сразу пометить защитника выбывшим в кэше меты (до teamsFull), чтобы не оставалась «живая» база в UI. */
+function patchTeamsMetaDefenderEliminated(defenderTeamId) {
+  if (teamsMeta == null || defenderTeamId == null) return;
+  const id = defenderTeamId | 0;
+  teamsMeta = teamsMeta.map((t) => {
+    if ((Number(t.id) | 0) !== id) return t;
+    return { ...t, eliminated: true, spawn: null, militaryOutposts: [] };
+  });
+  invalidateTeamColorByIdCache();
+}
+
+/**
+ * Сервер снял команду с игрока (захват базы / потеря территории). Синхронизация клиента без «оболочки» команды.
+ * @param {boolean} canReenter раунд 0 — снова создать/вступить
+ * @param {string} [defeatMessage]
+ */
+function applyMyTeamEliminatedClientState(canReenter, defeatMessage) {
+  endSessionRestore();
+  myTeamId = null;
+  clearTeamIdentityFromSession();
+  stripTeamFromUrl();
+  hidePlacementFeedbackBanner();
+  baseReminderUntil = 0;
+  myTerritoryDangerUntil = 0;
+  myTerritoryLastCellUntil = 0;
+  lastTeamDangerCellsRemaining = 999;
+  myFlagUnderAttackUntil = 0;
+  myFlagCriticalUntil = 0;
+  flagCaptureClientState.clear();
+  invalidateTeamColorByIdCache();
+  closeCreateTeamOverlay();
+  closeTeamSettings();
+  hideReferralSplash();
+  if (canReenter) {
+    showWelcomeOverlay();
+    if (teamOverlay) teamOverlay.hidden = true;
+  } else {
+    if (welcomeOverlay) welcomeOverlay.hidden = true;
+    if (teamOverlay) teamOverlay.hidden = true;
+    if (createTeamOverlay) createTeamOverlay.hidden = true;
+    if (teamSettingsOverlay) teamSettingsOverlay.hidden = true;
+  }
+  rebuildTeamList();
+  setFooterMode();
+  schedulePersist();
+  const line =
+    typeof defeatMessage === "string" && defeatMessage.trim()
+      ? defeatMessage.trim()
+      : "Your base was captured. Your team has been destroyed.";
+  showPlacementFeedback(line, "error", { telegramAlert: false });
+  scheduleTeamDefeatOverlay(canReenter, line);
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -2475,6 +2540,7 @@ function setFooterMode() {
   refreshToolbarSessionButton();
   updateWalletBar();
   renderQuickBuyRail();
+  syncBackgroundMusicAllowed();
 }
 
 /** Кнопка сессии внизу у бейджа: онлайн в команде — только иконка двери; иначе короткий текст. */
@@ -3098,8 +3164,9 @@ function cancelTeamDefeatUiTimer() {
 
 /**
  * @param {boolean} canReenter — раунд 0: можно снова создать/вступить в команду
+ * @param {string} [primaryLine] — текст с сервера (например захват базы); иначе общий русский текст
  */
-function scheduleTeamDefeatOverlay(canReenter) {
+function scheduleTeamDefeatOverlay(canReenter, primaryLine) {
   cancelTeamDefeatUiTimer();
   if (!defeatOverlayEl || !defeatOverlayTextEl) return;
   teamDefeatUiTimer = setTimeout(() => {
@@ -3111,7 +3178,9 @@ function scheduleTeamDefeatOverlay(canReenter) {
       defeatOverlayTitleEl.textContent = "Команда уничтожена";
     }
     const base =
-      "Вы проиграли. Ваша команда потеряла всю территорию и уничтожена.";
+      typeof primaryLine === "string" && primaryLine.trim()
+        ? primaryLine.trim()
+        : "Вы проиграли. Ваша команда потеряла всю территорию и уничтожена.";
     if (canReenter) {
       defeatOverlayTextEl.textContent = `${base}\n\nВы можете создать новую команду или вступить в другую.`;
       if (defeatActionsReenterEl) defeatActionsReenterEl.hidden = false;
@@ -6420,6 +6489,7 @@ function connectWs() {
       syncAdminGamePauseOverlay();
       updateRoundTimer();
       syncTournamentWarmupOverlay();
+      syncBackgroundMusicAllowed();
       return;
     }
 
@@ -6803,6 +6873,7 @@ function connectWs() {
       const aid = msg.attackerTeamId | 0;
       const did = msg.defenderTeamId | 0;
       const wasMyDefeat = myTeamId != null && (myTeamId | 0) === did;
+      const fullWipe = msg.fullTeamElimination !== false;
       deleteFlagCaptureStateForDefenderTeam(did);
       for (const [k, v] of [...pixels.entries()]) {
         const tid = typeof v === "number" ? v : v.teamId;
@@ -6810,6 +6881,7 @@ function connectWs() {
           pixels.set(k, { teamId: aid, ownerPlayerKey: "", shieldedUntil: 0 });
         }
       }
+      if (fullWipe) patchTeamsMetaDefenderEliminated(did);
       if (boardVfx) {
         const tr = getVfxTransform();
         boardVfx.flagCaptureExplosion(
@@ -6831,20 +6903,23 @@ function connectWs() {
         });
         const canRe =
           typeof msg.canReenter === "boolean" ? msg.canReenter : roundIndexMeta === 0;
-        applyMyTeamEliminatedClientState(canRe);
+        const defeatLine =
+          typeof msg.defeatMessage === "string" && msg.defeatMessage.trim()
+            ? msg.defeatMessage.trim()
+            : undefined;
+        applyMyTeamEliminatedClientState(canRe, defeatLine);
       }
-      const an = teamsMeta?.find((x) => (Number(x.id) | 0) === aid)?.name || "атакующие";
-      const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "защита";
+      const an = teamsMeta?.find((x) => (Number(x.id) | 0) === aid)?.name || "attacker";
+      const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "defender";
       enqueueBaseCapturedPresentation(String(an), String(dn));
       if (!wasMyDefeat) {
         triggerMapShake(1200);
-        showFlagAlertBanner(`База захвачена — «${dn}» уничтожена`, 5200);
-        /* Модальный showAlert в TG часто подвешивает WebView; баннеров достаточно. */
-        showPlacementFeedback(
-          `База захвачена. «${dn}» уничтожена — вся территория у «${an}».`,
-          "error",
-          { telegramAlert: false }
-        );
+        const victoryLine =
+          typeof msg.victoryMessage === "string" && msg.victoryMessage.trim()
+            ? msg.victoryMessage.trim()
+            : "Enemy base captured. All enemy territory is now yours.";
+        showFlagAlertBanner(victoryLine, 5200);
+        showPlacementFeedback(victoryLine, "error", { telegramAlert: false });
         try {
           window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("error");
         } catch {
@@ -7221,8 +7296,13 @@ function connectWs() {
     if (msg.type === "teamEliminated") {
       tryPlayTeamEliminationVfx(msg);
       const tid = msg.teamId | 0;
+      patchTeamsMetaDefenderEliminated(tid);
       if (myTeamId != null && (myTeamId | 0) === tid) {
-        applyMyTeamEliminatedClientState(msg.canReenter === true);
+        const defLine =
+          typeof msg.defeatMessage === "string" && msg.defeatMessage.trim()
+            ? msg.defeatMessage.trim()
+            : undefined;
+        applyMyTeamEliminatedClientState(msg.canReenter === true, defLine);
       }
       return;
     }

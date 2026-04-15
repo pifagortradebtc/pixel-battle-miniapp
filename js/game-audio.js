@@ -10,17 +10,28 @@ import {
   resolvePresentationSpatial,
   SPATIAL_MIN_AUDIBLE,
 } from "./audio-spatial.js";
+import {
+  wireBgmPlaylist,
+  setBgmGameplayAllowed,
+  pauseBgmForBackgroundOrOverlay,
+  resumeBgmAfterForeground,
+  tryStartBgmAfterContextReady,
+  getBgmProgramPeakCap,
+  syncBgmUserMute,
+} from "./bgm-playlist.js";
 
 export { registerSpatialAudioListener, registerSpatialAmbientAnchor };
 
 const STORAGE_KEY = "pixelBattleAudioSettings";
 
-/** @typedef {{ master: number; effects: number; muted: boolean }} AudioSettings */
+/** @typedef {{ master: number; effects: number; music: number; muted: boolean; musicMuted: boolean }} AudioSettings */
 
 const DEFAULT_SETTINGS = /** @type {const} */ ({
   master: 0.85,
   effects: 0.9,
+  music: 0.32,
   muted: false,
+  musicMuted: false,
 });
 
 /** @type {AudioSettings} */
@@ -41,6 +52,13 @@ let sfxBus = null;
 let uiBus = null;
 /** @type {GainNode | null} */
 let alertBus = null;
+/** @type {GainNode | null} */
+let musicProgramGain = null;
+/** @type {GainNode | null} */
+let musicDuckGain = null;
+
+let musicDuckShallow = 0;
+let musicDuckDeep = 0;
 
 let lastAlertWallMs = 0;
 let lastExplosionWallMs = 0;
@@ -70,7 +88,9 @@ function loadSettings() {
     const o = JSON.parse(raw);
     if (typeof o.master === "number") settings.master = Math.min(1, Math.max(0, o.master));
     if (typeof o.effects === "number") settings.effects = Math.min(1, Math.max(0, o.effects));
+    if (typeof o.music === "number") settings.music = Math.min(1, Math.max(0, o.music));
     if (typeof o.muted === "boolean") settings.muted = o.muted;
+    if (typeof o.musicMuted === "boolean") settings.musicMuted = o.musicMuted;
     /* Сломанное состояние из UI: не mute, но все ползунки на 0 — полная тишина. */
     if (!settings.muted && settings.master === 0 && settings.effects === 0) {
       settings = { ...DEFAULT_SETTINGS };
@@ -88,12 +108,40 @@ function saveSettings() {
       JSON.stringify({
         master: settings.master,
         effects: settings.effects,
+        music: settings.music,
         muted: settings.muted,
+        musicMuted: settings.musicMuted,
       })
     );
   } catch {
     /* ignore */
   }
+}
+
+function applyMusicProgramGainLevel() {
+  if (!musicProgramGain) return;
+  const m = settings.muted ? 0 : settings.master;
+  const mu = settings.musicMuted ? 0 : settings.music;
+  const peak = m * mu * getBgmProgramPeakCap();
+  if (ctx) {
+    const t = ctx.currentTime;
+    musicProgramGain.gain.cancelScheduledValues(t);
+    musicProgramGain.gain.setValueAtTime(musicProgramGain.gain.value, t);
+    musicProgramGain.gain.setTargetAtTime(Math.min(0.96, peak), t, 0.06);
+  } else {
+    musicProgramGain.gain.value = peak;
+  }
+}
+
+function applyMusicDuckMultiplierFromCounters() {
+  if (!musicDuckGain || !ctx) return;
+  let mul = 1;
+  if (musicDuckDeep > 0) mul = 0.38;
+  else if (musicDuckShallow > 0) mul = 0.55;
+  const t = ctx.currentTime;
+  musicDuckGain.gain.cancelScheduledValues(t);
+  musicDuckGain.gain.setValueAtTime(musicDuckGain.gain.value, t);
+  musicDuckGain.gain.setTargetAtTime(mul, t, 0.05);
 }
 
 function applyBusGains() {
@@ -116,6 +164,8 @@ function applyBusGains() {
     uiBus.gain.value = ev * 0.34;
     alertBus.gain.value = ev * 1.06;
   }
+  applyMusicProgramGainLevel();
+  syncBgmUserMute(!!settings.musicMuted || !!settings.muted);
   /* Тишина при mute только через gain (master → 0). Не вызываем ctx.suspend():
  * после снятия mute в Telegram/WebView resume() часто не срабатывает без жеста — «все звуки пропали». */
 }
@@ -157,14 +207,17 @@ export function resumeAudioContext() {
         return p.then(
           () => {
             kickPostResumePreload();
+            tryStartBgmAfterContextReady();
           },
           () => {
             kickPostResumePreload();
+            tryStartBgmAfterContextReady();
           }
         );
       }
     }
     kickPostResumePreload();
+    tryStartBgmAfterContextReady();
     return Promise.resolve();
   } catch {
     /* ignore */
@@ -182,10 +235,31 @@ function buildGraph() {
   uiBus.connect(masterGain);
   alertBus = ctx.createGain();
   alertBus.connect(masterGain);
+  musicProgramGain = ctx.createGain();
+  musicDuckGain = ctx.createGain();
+  musicDuckGain.gain.value = 1;
+  musicProgramGain.connect(musicDuckGain);
+  musicDuckGain.connect(masterGain);
+  wireBgmPlaylist(ctx, musicProgramGain);
 }
 
-/** Раньше прижимала музыку под алерты; фона нет — заглушка. */
-function duckMusicForAlert() {}
+/**
+ * Временно прижимает громкость фона под важные SFX (музыка низкий приоритет).
+ * @param {number} [duckMs]
+ * @param {boolean} [deepDuck]
+ */
+function duckMusicForAlert(duckMs = 0, deepDuck = false) {
+  if (!ctx || !musicDuckGain || settings.musicMuted || settings.muted || settings.music <= 0) return;
+  if (duckMs <= 0) return;
+  if (deepDuck) musicDuckDeep++;
+  else musicDuckShallow++;
+  applyMusicDuckMultiplierFromCounters();
+  window.setTimeout(() => {
+    if (deepDuck) musicDuckDeep = Math.max(0, musicDuckDeep - 1);
+    else musicDuckShallow = Math.max(0, musicDuckShallow - 1);
+    applyMusicDuckMultiplierFromCounters();
+  }, duckMs);
+}
 
 /**
  * Если pixel-place.mp3 на CDN — копия military-base, не кэшируем как pixel_place (будет процедурный fallback).
@@ -507,6 +581,7 @@ export function playPresentationSting(kind, spatialSpec) {
     spatialOut.connect(sfxBus);
 
     if (k === "nuke-bomb") {
+      duckMusicForAlert(880, true);
       master.gain.setValueAtTime(0.0001, now);
       master.gain.exponentialRampToValueAtTime(1, now + 0.018);
       master.gain.exponentialRampToValueAtTime(0.0001, now + 1.05);
@@ -518,6 +593,7 @@ export function playPresentationSting(kind, spatialSpec) {
     }
 
     if (k === "base_captured") {
+      duckMusicForAlert(720, true);
       master.gain.setValueAtTime(0.0001, now);
       master.gain.exponentialRampToValueAtTime(0.92, now + 0.022);
       master.gain.exponentialRampToValueAtTime(0.0001, now + 0.72);
@@ -529,6 +605,7 @@ export function playPresentationSting(kind, spatialSpec) {
     }
 
     if (k === "final-ten") {
+      duckMusicForAlert(620, true);
       master.gain.setValueAtTime(0.0001, now);
       master.gain.exponentialRampToValueAtTime(0.88, now + 0.028);
       master.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
@@ -544,12 +621,14 @@ export function playPresentationSting(kind, spatialSpec) {
     master.gain.exponentialRampToValueAtTime(0.0001, now + tail);
 
     if (k === "seismic-incoming") {
+      duckMusicForAlert(560, true);
       playFilteredNoiseBurst(master, now, 0.28, 0.08, 320);
       playOscThrough("sine", 52, 28, 0.1, 0.42, master, now + 0.04);
       playOscThrough("triangle", 62, 36, 0.038, 0.28, master, now + 0.1, 320);
       return;
     }
     if (k === "seismic") {
+      duckMusicForAlert(640, true);
       playSubThump(master, now, 0.36, 42, 20, 0.32);
       playFilteredNoiseBurst(master, now + 0.02, 0.25, 0.09, 480);
       return;
@@ -968,14 +1047,27 @@ export function playTreasureFoundSfx() {
 export function applyAudioSettings(patch) {
   if (typeof patch.master === "number") settings.master = Math.min(1, Math.max(0, patch.master));
   if (typeof patch.effects === "number") settings.effects = Math.min(1, Math.max(0, patch.effects));
+  if (typeof patch.music === "number") settings.music = Math.min(1, Math.max(0, patch.music));
   if (typeof patch.muted === "boolean") settings.muted = patch.muted;
+  if (typeof patch.musicMuted === "boolean") settings.musicMuted = patch.musicMuted;
   saveSettings();
   applyBusGains();
   refreshGameAudioToolbarUi?.();
 }
 
 export function getAudioSettings() {
-  return { master: settings.master, effects: settings.effects, muted: settings.muted };
+  return {
+    master: settings.master,
+    effects: settings.effects,
+    music: settings.music,
+    muted: settings.muted,
+    musicMuted: settings.musicMuted,
+  };
+}
+
+/** Разрешить фоновую музыку (активный бой, не наблюдатель). Вызывать из main при смене meta / паузы. */
+export function setGameplayMusicAllowed(allowed) {
+  setBgmGameplayAllowed(!!allowed);
 }
 
 /**
@@ -988,7 +1080,9 @@ export function initGameAudio() {
   const btn = document.getElementById("btn-game-audio");
   const masterEl = document.getElementById("game-audio-master");
   const sfxEl = document.getElementById("game-audio-sfx");
+  const musicEl = document.getElementById("game-audio-music");
   const muteEl = document.getElementById("game-audio-mute");
+  const musicMuteEl = document.getElementById("game-audio-music-mute");
 
   const positionAudioPanel = () => {
     if (!panel || panel.hidden || !btn) return;
@@ -1007,7 +1101,9 @@ export function initGameAudio() {
       masterEl.value = String(Math.round(settings.master * 100));
     }
     if (sfxEl) sfxEl.value = String(Math.round(settings.effects * 100));
+    if (musicEl) musicEl.value = String(Math.round(settings.music * 100));
     if (muteEl) muteEl.checked = settings.muted;
+    if (musicMuteEl) musicMuteEl.checked = settings.musicMuted;
   };
 
   const syncToolbarBtn = () => {
@@ -1075,6 +1171,7 @@ export function initGameAudio() {
   };
   bindRange(masterEl, "master");
   bindRange(sfxEl, "effects");
+  bindRange(musicEl, "music");
 
   const applyMuteFromCheckbox = () => {
     if (!muteEl) return;
@@ -1083,6 +1180,15 @@ export function initGameAudio() {
   if (muteEl) {
     muteEl.addEventListener("change", applyMuteFromCheckbox);
     muteEl.addEventListener("input", applyMuteFromCheckbox);
+  }
+
+  const applyMusicMuteFromCheckbox = () => {
+    if (!musicMuteEl) return;
+    applyAudioSettings({ musicMuted: musicMuteEl.checked });
+  };
+  if (musicMuteEl) {
+    musicMuteEl.addEventListener("change", applyMusicMuteFromCheckbox);
+    musicMuteEl.addEventListener("input", applyMusicMuteFromCheckbox);
   }
 
   const resumeOnGesture = () => {
@@ -1097,7 +1203,12 @@ export function initGameAudio() {
   document.body.addEventListener("touchstart", resumeOnGesture, { passive: true });
   document.body.addEventListener("keydown", resumeOnGesture, { passive: true });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void resumeAudioContext();
+    if (document.visibilityState === "visible") {
+      void resumeAudioContext();
+      resumeBgmAfterForeground();
+    } else {
+      pauseBgmForBackgroundOrOverlay();
+    }
   });
   window.addEventListener("pageshow", (e) => {
     if (e.persisted) void resumeAudioContext();

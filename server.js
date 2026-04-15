@@ -3036,6 +3036,7 @@ async function tickQuantumFarmIncome() {
   for (const [tid, nf] of farmsPerTeam) {
     const nFarm = nf | 0;
     if (nFarm < 1) continue;
+    if (isTeamEliminated(tid)) continue;
     const playerKeys = collectWinnerTeamPlayerKeys(tid);
     for (const pk of playerKeys) {
       if (!pk || isDevUnlimitedWallet(pk)) continue;
@@ -3065,6 +3066,7 @@ async function tickQuantumFarmIncome() {
   /** Пульс клиенту: сумма ферм + зоны событий за тик (на игрока). */
   const pulseTeams = new Set([...farmsPerTeam.keys(), ...zoneQuantsByTeam.keys()]);
   for (const tid of pulseTeams) {
+    if (isTeamEliminated(tid)) continue;
     const nFarm = farmsPerTeam.get(tid) | 0;
     const nZone = zoneQuantsByTeam.get(tid) | 0;
     const total = nFarm + nZone;
@@ -3243,7 +3245,14 @@ function applyClusterGameReplication(msg) {
       const tid = msg.teamId | 0;
       const ri = typeof msg.roundIndex === "number" ? msg.roundIndex : roundIndex;
       const dt = dynamicTeams.find((x) => x.id === tid);
-      if (dt) dt.eliminated = true;
+      if (dt) {
+        dt.eliminated = true;
+        dt.militaryOutposts = [];
+        dt.lastMilitaryBaseAt = 0;
+        delete dt.spawnX0;
+        delete dt.spawnY0;
+        saveDynamicTeams();
+      }
       clearFlagCaptureStateForDefender(tid);
       removeTerritoryIsolationGroupsForTeam(tid);
       teamEffects.delete(tid);
@@ -3355,6 +3364,17 @@ function applyClusterGameReplication(msg) {
         }
       }
       clearFlagCaptureStateForDefender(did);
+      if (msg.fullTeamElimination !== false) {
+        const dtDef = dynamicTeams.find((x) => (x.id | 0) === did);
+        if (dtDef && !dtDef.solo) {
+          dtDef.eliminated = true;
+          dtDef.militaryOutposts = [];
+          dtDef.lastMilitaryBaseAt = 0;
+          delete dtDef.spawnX0;
+          delete dtDef.spawnY0;
+          saveDynamicTeams();
+        }
+      }
       return;
     }
     case "militaryOutpostCaptured": {
@@ -3940,6 +3960,9 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
     banner: "BASE CAPTURED",
     roundIndex,
     canReenter: roundIndex === 0,
+    fullTeamElimination: true,
+    defeatMessage: "Your base was captured. Your team has been destroyed.",
+    victoryMessage: "Enemy base captured. All enemy territory is now yours.",
   });
 
   eliminateTeamByTerritoryLoss(defenderId);
@@ -4410,6 +4433,7 @@ function scanAndEliminateTeamsWithNoTerritory(byTeam) {
 function eliminateTeamByTerritoryLoss(teamId) {
   const dt = dynamicTeams.find((t) => t.id === teamId);
   if (!dt || dt.solo || dt.eliminated) return;
+  invalidateTeamScoresAggCache();
   clearFlagCaptureStateForDefender(teamId);
   removeTerritoryIsolationGroupsForTeam(teamId);
   if (isClusterLeader() && !gameFinished) {
@@ -4418,17 +4442,22 @@ function eliminateTeamByTerritoryLoss(teamId) {
   dt.eliminated = true;
   dt.militaryOutposts = [];
   dt.lastMilitaryBaseAt = 0;
-  saveDynamicTeams();
-  teamEffects.delete(teamId);
-  teamMemberKeys.delete(teamId);
-  synergyOnlineEpoch++;
-  teamPlayerCounts.delete(teamId);
   let destroyGx = 0;
   let destroyGy = 0;
   if (typeof dt.spawnX0 === "number" && typeof dt.spawnY0 === "number") {
     destroyGx = (dt.spawnX0 + TEAM_SPAWN_SIZE / 2) | 0;
     destroyGy = (dt.spawnY0 + TEAM_SPAWN_SIZE / 2) | 0;
   }
+  delete dt.spawnX0;
+  delete dt.spawnY0;
+  saveDynamicTeams();
+  teamManualScoreBonus.delete(teamId);
+  teamPeakScoreForTiebreak.delete(teamId);
+  teamFirstHitPeakAt.delete(teamId);
+  teamEffects.delete(teamId);
+  teamMemberKeys.delete(teamId);
+  synergyOnlineEpoch++;
+  teamPlayerCounts.delete(teamId);
   const payload = {
     type: "teamEliminated",
     teamId,
@@ -4437,6 +4466,7 @@ function eliminateTeamByTerritoryLoss(teamId) {
     destroyGx,
     destroyGy,
     teamColor: dt.color || "#888888",
+    defeatMessage: "Your team was destroyed.",
   };
   if (wss) {
     for (const c of wss.clients) {

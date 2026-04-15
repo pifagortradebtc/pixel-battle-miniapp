@@ -9,3 +9,5 @@ data/economy.db*
 data/economy.sqlite
 data/_arch-test/
 data/_test-wallet/
+# Локальный снимок карты (генерируется сервером)
+data/pixels-snapshot.json
