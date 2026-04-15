@@ -1024,6 +1024,38 @@ function b64ToUint8(b64) {
   return out;
 }
 
+/** Тот же центр-ячейки, что в server.js при сборке landGrid из базы размера sw×sh. */
+function resampleRegionCells(src, sw, sh, dw, dh) {
+  const out = new Uint8Array(dw * dh);
+  for (let y = 0; y < dh; y++) {
+    for (let x = 0; x < dw; x++) {
+      const bx = Math.min(sw - 1, Math.floor(((x + 0.5) / dw) * sw));
+      const by = Math.min(sh - 1, Math.floor(((y + 0.5) / dh) * sh));
+      out[y * dw + x] = src[by * sw + bx];
+    }
+  }
+  return out;
+}
+
+function resampleRegionRgb(src, sw, sh, dw, dh) {
+  const out = new Uint8Array(dw * dh * 3);
+  for (let y = 0; y < dh; y++) {
+    for (let x = 0; x < dw; x++) {
+      const bx = Math.min(sw - 1, Math.floor(((x + 0.5) / dw) * sw));
+      const by = Math.min(sh - 1, Math.floor(((y + 0.5) / dh) * sh));
+      const si = (by * sw + bx) * 3;
+      const di = (y * dw + x) * 3;
+      out[di] = src[si];
+      out[di + 1] = src[si + 1];
+      out[di + 2] = src[si + 2];
+    }
+  }
+  return out;
+}
+
+/** Если нет regions-{gridW}.json (старый деплой / другой размер сетки), подгружаем известный JSON и ресэмплим. */
+const REGION_JSON_FALLBACK_WIDTHS = [360, 640, 320, 160, 64];
+
 function isClientLandCell(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
   if (!regionCells || regionCells.length !== gridW * gridH) {
@@ -2013,20 +2045,32 @@ function isClientWaterCell(x, y) {
 async function loadRegions() {
   const w = gridW;
   const h = gridH;
-  try {
-    const r = await fetch(`/data/regions-${w}.json`);
-    if (!r.ok) throw new Error("no regions");
-    const j = await r.json();
-    regionCells = b64ToUint8(j.cellsBase64);
-    if (regionCells.length !== w * h) regionCells = null;
-    regionRgb = null;
-    if (j.rgbBase64 && typeof j.rgbBase64 === "string") {
-      const raw = b64ToUint8(j.rgbBase64);
-      if (raw.length === w * h * 3) regionRgb = raw;
+  regionCells = null;
+  regionRgb = null;
+  const widthsToTry = [...new Set([w, ...REGION_JSON_FALLBACK_WIDTHS.filter((x) => x !== w)])];
+  for (const tw of widthsToTry) {
+    try {
+      const r = await fetch(`/data/regions-${tw}.json`);
+      if (!r.ok) continue;
+      const j = await r.json();
+      const jw = j.w | 0;
+      const jh = j.h | 0;
+      let cells = b64ToUint8(j.cellsBase64);
+      if (cells.length !== jw * jh) continue;
+      if (jw !== w || jh !== h) cells = resampleRegionCells(cells, jw, jh, w, h);
+      if (cells.length !== w * h) continue;
+      regionCells = cells;
+      if (j.rgbBase64 && typeof j.rgbBase64 === "string") {
+        let raw = b64ToUint8(j.rgbBase64);
+        if (raw.length === jw * jh * 3) {
+          if (jw !== w || jh !== h) raw = resampleRegionRgb(raw, jw, jh, w, h);
+          if (raw.length === w * h * 3) regionRgb = raw;
+        }
+      }
+      return;
+    } catch {
+      /* следующий кандидат */
     }
-  } catch {
-    regionCells = null;
-    regionRgb = null;
   }
 }
 

@@ -111,6 +111,10 @@ const DATA_DIR = (() => {
   if (raw && path.isAbsolute(raw)) return path.normalize(raw);
   return path.join(ROOT, "data");
 })();
+/** Публичный префикс для music/, sfx/ (CDN). Должен быть объявлен до логов production — иначе ReferenceError при старте. */
+const STATIC_ASSET_BASE_URL = (process.env.STATIC_ASSET_BASE_URL || process.env.ASSET_CDN_BASE || "")
+  .trim()
+  .replace(/\/$/, "");
 if (process.env.NODE_ENV === "production") {
   console.log(`[data] persistent dir: ${DATA_DIR}`);
   if (STATIC_ASSET_BASE_URL) console.log(`[assets] STATIC_ASSET_BASE_URL=${STATIC_ASSET_BASE_URL}`);
@@ -223,10 +227,6 @@ const NOWPAYMENTS_PAY_CURRENCY = (process.env.NOWPAYMENTS_PAY_CURRENCY || "usdtb
 /** База суммы счёта: `usdtbsc` = та же сеть, что оплата — на инвойсе ~ровно N USDT, без пересчёта из USD */
 const NOWPAYMENTS_PRICE_CURRENCY = (process.env.NOWPAYMENTS_PRICE_CURRENCY || "usdtbsc").trim().toLowerCase();
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.APP_URL || "").replace(/\/$/, "");
-/** Опционально: публичный URL префикса для music/, sfx/ (R2/S3/CDN). Без слэша в конце. */
-const STATIC_ASSET_BASE_URL = (process.env.STATIC_ASSET_BASE_URL || process.env.ASSET_CDN_BASE || "")
-  .trim()
-  .replace(/\/$/, "");
 const NOWPAYMENTS_API_BASE = /^true$/i.test(String(process.env.NOWPAYMENTS_SANDBOX || "").trim())
   ? API_BASE_SANDBOX
   : API_BASE_PROD;
