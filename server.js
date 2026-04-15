@@ -247,6 +247,8 @@ const STATS_BROADCAST_DEBOUNCE_MS = Math.min(
   5000,
   Math.max(150, Number(process.env.STATS_BROADCAST_DEBOUNCE_MS) || 420)
 );
+/** До первого выполнения тела модуля могут вызвать scheduleStatsBroadcast (загрузка карты / выбывание команд). */
+let statsBroadcastTimer = null;
 
 const apiDepositLimiter = new SlidingWindowRateLimiter();
 const apiIpnLimiter = new SlidingWindowRateLimiter();
@@ -5174,7 +5176,6 @@ function buildStatsPayload() {
   };
 }
 
-let statsBroadcastTimer = null;
 function scheduleStatsBroadcast() {
   if (statsBroadcastTimer != null) return;
   statsBroadcastTimer = setTimeout(() => {
