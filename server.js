@@ -7243,21 +7243,31 @@ async function telegramPollLoop() {
 
         if (isStartCommand(t)) {
           rememberTelegramSubscriberChat(chatId);
-          if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
-            continue;
-          }
           const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
-          const startBtn = launchUrl ? buildTelegramStartInlineButton(launchUrl) : null;
+          const startBtn =
+            TELEGRAM_START_GAME_BUTTON_ENABLED && launchUrl
+              ? buildTelegramStartInlineButton(launchUrl)
+              : null;
           if (startBtn) {
             await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
               reply_markup: {
                 inline_keyboard: [[startBtn]],
               },
             });
-          } else {
+          } else if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
+            await telegramSendMessage(
+              chatId,
+              `${TELEGRAM_START_MESSAGE}\n\n(Кнопка Mini App отключена: TELEGRAM_START_GAME_BUTTON_ENABLED на сервере.)`
+            );
+          } else if (!launchUrl) {
             await telegramSendMessage(
               chatId,
               `${TELEGRAM_START_MESSAGE}\n\n(Админу: задайте TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME — тогда здесь появится кнопка запуска.)`
+            );
+          } else {
+            await telegramSendMessage(
+              chatId,
+              `${TELEGRAM_START_MESSAGE}\n\n(Админу: ссылка на игру должна быть HTTPS, например https://pifagor.games/ — см. TELEGRAM_MINIAPP_LINK в Render.)`
             );
           }
           continue;
