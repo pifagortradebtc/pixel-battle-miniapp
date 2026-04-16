@@ -4601,17 +4601,105 @@ function rectFreeOfPixels(x0, y0, w, h) {
   return true;
 }
 
-function existingSpawnPositions() {
+/** Центр карты (в координатах клеток) — опора для кольца спавна команд. */
+function mapCenterCellCoords() {
+  return { cx: (gridW - 1) / 2, cy: (gridH - 1) / 2 };
+}
+
+/** Геометрический центр прямоугольника базы 6×6. */
+function teamSpawnRectCenterXY(x0, y0) {
+  return { x: x0 + TEAM_SPAWN_SIZE / 2, y: y0 + TEAM_SPAWN_SIZE / 2 };
+}
+
+/**
+ * Макс. расстояние от центра карты до углов области допустимых центров базы
+ * (кольцо спавна задаётся как доля этого радиуса).
+ */
+function maxTeamSpawnCenterRadiusFromMapCenter() {
+  const { cx, cy } = mapCenterCellCoords();
+  const xLo = TEAM_SPAWN_SIZE / 2;
+  const xHi = gridW - TEAM_SPAWN_SIZE / 2;
+  const yLo = TEAM_SPAWN_SIZE / 2;
+  const yHi = gridH - TEAM_SPAWN_SIZE / 2;
+  const corners = [
+    [xLo, yLo],
+    [xHi, yLo],
+    [xLo, yHi],
+    [xHi, yHi],
+  ];
+  let r = 0;
+  for (let i = 0; i < corners.length; i++) {
+    const dx = corners[i][0] - cx;
+    const dy = corners[i][1] - cy;
+    r = Math.max(r, Math.hypot(dx, dy));
+  }
+  return r;
+}
+
+/** Углы (рад.) существующих главных баз — для равномерного распределения по периметру. */
+function existingTeamSpawnAnglesRad() {
+  const { cx, cy } = mapCenterCellCoords();
+  /** @type {number[]} */
   const out = [];
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
-    if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-      out.push({ x0: t.spawnX0, y0: t.spawnY0 });
-    }
+    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
+    const c = teamSpawnRectCenterXY(t.spawnX0, t.spawnY0);
+    out.push(Math.atan2(c.y - cy, c.x - cx));
   }
   return out;
 }
 
+/**
+ * Предпочтительный азимут для новой команды: середина самого широкого пустого сектора
+ * между уже поставленными базами (равномерность по кругу).
+ * @param {number} seed
+ */
+function pickBalancedTeamSpawnAngleRad(seed) {
+  const existing = existingTeamSpawnAnglesRad();
+  if (!existing.length) {
+    const u = (Math.imul(seed ^ 0xcafebabe, 1664525) + 1013904223) >>> 0;
+    return (u / 0x100000000) * Math.PI * 2;
+  }
+  const sorted = [...existing].sort((a, b) => a - b);
+  const n = sorted.length;
+  let bestGap = -1;
+  let bestMid = 0;
+  for (let i = 0; i < n; i++) {
+    const a0 = sorted[i];
+    const a1 = i + 1 < n ? sorted[i + 1] : sorted[0] + Math.PI * 2;
+    const gap = a1 - a0;
+    if (gap > bestGap) {
+      bestGap = gap;
+      bestMid = a0 + gap * 0.5;
+    }
+  }
+  while (bestMid > Math.PI) bestMid -= Math.PI * 2;
+  while (bestMid <= -Math.PI) bestMid += Math.PI * 2;
+  return bestMid;
+}
+
+function spawnCandidatePassesConflict(x0, y0, others) {
+  if (!rectAllLandSpan(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) return false;
+  if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) return false;
+  for (const o of others) {
+    if (spawnRectsConflictSized(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, o.x0, o.y0, o.w, o.h)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Внутренняя/внешняя граница кольца как доля геометрического «макс. радиуса» до углов сетки. */
+const TEAM_SPAWN_RING_R_INNER_FRAC = 0.75;
+const TEAM_SPAWN_RING_R_OUTER_FRAC = 0.9;
+/** Золотой угол — равномерное заполнение попыток по азимуту без кластеров. */
+const TEAM_SPAWN_GOLDEN_ANGLE_RAD = 2.39996322972865332;
+
+/**
+ * Подобрать левый верх 6×6: периферийное кольцо (~75–90% радиуса), равные расстояния до центра,
+ * распределение по углам; при неудаче — случайная карта и полный перебор (как раньше).
+ */
 function findValidSpawnRect6() {
   if (!landGrid) return null;
   const maxX = gridW - TEAM_SPAWN_SIZE;
@@ -4623,32 +4711,58 @@ function findValidSpawnRect6() {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     return seed / 0x100000000;
   };
-  for (let attempt = 0; attempt < 500; attempt++) {
+
+  const { cx: mapCx, cy: mapCy } = mapCenterCellCoords();
+  let rMaxGeom = maxTeamSpawnCenterRadiusFromMapCenter();
+  if (!(rMaxGeom > 1e-6)) rMaxGeom = 1;
+  let rInner = rMaxGeom * TEAM_SPAWN_RING_R_INNER_FRAC;
+  let rOuter = rMaxGeom * TEAM_SPAWN_RING_R_OUTER_FRAC;
+  if (rOuter - rInner < rMaxGeom * 0.04) {
+    rInner = rMaxGeom * 0.55;
+    rOuter = rMaxGeom * 0.97;
+  }
+
+  const baseAngle = pickBalancedTeamSpawnAngleRad(seed ^ 0xdeadbeef);
+
+  for (let attempt = 0; attempt < 520; attempt++) {
+    const theta =
+      baseAngle +
+      attempt * TEAM_SPAWN_GOLDEN_ANGLE_RAD +
+      (rand() - 0.5) * 0.35 +
+      (rand() - 0.5) * 0.35;
+    const r = rInner + rand() * (rOuter - rInner);
+    const tcx = mapCx + Math.cos(theta) * r;
+    const tcy = mapCy + Math.sin(theta) * r;
+    let x0 = Math.round(tcx - TEAM_SPAWN_SIZE / 2);
+    let y0 = Math.round(tcy - TEAM_SPAWN_SIZE / 2);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x0 > maxX) x0 = maxX;
+    if (y0 > maxY) y0 = maxY;
+    const c = teamSpawnRectCenterXY(x0, y0);
+    const d = Math.hypot(c.x - mapCx, c.y - mapCy);
+    if (d + 0.85 < rInner || d - 0.85 > rOuter) continue;
+    if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+  }
+
+  for (let attempt = 0; attempt < 420; attempt++) {
     const x0 = (rand() * (maxX + 1)) | 0;
     const y0 = (rand() * (maxY + 1)) | 0;
-    if (!rectAllLandSpan(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) continue;
-    if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) continue;
-    let clash = false;
-    for (const o of others) {
-      if (spawnRectsConflictSized(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, o.x0, o.y0, o.w, o.h)) {
-        clash = true;
-        break;
-      }
-    }
-    if (!clash) return { x0, y0 };
+    const c = teamSpawnRectCenterXY(x0, y0);
+    const d = Math.hypot(c.x - mapCx, c.y - mapCy);
+    if (d + 0.85 < rInner || d - 0.85 > rOuter) continue;
+    if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
   }
+
+  for (let attempt = 0; attempt < 380; attempt++) {
+    const x0 = (rand() * (maxX + 1)) | 0;
+    const y0 = (rand() * (maxY + 1)) | 0;
+    if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+  }
+
   for (let y0 = 0; y0 <= maxY; y0++) {
     for (let x0 = 0; x0 <= maxX; x0++) {
-      if (!rectAllLandSpan(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) continue;
-      if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) continue;
-      let clash = false;
-      for (const o of others) {
-        if (spawnRectsConflictSized(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, o.x0, o.y0, o.w, o.h)) {
-          clash = true;
-          break;
-        }
-      }
-      if (!clash) return { x0, y0 };
+      if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
     }
   }
   return null;
