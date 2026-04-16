@@ -197,6 +197,7 @@ function shouldInterruptPendingSayPrompt(raw, restartNorm) {
   const fw = (parts[0] || "").replace(/@\w+$/i, "");
   if (fw === "paint" && parts.length === 1) return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
+  if (fw === "quant") return true;
   if (fw === "restart" || fw === "рестарт") return true;
   if (restartNorm === "новая игра" || restartNorm === "newgame" || restartNorm === "wipe" || restartNorm === "с нуля")
     return true;
@@ -637,6 +638,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "speed") return true;
   if (fw === "restart" || fw === "рестарт") return true;
   if (norm === "новая игра" || norm === "newgame" || norm === "wipe" || norm === "с нуля") return true;
+  if (fw === "quant") return true;
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
@@ -5208,6 +5210,109 @@ function logAdminAction(entry) {
   console.log(`[admin] ${JSON.stringify({ ts: new Date().toISOString(), ...entry })}`);
 }
 
+/** Максимум квантов за одну админ-операцию (+/-/=), защита от опечаток. */
+const ADMIN_QUANT_SINGLE_OP_MAX = 1_000_000_000;
+
+function quantsFromBalanceUsdt(usdt) {
+  return Math.round(Number(usdt) * 7);
+}
+
+function roundEconomyUsdt(u) {
+  return Math.round(Number(u) * 1e6) / 1e6;
+}
+
+/**
+ * @param {string} normRaw нормализованная строка, напр. "quant 123 +50"
+ * @returns {{ ok: true, tgId: number, op: "+" | "-" | "=", amount: number } | { ok: false }}
+ */
+function parseTelegramAdminQuantCommand(normRaw) {
+  const s = String(normRaw || "")
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\s+/g, " ");
+  const m = /^quant (\d{1,18})\s*([+\-=])\s*(\d{1,12})$/i.exec(s);
+  if (!m) return { ok: false };
+  const tgId = parseInt(m[1], 10);
+  const op = m[2];
+  const amount = parseInt(m[3], 10);
+  if (!Number.isFinite(tgId) || tgId < 1) return { ok: false };
+  if (!Number.isFinite(amount) || amount < 0) return { ok: false };
+  if (amount > ADMIN_QUANT_SINGLE_OP_MAX) return { ok: false };
+  if (op !== "+" && op !== "-" && op !== "=") return { ok: false };
+  if (op !== "=" && amount === 0) return { ok: false };
+  return { ok: true, tgId, op, amount };
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} adminTelegramUid
+ * @param {{ ok: true, tgId: number, op: "+" | "-" | "=", amount: number }} parsed
+ */
+async function applyAdminQuantTelegramCommand(chatId, adminTelegramUid, parsed) {
+  const pk = sanitizePlayerKey(`tg_${parsed.tgId}`);
+  const exists = await walletStore.hasEconomyUserRecord(pk);
+  if (!exists) {
+    await telegramSendMessage(chatId, `User with Telegram ID ${parsed.tgId} not found.`);
+    return;
+  }
+  const u = await walletStore.getOrCreateUser(pk);
+  const oldUsdt = Number(u.balanceUSDT) || 0;
+  const oldQ = quantsFromBalanceUsdt(oldUsdt);
+
+  let newUsdt = oldUsdt;
+  if (parsed.op === "+") {
+    newUsdt = oldUsdt + quantToUsdt(parsed.amount);
+  } else if (parsed.op === "-") {
+    const sub = quantToUsdt(parsed.amount);
+    if (oldUsdt + 1e-9 < sub) {
+      await telegramSendMessage(
+        chatId,
+        `Insufficient balance: cannot subtract ${parsed.amount} quants from Telegram ID ${parsed.tgId} (current ${oldQ} quants).`
+      );
+      return;
+    }
+    newUsdt = oldUsdt - sub;
+  } else {
+    newUsdt = quantToUsdt(parsed.amount);
+  }
+  u.balanceUSDT = roundEconomyUsdt(Math.max(0, newUsdt));
+  const newQ = quantsFromBalanceUsdt(u.balanceUSDT);
+
+  await walletStore.flushUsersEconomy([pk]);
+
+  logAdminAction({
+    command: "quant",
+    byTelegramId: adminTelegramUid,
+    targetTelegramId: parsed.tgId,
+    playerKey: pk,
+    op: parsed.op,
+    quantArg: parsed.amount,
+    oldBalanceQuants: oldQ,
+    newBalanceQuants: newQ,
+    oldBalanceUSDT: oldUsdt,
+    newBalanceUSDT: u.balanceUSDT,
+  });
+
+  let msg;
+  if (parsed.op === "+") {
+    msg = `Added ${parsed.amount} quants to Telegram ID ${parsed.tgId}. New balance: ${newQ}`;
+  } else if (parsed.op === "-") {
+    msg = `Subtracted ${parsed.amount} quants from Telegram ID ${parsed.tgId}. New balance: ${newQ}`;
+  } else {
+    msg = `Set balance to ${newQ} quants for Telegram ID ${parsed.tgId}.`;
+  }
+  await telegramSendMessage(chatId, msg);
+
+  if (wss) {
+    for (const c of wss.clients) {
+      if (c.readyState !== 1) continue;
+      if (sanitizePlayerKey(c.playerKey) !== pk) continue;
+      safeSend(c, await buildWalletPayload(c));
+      void sendConnectionMeta(c);
+    }
+  }
+}
+
 function broadcastTeamManualScoreBonusSync() {
   broadcast({
     type: "teamManualScoreBonusSync",
@@ -7878,6 +7983,29 @@ async function telegramPollLoop() {
         }
 
         {
+          const qCmd = restartNorm.replace(/^\/quant\b/i, "quant").trim();
+          if (qCmd === "quant" || qCmd.startsWith("quant ")) {
+            if (!isClusterLeader()) {
+              await telegramSendMessage(
+                chatId,
+                "quant: only CLUSTER_LEADER=true instance runs this (avoids duplicate grants with multiple workers)."
+              );
+              continue;
+            }
+            const parsed = parseTelegramAdminQuantCommand(qCmd);
+            if (!parsed.ok) {
+              await telegramSendMessage(
+                chatId,
+                "Invalid command format. Use: quant <telegramId> +<amount> (also -<amount>, =<amount>)"
+              );
+              continue;
+            }
+            await applyAdminQuantTelegramCommand(chatId, uid, parsed);
+            continue;
+          }
+        }
+
+        {
           let tn = restartNorm.trim().toLowerCase();
           if (tn.startsWith("/test")) tn = tn.slice(1).trim();
           if (tn === "test" || tn.startsWith("test ")) {
@@ -8100,7 +8228,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start (сброс тренировки / новая игра), go [часы], teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start (сброс тренировки / новая игра), go [часы], quant <tgId> +N, teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
             );
           }
           continue;
