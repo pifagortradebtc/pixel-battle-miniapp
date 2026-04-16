@@ -1534,6 +1534,11 @@ function teamsForMeta() {
           h: TEAM_SPAWN_SIZE,
         }))
       : [],
+    /* Для кластера Redis: вторичный инстанс восстанавливает кулдаун плацдарма из того же teamsFull. */
+    lastMilitaryBaseAt:
+      !t.solo && Number.isFinite(Number(t.lastMilitaryBaseAt)) && Number(t.lastMilitaryBaseAt) > 0
+        ? Number(t.lastMilitaryBaseAt) | 0
+        : 0,
   }));
 }
 
@@ -3395,6 +3400,17 @@ function applyClusterGameReplication(msg) {
           const sp = t.spawn && typeof t.spawn === "object" ? t.spawn : null;
           const sx = typeof t.spawnX0 === "number" ? t.spawnX0 : sp && typeof sp.x0 === "number" ? sp.x0 : undefined;
           const sy = typeof t.spawnY0 === "number" ? t.spawnY0 : sp && typeof sp.y0 === "number" ? sp.y0 : undefined;
+          const moSrc = Array.isArray(t.militaryOutposts) ? t.militaryOutposts : [];
+          /** @type {{ x0: number, y0: number }[]} */
+          const militaryOutposts = [];
+          for (let mi = 0; mi < moSrc.length; mi++) {
+            const o = moSrc[mi];
+            if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
+            militaryOutposts.push({ x0: o.x0 | 0, y0: o.y0 | 0 });
+          }
+          const lastMbRaw = Number(t.lastMilitaryBaseAt);
+          const lastMilitaryBaseAt =
+            !t.solo && Number.isFinite(lastMbRaw) && lastMbRaw > 0 ? lastMbRaw | 0 : 0;
           return {
             id: t.id | 0,
             name: sanitizeTeamName(t.name),
@@ -3405,11 +3421,13 @@ function applyClusterGameReplication(msg) {
             editToken: typeof t.editToken === "string" ? t.editToken.slice(0, 128) : undefined,
             soloResumeToken: typeof t.soloResumeToken === "string" ? t.soloResumeToken.slice(0, 128) : undefined,
             ...(typeof sx === "number" && typeof sy === "number" ? { spawnX0: sx, spawnY0: sy } : {}),
+            ...(!t.solo ? { militaryOutposts, lastMilitaryBaseAt } : { militaryOutposts: [], lastMilitaryBaseAt: 0 }),
           };
         });
         const maxId = dynamicTeams.reduce((m, t) => Math.max(m, t.id || 0), 0);
         nextTeamId = Math.max(nextTeamId, maxId + 1);
         saveDynamicTeams();
+        invalidateBaseConnectedPixelsCache();
       }
       return;
     case "counts":
