@@ -87,6 +87,8 @@ let lastEpicStingWallMs = 0;
 let lowPrioritySfxCount = 0;
 /** Последний запуск стинга плацдарма (performance.now): хвост military_base + pixel_place.mp3 сливаются — слышно как «ещё раз база». */
 let lastMilitaryDeployHeardAtPerfMs = 0;
+let lastGreatWallHitWallMs = 0;
+let lastGreatWallBreakWallMs = 0;
 /** Окно после деплоя: короткий клик пикселя + обрезка хвоста military_base.mp3 (иначе слышно как повторный стинг). */
 const MILITARY_DEPLOY_PIXEL_MP3_SUPPRESS_MS = 9000;
 
@@ -940,6 +942,55 @@ export function playFlagBaseHit(spatial) {
     playSubThump(sfxBus, now, 0.26, 68, 42, 0.26 * sm);
     playFilteredNoiseBurst(sfxBus, now + 0.01, 0.07, 0.065 * sm, 1100);
     playOscThrough("triangle", 78, 48, 0.028 * sm, 0.15, sfxBus, now + 0.018, 420);
+  });
+}
+
+/** Удар по укреплённой клетке: тяжелее обычного пикселя, без регенерации. */
+export function playGreatWallHit(spatial) {
+  resumeAudioContext().then(() => {
+    if (!ctx || !sfxBus || settings.muted) return;
+    const nowW = performance.now();
+    if (nowW - lastGreatWallHitWallMs < 200) return;
+    lastGreatWallHitWallMs = nowW;
+    const now = ctx.currentTime;
+    const sm = resolveSpatialMul(spatial ?? { scope: "personal", weight: 1 });
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
+    if (playEventSample("base_hit", { bus: "sfx", gainMul: 0.88, spatial })) return;
+    playSubThump(sfxBus, now, 0.3, 54, 34, 0.33 * sm);
+    playFilteredNoiseBurst(sfxBus, now + 0.006, 0.1, 0.078 * sm, 880);
+    playOscThrough("square", 105, 62, 0.024 * sm, 0.09, sfxBus, now + 0.01, 850);
+  });
+}
+
+/** Обрушение стены: резкий треск + удар. */
+export function playGreatWallBreak(spatial) {
+  resumeAudioContext().then(() => {
+    if (!ctx || !sfxBus || settings.muted) return;
+    const nowW = performance.now();
+    if (nowW - lastGreatWallBreakWallMs < 420) return;
+    lastGreatWallBreakWallMs = nowW;
+    const now = ctx.currentTime;
+    duckMusicForAlert(360, false);
+    const sm = resolveSpatialMul(spatial ?? { scope: "personal", weight: 1 });
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
+    if (playEventSample("base_capture", { bus: "sfx", gainMul: 0.62, spatial })) return;
+    playFilteredNoiseBurst(sfxBus, now, 0.16, 0.11 * sm, 2200);
+    playOscThrough("sawtooth", 380, 72, 0.032 * sm, 0.13, sfxBus, now + 0.001, 1100);
+    playSubThump(sfxBus, now + 0.018, 0.24, 88, 38, 0.3 * sm);
+  });
+}
+
+/** Постройка стены на своей клетке. */
+export function playGreatWallBuilt(spatial) {
+  resumeAudioContext().then(() => {
+    if (!ctx || !sfxBus || settings.muted) return;
+    const now = ctx.currentTime;
+    const sm = resolveSpatialMul(spatial ?? { scope: "personal", weight: 1 });
+    if (sm < SPATIAL_MIN_AUDIBLE) return;
+    if (playEventSample("buff_team", { bus: "sfx", gainMul: 0.42, spatial })) return;
+    playSubThump(sfxBus, now, 0.2, 78, 46, 0.24 * sm);
+    playFilteredNoiseBurst(sfxBus, now + 0.02, 0.055, 0.038 * sm, 480);
+    playOscThrough("triangle", 175, 92, 0.038 * sm, 0.11, sfxBus, now + 0.035, 620);
   });
 }
 

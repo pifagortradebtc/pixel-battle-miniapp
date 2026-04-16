@@ -213,6 +213,23 @@
     </div>
   </div>
 
+  <div id="quantum-farm-panel" class="quantum-farm-panel" hidden aria-hidden="true">
+    <div class="quantum-farm-panel__backdrop" id="quantum-farm-panel-backdrop"></div>
+    <div class="quantum-farm-panel__card" role="dialog" aria-labelledby="quantum-farm-panel-title">
+      <button type="button" class="quantum-farm-panel__close" id="quantum-farm-panel-close" aria-label="Закрыть">
+        ×
+      </button>
+      <h2 class="quantum-farm-panel__title" id="quantum-farm-panel-title">Квантовая ферма</h2>
+      <p class="quantum-farm-panel__line" id="quantum-farm-panel-level"></p>
+      <p class="quantum-farm-panel__blurb" id="quantum-farm-panel-blurb"></p>
+      <p class="quantum-farm-panel__line quantum-farm-panel__line--income" id="quantum-farm-panel-income"></p>
+      <p class="quantum-farm-panel__hint" id="quantum-farm-panel-hint" hidden></p>
+      <button type="button" class="quantum-farm-panel__upgrade" id="quantum-farm-panel-upgrade" hidden>
+        Улучшить
+      </button>
+    </div>
+  </div>
+
   <div id="defeat-overlay" class="overlay defeat-overlay" hidden>
     <div class="overlay__card defeat-overlay__card">
       <h2 id="defeat-overlay-title" class="overlay__title defeat-overlay__title">Уничтожено</h2>
@@ -563,6 +580,30 @@
                 <button type="button" class="game-shop__buy shop-btn" id="shop-nuke-bomb" data-action="nukeBomb">Выбрать</button>
               </div>
             </article>
+            <article class="game-shop__card game-shop__card--premium">
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--hot">Оборона</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon" aria-hidden="true">🧱</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Великая стена</h3>
+                  <p class="game-shop__card-desc">
+                    Укрепите <strong>свою</strong> закрашенную клетку (не якорь флага базы): <strong>3 HP</strong>, без
+                    восстановления. Враг снимает по 1 HP за удар; на третьем ударе стена ломается и клетка
+                    <strong>сразу</strong> становится его территорией.
+                  </p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">160 квантов</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn" id="shop-great-wall" data-action="greatWall">
+                  Укрепить
+                </button>
+              </div>
+            </article>
             <article
               class="game-shop__card game-shop__card--premium game-shop__card--elite game-shop__card--military-supreme"
             >
@@ -595,6 +636,25 @@
         </div>
 
         <div class="game-shop__panel" data-panel="topup" id="shop-panel-topup" hidden>
+          <div
+            id="shop-fair-play-notice"
+            class="game-shop__fair-play-notice"
+            role="status"
+            aria-live="polite"
+            hidden
+          >
+            <span class="game-shop__fair-play-notice__icon" aria-hidden="true">⚖️</span>
+            <div class="game-shop__fair-play-notice__body">
+              <p class="game-shop__fair-play-notice__en">
+                Purchases disabled for fair play.<br />
+                All players compete on equal terms.
+              </p>
+              <p class="game-shop__fair-play-notice__ru">
+                Покупки отключены ради честной игры.<br />
+                Все игроки в равных условиях.
+              </p>
+            </div>
+          </div>
           <div class="game-shop__topup-grid">
             <button type="button" class="game-shop__topup-card shop-topup-pack" data-amt="1" data-bonus="0">
               <span class="game-shop__topup-quant">7 квантов</span>
@@ -646,12 +706,23 @@
       class="lb-widget"
       hidden
       aria-label="Рейтинг команд"
+      aria-expanded="true"
     >
       <div class="lb-widget__chrome">
-        <span class="lb-widget__title">Рейтинг</span>
+        <span id="leaderboard-panel-title" class="lb-widget__title">Рейтинг</span>
         <span class="lb-widget__online" title="Игроков онлайн"
           ><span id="online-count">0</span></span
         >
+        <button
+          type="button"
+          id="leaderboard-toggle"
+          class="lb-widget__toggle"
+          aria-controls="leaderboard-list"
+          aria-expanded="true"
+          title="Свернуть до топ‑3"
+        >
+          <span class="lb-widget__toggle-icon" aria-hidden="true"></span>
+        </button>
       </div>
       <ol id="leaderboard-list" class="lb-widget__list" role="list"></ol>
     </aside>

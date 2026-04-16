@@ -385,6 +385,76 @@ export function createBoardVfx(canvas) {
     }
   }
 
+  /** Постройка Великой стены на одной клетке: камень + цвет команды. */
+  function greatWallBuilt(gx, gy, teamHex, transform) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const col = typeof teamHex === "string" && teamHex.startsWith("#") ? teamHex : "#a5b4fc";
+    const t0 = performance.now();
+    const stone = "#c9b8a0";
+    ripple(gxi, gyi, col, transform);
+    ripple(gxi, gyi, stone, transform);
+    burst(gxi, gyi, "#f5f0e6", transform, 9);
+    burst(gxi, gyi, col, transform, 11);
+    shockwaves.push({
+      t0,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 1.35,
+      color: "rgba(255,250,235,0.75)",
+    });
+    shockwaves.push({
+      t0: t0 + 60,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 2.1,
+      color: col,
+    });
+    zoneFlash(gxi, gyi, col, transform, 1);
+    seismicCrackBurst([[gxi, gyi]]);
+  }
+
+  /** Удар по стене (HP −1): осколки и трещины. */
+  function greatWallHit(gx, gy, defenderColor, transform) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const col = typeof defenderColor === "string" && defenderColor.startsWith("#") ? defenderColor : "#888888";
+    flagBaseHitImpact(gxi, gyi, col, transform);
+    burst(gxi, gyi, "#8b7355", transform, 10);
+    burst(gxi, gyi, "#d4c4a8", transform, 7);
+    burst(gxi, gyi, "#2a2218", transform, 4);
+    seismicCrackBurst([[gxi, gyi]]);
+  }
+
+  /** Стена разрушена — клетка сразу у атакующего. */
+  function greatWallBreak(gx, gy, attackerColor, defenderColor, transform) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const ac = typeof attackerColor === "string" && attackerColor.startsWith("#") ? attackerColor : "#66ff99";
+    const dc = typeof defenderColor === "string" && defenderColor.startsWith("#") ? defenderColor : "#ff6655";
+    const t0 = performance.now();
+    burst(gxi, gyi, "#ffffff", transform, 14);
+    burst(gxi, gyi, ac, transform, 18);
+    burst(gxi, gyi, dc, transform, 12);
+    burst(gxi, gyi, "#4a3728", transform, 8);
+    shockwaves.push({
+      t0,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 3.2,
+      color: "rgba(40,32,24,0.55)",
+    });
+    shockwaves.push({
+      t0: t0 + 85,
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: 5.5,
+      color: ac,
+    });
+    seismicCrackBurst([[gxi, gyi]]);
+    ripple(gxi, gyi, ac, transform);
+  }
+
   function nukeExplosion(gcx, gcy, transform, cells) {
     const gxi = gcx | 0;
     const gyi = gcy | 0;
@@ -769,6 +839,9 @@ export function createBoardVfx(canvas) {
     seismicCrackBurst,
     nukeExplosion,
     militaryBaseDeploy,
+    greatWallBuilt,
+    greatWallHit,
+    greatWallBreak,
     territoryIsolationCollapseBurst,
     render,
     hasWork,

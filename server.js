@@ -42,6 +42,7 @@ import {
   API_BASE_SANDBOX,
 } from "./lib/nowpayments-api.js";
 import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
+import { isUsdtDepositsEnabled } from "./lib/usdt-deposits-enabled.js";
 import { startTelegramPollWhenRedisLockHeld } from "./lib/telegram-poll-redis-lock.mjs";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
 import {
@@ -82,6 +83,7 @@ import {
   toEpochMsSafe,
 } from "./lib/flag-capture.js";
 import {
+  GRID8_DELTAS,
   TERRITORY_ISOLATION_GRACE_MS,
   computeIsolatedTerritoryGroups,
   makeGridCellKey,
@@ -96,6 +98,8 @@ import {
   scoreTeamsAroundFarm,
   resolveFarmControl,
 } from "./lib/quantum-farms.js";
+import { GREAT_WALL_MAX_HP, normalizeWallHp } from "./lib/great-wall.js";
+import { normalizeQuantumFarmLevel, QUANTUM_FARM_MAX_LEVEL } from "./lib/quantum-farm-upgrades.js";
 
 /** За каждую активную «визуальную» зону события, где есть хотя бы одна клетка территории команды, +столько квантов / 5 с. */
 const BATTLE_EVENT_ZONE_QUANT_PER_STACK = 5;
@@ -381,7 +385,7 @@ function broadcastToWebSocketClients(raw) {
 }
 
 /** Пакетная рассылка клеток: один кадр WS/PubSub на микротаску вместо N сообщений «pixel». */
-/** @type {Map<string, { x: number, y: number, t: number, ownerPlayerKey: string, shieldedUntil: number }>} */
+/** @type {Map<string, { x: number, y: number, t: number, ownerPlayerKey: string, shieldedUntil: number, wallHp: number }>} */
 const pendingPixelBroadcast = new Map();
 let pixelBroadcastFlushScheduled = false;
 
@@ -405,7 +409,7 @@ function flushPixelBroadcastNow() {
   if (pendingPixelBroadcast.size === 0) return;
   const cells = [];
   for (const v of pendingPixelBroadcast.values()) {
-    cells.push([v.x, v.y, v.t, v.ownerPlayerKey, v.shieldedUntil]);
+    cells.push([v.x, v.y, v.t, v.ownerPlayerKey, v.shieldedUntil, v.wallHp | 0]);
   }
   pendingPixelBroadcast.clear();
   const chunk = PIXEL_BATCH_MAX_CELLS;
@@ -421,18 +425,20 @@ function flushPixelBroadcastNow() {
   }
 }
 
-function queuePixelBroadcast(x, y, t, ownerPlayerKey, shieldedUntil) {
+function queuePixelBroadcast(x, y, t, ownerPlayerKey, shieldedUntil, wallHp = 0) {
   const xi = x | 0;
   const yi = y | 0;
   const tid = t | 0;
   const opk = String(ownerPlayerKey || "").slice(0, 128);
   const sh = Number(shieldedUntil) || 0;
+  const wh = normalizeWallHp(wallHp);
   pendingPixelBroadcast.set(`${xi},${yi}`, {
     x: xi,
     y: yi,
     t: tid,
     ownerPlayerKey: opk,
     shieldedUntil: sh,
+    wallHp: wh,
   });
   if (!pixelBroadcastFlushScheduled) {
     pixelBroadcastFlushScheduled = true;
@@ -1642,6 +1648,7 @@ function saveRoundState() {
         pauseCapturedWarmup: !!pauseCapturedWarmup,
         warmupPauseExtensionMs: Math.max(0, warmupPauseExtensionMs | 0),
         teamManualScoreBonus: Object.fromEntries(teamManualScoreBonus),
+        quantumFarmLevels: quantumFarmLevels.length ? [...quantumFarmLevels] : [],
       }),
       "utf8"
     );
@@ -1734,11 +1741,15 @@ function loadPixelsSnapshotIfPresentSync() {
       if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
       if (!cellAllowsPixelPlacement(x, y)) continue;
       if (fmt === "v2" && p.length >= 5) {
-        pixels.set(`${x},${y}`, {
+        const wh = p.length >= 6 ? normalizeWallHp(p[5]) : 0;
+        /** @type {{ teamId: number, ownerPlayerKey: string, shieldedUntil: number, wallHp?: number }} */
+        const o = {
           teamId: p[2] | 0,
           ownerPlayerKey: String(p[3] || "").slice(0, 128),
           shieldedUntil: Number(p[4]) || 0,
-        });
+        };
+        if (wh > 0) o.wallHp = wh;
+        pixels.set(`${x},${y}`, o);
       } else {
         pixels.set(`${x},${y}`, { teamId: p[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
       }
@@ -1859,6 +1870,11 @@ function loadRoundState() {
           if (!tid || !Number.isFinite(n) || n === 0) continue;
           teamManualScoreBonus.set(tid, n);
         }
+      }
+      if (Array.isArray(j.quantumFarmLevels) && j.quantumFarmLevels.length) {
+        pendingQuantumFarmLevelsRestore = j.quantumFarmLevels.map((x) => normalizeQuantumFarmLevel(x));
+      } else {
+        pendingQuantumFarmLevelsRestore = null;
       }
       if (gamePaused && pauseWallStartedAt > Date.now()) {
         gamePaused = false;
@@ -2076,14 +2092,29 @@ function rebuildLandFromRound(ri) {
     }
   }
   clearAllFlagCaptureState();
-  quantumFarmLayouts = computeQuantumFarmLayouts(playableGrid, gridW, gridH);
+  const quantumFarmAvoidRects = allSpawnLikeRectsForConflict().map((r) => ({
+    x0: r.x0 | 0,
+    y0: r.y0 | 0,
+    w: TEAM_SPAWN_SIZE,
+    h: TEAM_SPAWN_SIZE,
+  }));
+  quantumFarmLayouts = computeQuantumFarmLayouts(playableGrid, gridW, gridH, ri, quantumFarmAvoidRects);
   quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
   if (quantumFarmLayouts.length) {
+    if (pendingQuantumFarmLevelsRestore && pendingQuantumFarmLevelsRestore.length === quantumFarmLayouts.length) {
+      quantumFarmLevels = pendingQuantumFarmLevelsRestore.map((x) => normalizeQuantumFarmLevel(x));
+      pendingQuantumFarmLevelsRestore = null;
+    } else {
+      quantumFarmLevels = quantumFarmLayouts.map(() => 1);
+      pendingQuantumFarmLevelsRestore = null;
+    }
     broadcast({
       type: "quantumFarmsInit",
-      farms: quantumFarmLayouts.map(({ id, x0, y0, w, h }) => ({ id, x0, y0, w, h })),
+      farms: buildQuantumFarmsClientPayload(),
     });
   } else {
+    quantumFarmLevels = [];
+    pendingQuantumFarmLevelsRestore = null;
     broadcast({ type: "quantumFarmsInit", farms: [] });
   }
   invalidateTeamScoresAggCache();
@@ -2467,6 +2498,20 @@ let quantumFarmLayouts = [];
 /** @type {number[]} владельцы по индексу (для детекта смены и тика дохода). */
 let quantumFarmOwnerPrev = [];
 let quantumFarmIncomeTickSeq = 0;
+/** Уровни ферм 1..3 по индексу quantumFarmLayouts (доход = level кв. / 5 с при контроле). */
+let quantumFarmLevels = [];
+/** Из round-state до первого rebuildLandFromRound (длина должна совпасть с layouts). */
+let pendingQuantumFarmLevelsRestore = null;
+
+function buildQuantumFarmsClientPayload() {
+  const out = [];
+  for (let i = 0; i < quantumFarmLayouts.length; i++) {
+    const f = quantumFarmLayouts[i];
+    const lv = normalizeQuantumFarmLevel(quantumFarmLevels[i]);
+    out.push({ id: f.id, x0: f.x0, y0: f.y0, w: f.w, h: f.h, level: lv });
+  }
+  return out;
+}
 
 /** Всегда число (0 = пусто/битые данные), чтобы не ломать повторные удары по флагу из‑за string vs number в JSON/Redis. */
 function pixelTeam(val) {
@@ -2632,22 +2677,30 @@ function advanceTerritoryIsolationState() {
       if (m.deadlineMs <= now) {
         /** @type [number, number][] */
         const xyList = [];
+        let removedAny = false;
         for (const k of m.cells) {
-          pixels.delete(k);
           const parts = k.split(",");
           const sx = Number(parts[0]);
           const sy = Number(parts[1]);
-          if (Number.isFinite(sx) && Number.isFinite(sy)) xyList.push([sx | 0, sy | 0]);
+          if (!Number.isFinite(sx) || !Number.isFinite(sy)) continue;
+          const x = sx | 0;
+          const y = sy | 0;
+          if (cellInsideAnyActiveBaseRectForTeam(x, y, m.teamId)) continue;
+          pixels.delete(k);
+          xyList.push([x, y]);
+          removedAny = true;
         }
         removeMilitaryOutpostsFullyInsideIsolationCellSet(m.teamId, m.cells);
-        broadcast({
-          type: "territoryIsolationCollapse",
-          teamId: m.teamId,
-          groupId: m.groupId,
-          sig: m.groupId,
-          cells: xyList,
-        });
-        pixelsMutated = true;
+        if (removedAny) {
+          broadcast({
+            type: "territoryIsolationCollapse",
+            teamId: m.teamId,
+            groupId: m.groupId,
+            sig: m.groupId,
+            cells: xyList,
+          });
+          pixelsMutated = true;
+        }
       } else {
         nextCarry.set(m.groupId, {
           teamId: m.teamId,
@@ -2665,17 +2718,23 @@ function advanceTerritoryIsolationState() {
 
 function normalizePixel(val) {
   if (val == null) {
-    return { teamId: 0, ownerPlayerKey: "", shieldedUntil: 0 };
+    return { teamId: 0, ownerPlayerKey: "", shieldedUntil: 0, wallHp: 0 };
   }
   if (typeof val === "object") {
     return {
       teamId: val.teamId | 0,
       ownerPlayerKey: String(val.ownerPlayerKey || "").slice(0, 128),
       shieldedUntil: Number(val.shieldedUntil) || 0,
+      wallHp: normalizeWallHp(val.wallHp),
     };
   }
   const tid = Number(val) | 0;
-  return { teamId: tid, ownerPlayerKey: "", shieldedUntil: 0 };
+  return { teamId: tid, ownerPlayerKey: "", shieldedUntil: 0, wallHp: 0 };
+}
+
+/** @param {unknown} val */
+function pixelWallHp(val) {
+  return normalizePixel(val).wallHp;
 }
 
 function clearTeamEffectsMap() {
@@ -2715,12 +2774,86 @@ function planCaptureRect(x0, y0, x1, y1) {
   return planned;
 }
 
+/**
+ * Один удар по чужой Great Wall (−1 HP или захват атакующим при 0).
+ * Обычный захват зоны / пиксель не должны перекрашивать стену за один раз.
+ * @returns {{ handled: boolean, wallBroken: boolean }}
+ */
+function tryApplyGreatWallSiegeHit(x, y, attackerTeamId, attackerPk) {
+  const xi = x | 0;
+  const yi = y | 0;
+  const key = `${xi},${yi}`;
+  const exWall = pixels.get(key);
+  const wh = pixelWallHp(exWall);
+  if (exWall == null || pixelTeam(exWall) === (attackerTeamId | 0) || wh <= 0) {
+    return { handled: false, wallBroken: false };
+  }
+  const pEx = normalizePixel(exWall);
+  const nextHp = wh - 1;
+  if (nextHp > 0) {
+    const nextRec = {
+      teamId: pEx.teamId,
+      ownerPlayerKey: pEx.ownerPlayerKey,
+      shieldedUntil: pEx.shieldedUntil,
+      wallHp: nextHp,
+    };
+    pixels.set(key, nextRec);
+    tryApplyIncrementalTeamScoreForPixel(xi, yi, exWall, nextRec);
+    queuePixelBroadcast(xi, yi, pEx.teamId, pEx.ownerPlayerKey, pEx.shieldedUntil, nextHp);
+    broadcast({
+      type: "purchaseVfx",
+      kind: "greatWallHit",
+      gx: xi,
+      gy: yi,
+      wallHp: nextHp,
+      defenderTeamId: pEx.teamId | 0,
+    });
+    return { handled: true, wallBroken: false };
+  }
+  const prevBr = pixels.get(key);
+  const recBr = { teamId: attackerTeamId, ownerPlayerKey: attackerPk, shieldedUntil: 0 };
+  pixels.set(key, recBr);
+  tryApplyIncrementalTeamScoreForPixel(xi, yi, prevBr, recBr);
+  queuePixelBroadcast(xi, yi, attackerTeamId, attackerPk, 0, 0);
+  broadcast({
+    type: "purchaseVfx",
+    kind: "greatWallBreak",
+    gx: xi,
+    gy: yi,
+    attackerTeamId: attackerTeamId | 0,
+    defenderTeamId: pEx.teamId | 0,
+  });
+  return { handled: true, wallBroken: true };
+}
+
 function applyPlannedCapture(pk, tid, planned) {
   invalidateTeamScoresAggCache();
   for (const [x, y] of planned) {
     if (!cellAllowsPixelPlacement(x, y)) continue;
     if (isEnemyOwnedFlagBaseCell(tid, x, y)) continue;
     const k = `${x},${y}`;
+    const prev = pixels.get(k);
+    const prevTeam = prev == null ? 0 : pixelTeam(prev);
+    if (prev != null && prevTeam === (tid | 0)) {
+      const whOwn = pixelWallHp(prev);
+      const pEx = normalizePixel(prev);
+      if (whOwn > 0) {
+        pixels.set(k, {
+          teamId: tid,
+          ownerPlayerKey: pk,
+          shieldedUntil: pEx.shieldedUntil,
+          wallHp: whOwn,
+        });
+        queuePixelBroadcast(x, y, tid, pk, pEx.shieldedUntil, whOwn);
+      } else {
+        pixels.set(k, { teamId: tid, ownerPlayerKey: pk, shieldedUntil: 0 });
+        queuePixelBroadcast(x, y, tid, pk, 0, 0);
+      }
+      continue;
+    }
+    if (tryApplyGreatWallSiegeHit(x, y, tid, pk).handled) {
+      continue;
+    }
     pixels.set(k, {
       teamId: tid,
       ownerPlayerKey: pk,
@@ -2856,7 +2989,7 @@ function fullPayloadObject() {
   for (const [key, val] of pixels) {
     const [x, y] = key.split(",").map(Number);
     const p = normalizePixel(val);
-    list.push([x, y, p.teamId, p.ownerPlayerKey, p.shieldedUntil]);
+    list.push([x, y, p.teamId, p.ownerPlayerKey, p.shieldedUntil, p.wallHp | 0]);
   }
   return { type: "full", pixels: list, pixelFormat: "v2" };
 }
@@ -2952,11 +3085,12 @@ function getQuantumFarmIncomeQuantsForTeam(teamId) {
   const tid = teamId | 0;
   if (!tid || !quantumFarmLayouts.length) return 0;
   const owners = computeQuantumFarmOwnersNow();
-  let n = 0;
+  let sum = 0;
   for (let i = 0; i < owners.length; i++) {
-    if ((owners[i] | 0) === tid) n++;
+    if ((owners[i] | 0) !== tid) continue;
+    sum += normalizeQuantumFarmLevel(quantumFarmLevels[i]);
   }
-  return n;
+  return sum;
 }
 
 /** @param {string} key формат "x,y" */
@@ -3071,6 +3205,14 @@ function syncQuantumFarmStateAfterTerritoryChange() {
         farmId,
       });
     } else if (a && b && a !== b) {
+      if (quantumFarmLevels[i] !== 1) {
+        quantumFarmLevels[i] = 1;
+        try {
+          saveRoundState();
+        } catch {
+          /* ignore */
+        }
+      }
       broadcastQuantumFarmTeamNotice(a, { type: "quantumFarmNotice", kind: "lost", farmId, capturedByTeamId: b });
       broadcastQuantumFarmTeamNotice(b, {
         type: "quantumFarmNotice",
@@ -3078,6 +3220,7 @@ function syncQuantumFarmStateAfterTerritoryChange() {
         farmId,
         prevTeamId: a,
       });
+      broadcast({ type: "quantumFarmsInit", farms: buildQuantumFarmsClientPayload() });
     }
   }
   quantumFarmOwnerPrev = next;
@@ -3095,7 +3238,8 @@ async function tickQuantumFarmIncome() {
     for (let i = 0; i < owners.length; i++) {
       const t = owners[i] | 0;
       if (!t) continue;
-      farmsPerTeam.set(t, (farmsPerTeam.get(t) | 0) + 1);
+      const inc = normalizeQuantumFarmLevel(quantumFarmLevels[i]);
+      farmsPerTeam.set(t, (farmsPerTeam.get(t) | 0) + inc);
     }
   }
 
@@ -3179,7 +3323,11 @@ function applyFullMessageToPixelsCluster(msg) {
       const t = p[2] | 0;
       const opk = String(p[3] || "").slice(0, 128);
       const sh = Number(p[4]) || 0;
-      pixels.set(`${x},${y}`, { teamId: t, ownerPlayerKey: opk, shieldedUntil: sh });
+      const wh = p.length >= 6 ? normalizeWallHp(p[5]) : 0;
+      /** @type {{ teamId: number, ownerPlayerKey: string, shieldedUntil: number, wallHp?: number }} */
+      const o = { teamId: t, ownerPlayerKey: opk, shieldedUntil: sh };
+      if (wh > 0) o.wallHp = wh;
+      pixels.set(`${x},${y}`, o);
     } else {
       pixels.set(`${x},${y}`, { teamId: p[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
     }
@@ -3199,11 +3347,15 @@ function applyClusterGameReplication(msg) {
       const y = msg.y | 0;
       if (x < 0 || x >= gridW || y < 0 || y >= gridH) return;
       if (!cellAllowsPixelPlacement(x, y)) return;
-      pixels.set(`${x},${y}`, {
+      const wh = normalizeWallHp(msg.wallHp);
+      /** @type {{ teamId: number, ownerPlayerKey: string, shieldedUntil: number, wallHp?: number }} */
+      const o = {
         teamId: msg.t | 0,
         ownerPlayerKey: String(msg.ownerPlayerKey || "").slice(0, 128),
         shieldedUntil: Number(msg.shieldedUntil) || 0,
-      });
+      };
+      if (wh > 0) o.wallHp = wh;
+      pixels.set(`${x},${y}`, o);
       return;
     }
     case "pixelBatch": {
@@ -3218,11 +3370,15 @@ function applyClusterGameReplication(msg) {
         if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
         if (!cellAllowsPixelPlacement(x, y)) continue;
         if (fmt === "v2" && row.length >= 5) {
-          pixels.set(`${x},${y}`, {
+          const wh = row.length >= 6 ? normalizeWallHp(row[5]) : 0;
+          /** @type {{ teamId: number, ownerPlayerKey: string, shieldedUntil: number, wallHp?: number }} */
+          const o = {
             teamId: row[2] | 0,
             ownerPlayerKey: String(row[3] || "").slice(0, 128),
             shieldedUntil: Number(row[4]) || 0,
-          });
+          };
+          if (wh > 0) o.wallHp = wh;
+          pixels.set(`${x},${y}`, o);
         } else {
           pixels.set(`${x},${y}`, { teamId: row[2] | 0, ownerPlayerKey: "", shieldedUntil: 0 });
         }
@@ -3587,6 +3743,10 @@ function applyClusterGameReplication(msg) {
             w: typeof f.w === "number" ? f.w | 0 : 2,
             h: typeof f.h === "number" ? f.h | 0 : 2,
           }));
+        quantumFarmLevels = quantumFarmLayouts.map((_, i) => {
+          const raw = msg.farms[i] && msg.farms[i].level;
+          return normalizeQuantumFarmLevel(raw);
+        });
         quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
       }
       return;
@@ -3659,6 +3819,34 @@ function addBfsSeedsFromRectInVertices(vertices, x0, y0, size, out, stack) {
   }
 }
 
+/** Если внутри 6×6 базы ещё нет своих пикселей — BFS стартует от любых клеток V, 8-соседних с прямоугольником базы (плацдарм / вода в квадрате). */
+function addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, size, out, stack) {
+  const S = size | 0;
+  if (!t || S < 1) return;
+  /** @type {[number, number][]} */
+  const corners = [];
+  if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
+    corners.push([t.spawnX0 | 0, t.spawnY0 | 0]);
+  }
+  for (const o of getTeamMilitaryOutposts(t)) {
+    if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
+    corners.push([o.x0 | 0, o.y0 | 0]);
+  }
+  for (const [ox0, oy0] of corners) {
+    for (let y = oy0; y < oy0 + S; y++) {
+      for (let x = ox0; x < ox0 + S; x++) {
+        for (let i = 0; i < GRID8_DELTAS.length; i++) {
+          const nk = makeGridCellKey(x + GRID8_DELTAS[i][0], y + GRID8_DELTAS[i][1]);
+          if (vertices.has(nk) && !out.has(nk)) {
+            out.add(nk);
+            stack.push(nk);
+          }
+        }
+      }
+    }
+  }
+}
+
 /**
  * Все закрашенные клетки команды, 8-достижимые от любой активной базы (главная + плацдармы):
  * корни — любые клетки V внутри соответствующего 6×6 (не только центр флага).
@@ -3685,6 +3873,9 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
   for (const o of getTeamMilitaryOutposts(t)) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
     addBfsSeedsFromRectInVertices(vertices, o.x0, o.y0, TEAM_SPAWN_SIZE, out, stack);
+  }
+  if (!stack.length) {
+    addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, TEAM_SPAWN_SIZE, out, stack);
   }
   if (!stack.length) {
     baseConnectedPixelsCacheByTeam.set(tid, out);
@@ -3748,6 +3939,15 @@ function cellInsideAnyMilitaryOutpostRect(x, y, teamId) {
     }
   }
   return false;
+}
+
+/** Главная 6×6 или любой плацдарм — не должны стираться таймером изоляции. */
+function cellInsideAnyActiveBaseRectForTeam(x, y, teamId) {
+  const tid = teamId | 0;
+  const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
+  if (!t) return false;
+  if (cellInsideTeamSpawnRect(x, y, t)) return true;
+  return cellInsideAnyMilitaryOutpostRect(x, y, tid);
 }
 
 /** Можно ставить пиксель, если из (x,y) 8-соседство с закрашенной территорией или с клеткой базы 6×6. */
@@ -4593,6 +4793,53 @@ function eliminateTeamByTerritoryLoss(teamId) {
   scheduleStatsBroadcast();
 }
 
+/**
+ * Если в публичной команде 0 игроков — полностью удаляет её из мира и dynamic-teams.json,
+ * освобождает цвет и снимает все пиксели/флаги/баффы команды.
+ * @returns {boolean} true если команда удалена
+ */
+function tryDeleteTeamWithNoMembers(teamId) {
+  const tid = teamId | 0;
+  if (!tid) return false;
+  const players = teamPlayerCounts.get(tid) ?? 0;
+  if (players > 0) return false;
+  const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
+  if (!dt || dt.solo) return false;
+  const mem = teamMemberKeys.get(tid);
+  if (mem && mem.size > 0) {
+    teamMemberKeys.delete(tid);
+    synergyOnlineEpoch++;
+  }
+  invalidateTeamScoresAggCache();
+  clearFlagCaptureStateForDefender(tid);
+  removeTerritoryIsolationGroupsForTeam(tid);
+  const keysToDelete = [];
+  for (const [k, val] of pixels.entries()) {
+    if ((pixelTeam(val) | 0) === tid) keysToDelete.push(k);
+  }
+  for (let i = 0; i < keysToDelete.length; i++) {
+    const k = keysToDelete[i];
+    pixels.delete(k);
+    const p = parsePixelKeyXY(k);
+    if (p) queuePixelBroadcast(p.x, p.y, 0, "", 0, 0);
+  }
+  teamEffects.delete(tid);
+  teamManualScoreBonus.delete(tid);
+  teamPeakScoreForTiebreak.delete(tid);
+  teamFirstHitPeakAt.delete(tid);
+  teamPlayerCounts.delete(tid);
+  teamMemberKeys.delete(tid);
+  synergyOnlineEpoch++;
+  const ix = dynamicTeams.findIndex((t) => t.id === tid);
+  if (ix >= 0) dynamicTeams.splice(ix, 1);
+  saveDynamicTeams();
+  afterTerritoryMutation();
+  broadcast({ type: "teamsFull", teams: teamsForMeta() });
+  broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+  scheduleStatsBroadcast();
+  return true;
+}
+
 async function readRequestBody(req, maxBytes = HTTP_BODY_MAX) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -4790,6 +5037,18 @@ async function handleApi(req, res) {
       res.end(JSON.stringify({ ok: false, error: "bad signature" }));
       return;
     }
+    if (!isUsdtDepositsEnabled()) {
+      console.warn("[ipn] пропуск: USDT-пополнения отключены (политика)");
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "Purchases are currently disabled",
+          message: "Purchases are currently disabled",
+        })
+      );
+      return;
+    }
     const status = String(body.payment_status || body.status || "");
     const finished = nowpaymentsIpnStatusMeansCredited(status);
     if (!finished) {
@@ -4860,6 +5119,17 @@ async function handleApi(req, res) {
     if (!apiDepositLimiter.allow(`dep:${clientIp}`, API_DEPOSIT_PER_MIN, 60_000)) {
       res.writeHead(429);
       res.end(JSON.stringify({ ok: false, error: "rate limit" }));
+      return;
+    }
+    if (!isUsdtDepositsEnabled()) {
+      res.writeHead(403);
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "Purchases are currently disabled",
+          message: "Purchases are currently disabled",
+        })
+      );
       return;
     }
     if (!NOWPAYMENTS_API_KEY || !PUBLIC_BASE_URL) {
@@ -5638,7 +5908,7 @@ async function sendConnectionMeta(ws) {
     tournamentTimeScale: getTournamentTimeScale(),
     territoryIsolation: buildTerritoryIsolationGroupsPayload(isoNow),
     treasureSpots: buildTreasureSpotsForMeta(),
-    quantumFarms: quantumFarmLayouts.map(({ id, x0, y0, w, h }) => ({ id, x0, y0, w, h })),
+    quantumFarms: buildQuantumFarmsClientPayload(),
   });
   try {
     safeSend(ws, await buildWalletPayload(ws));
@@ -6407,7 +6677,9 @@ wss.on("connection", (ws, req) => {
       teamPlayerCounts.set(tid, Math.max(0, c - 1));
       ws.teamId = null;
       safeSend(ws,{ type: "left" });
-      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      if (!tryDeleteTeamWithNoMembers(tid)) {
+        broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      }
       broadcastStatsImmediate();
       return;
     }
@@ -6714,8 +6986,11 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
         return;
       }
+      /** Клетки, которые станут нейтральными (удаление). Стены: −1 HP за бомбу; при 0 HP — сюда же. */
       /** @type {[number, number][]} */
-      const cleared = [];
+      const deleteTargets = [];
+      /** @type {{ x: number, y: number, nextHp: number, pEx: ReturnType<typeof normalizePixel> }[]} */
+      const nukeWallChips = [];
       for (let i = 0; i < blast.length; i++) {
         const x = blast[i][0];
         const y = blast[i][1];
@@ -6724,7 +6999,18 @@ wss.on("connection", (ws, req) => {
         const v = pixels.get(key);
         if (v == null) continue;
         if ((pixelTeam(v) | 0) === 0) continue;
-        cleared.push([x, y]);
+        const wh = pixelWallHp(v);
+        if (wh > 0) {
+          const pEx = normalizePixel(v);
+          const nextHp = wh - 1;
+          if (nextHp > 0) {
+            nukeWallChips.push({ x: x | 0, y: y | 0, nextHp, pEx });
+          } else {
+            deleteTargets.push([x | 0, y | 0]);
+          }
+        } else {
+          deleteTargets.push([x | 0, y | 0]);
+        }
       }
       const nowNuke = Date.now();
       const aidNuke = ws.teamId | 0;
@@ -6772,7 +7058,7 @@ wss.on("connection", (ws, req) => {
           if (fr && !fr.rateLimited && (fr.hit || fr.captured)) nukeDidFlagDamage = true;
         }
       }
-      if (cleared.length === 0 && !nukeDidFlagDamage) {
+      if (deleteTargets.length === 0 && nukeWallChips.length === 0 && !nukeDidFlagDamage) {
         safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
         return;
       }
@@ -6782,14 +7068,39 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
       }
-      for (let i = 0; i < cleared.length; i++) {
-        pixels.delete(`${cleared[i][0]},${cleared[i][1]}`);
+      for (let i = 0; i < nukeWallChips.length; i++) {
+        const w = nukeWallChips[i];
+        const xi = w.x | 0;
+        const yi = w.y | 0;
+        const wkey = `${xi},${yi}`;
+        const prev = pixels.get(wkey);
+        if (!prev) continue;
+        const nextRec = {
+          teamId: w.pEx.teamId,
+          ownerPlayerKey: w.pEx.ownerPlayerKey,
+          shieldedUntil: w.pEx.shieldedUntil,
+          wallHp: w.nextHp,
+        };
+        pixels.set(wkey, nextRec);
+        tryApplyIncrementalTeamScoreForPixel(xi, yi, prev, nextRec);
+        queuePixelBroadcast(xi, yi, w.pEx.teamId, w.pEx.ownerPlayerKey, w.pEx.shieldedUntil, w.nextHp);
+        broadcast({
+          type: "purchaseVfx",
+          kind: "greatWallHit",
+          gx: xi,
+          gy: yi,
+          wallHp: w.nextHp,
+          defenderTeamId: w.pEx.teamId | 0,
+        });
+      }
+      for (let i = 0; i < deleteTargets.length; i++) {
+        pixels.delete(`${deleteTargets[i][0]},${deleteTargets[i][1]}`);
       }
       invalidateTeamScoresAggCache();
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "nuke_bomb", { deferSave: true });
       afterTerritoryMutation();
       scheduleStatsBroadcast();
-      safeSend(ws, { type: "purchaseOk", kind: "nukeBomb", cells: cleared.length, x: cx, y: cy });
+      safeSend(ws, { type: "purchaseOk", kind: "nukeBomb", cells: deleteTargets.length, x: cx, y: cy });
       safeSend(ws, await buildWalletPayload(ws));
       broadcast({
         type: "purchaseVfx",
@@ -6798,14 +7109,14 @@ wss.on("connection", (ws, req) => {
         gx: cx,
         gy: cy,
         size: 14,
-        cellsCleared: cleared.length,
-        cellsSample: cleared.slice(0, 120),
+        cellsCleared: deleteTargets.length,
+        cellsSample: deleteTargets.slice(0, 120),
       });
       broadcast({
         type: "nukeBombImpact",
         cx,
         cy,
-        cells: cleared,
+        cells: deleteTargets,
       });
       scheduleBroadcastWalletDebounced();
       queuePersistWalletPurchaseWrites(pk);
@@ -6888,6 +7199,180 @@ wss.on("connection", (ws, req) => {
         gx: x0,
         gy: y0,
         size: TEAM_SPAWN_SIZE,
+      });
+      scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
+      return;
+    }
+
+    if (msg.type === "purchaseGreatWall") {
+      if (!assertCanPlay(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      if (isTeamEliminated(ws.teamId)) {
+        safeSend(ws, { type: "purchaseError", reason: "team_eliminated" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!stageAllows(st)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      if (isWarmupPhaseNow()) {
+        safeSend(ws, { type: "purchaseError", reason: "warmup" });
+        return;
+      }
+      const tid = ws.teamId | 0;
+      const cx = msg.x | 0;
+      const cy = msg.y | 0;
+      if (cx < 0 || cx >= gridW || cy < 0 || cy >= gridH) {
+        safeSend(ws, { type: "purchaseError", reason: "out_of_bounds" });
+        return;
+      }
+      if (!cellAllowsPixelPlacement(cx, cy)) {
+        safeSend(ws, { type: "purchaseError", reason: "water" });
+        return;
+      }
+      if (resolveFlagBaseAtCell(cx, cy)) {
+        safeSend(ws, { type: "purchaseError", reason: "wall_flag_cell" });
+        return;
+      }
+      const wkey = `${cx},${cy}`;
+      const cell = pixels.get(wkey);
+      if (!cell || pixelTeam(cell) !== tid) {
+        safeSend(ws, { type: "purchaseError", reason: "wall_not_yours" });
+        return;
+      }
+      if (pixelWallHp(cell) > 0) {
+        safeSend(ws, { type: "purchaseError", reason: "wall_already" });
+        return;
+      }
+      const priceQuant = PRICES_QUANT.greatWall;
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      if (!devUnl) {
+        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "great_wall", { deferSave: true });
+      }
+      const p0 = normalizePixel(cell);
+      const nextRec = {
+        teamId: tid,
+        ownerPlayerKey: pk,
+        shieldedUntil: p0.shieldedUntil,
+        wallHp: GREAT_WALL_MAX_HP,
+      };
+      pixels.set(wkey, nextRec);
+      tryApplyIncrementalTeamScoreForPixel(cx, cy, cell, nextRec);
+      queuePixelBroadcast(cx, cy, tid, pk, p0.shieldedUntil, GREAT_WALL_MAX_HP);
+      scheduleStatsBroadcast();
+      afterTerritoryMutation();
+      safeSend(ws, { type: "purchaseOk", kind: "greatWall", x: cx, y: cy });
+      safeSend(ws, await buildWalletPayload(ws));
+      broadcast({
+        type: "purchaseVfx",
+        kind: "greatWallBuilt",
+        teamId: tid,
+        gx: cx,
+        gy: cy,
+      });
+      scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
+      return;
+    }
+
+    if (msg.type === "purchaseQuantumFarmUpgrade") {
+      if (!assertCanPlay(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      if (isTeamEliminated(ws.teamId)) {
+        safeSend(ws, { type: "purchaseError", reason: "team_eliminated" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const devUnl = isDevUnlimitedWallet(pk);
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!stageAllows(st)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      if (isWarmupPhaseNow()) {
+        safeSend(ws, { type: "purchaseError", reason: "warmup" });
+        return;
+      }
+      const tid = ws.teamId | 0;
+      const farmId = msg.farmId | 0;
+      if (!farmId || !quantumFarmLayouts.length) {
+        safeSend(ws, { type: "purchaseError", reason: "bad request" });
+        return;
+      }
+      let idx = -1;
+      for (let i = 0; i < quantumFarmLayouts.length; i++) {
+        if ((quantumFarmLayouts[i].id | 0) === farmId) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx < 0) {
+        safeSend(ws, { type: "purchaseError", reason: "bad request" });
+        return;
+      }
+      const owners = computeQuantumFarmOwnersNow();
+      if ((owners[idx] | 0) !== tid) {
+        safeSend(ws, { type: "purchaseError", reason: "quantum_farm_not_controlled" });
+        return;
+      }
+      const curLv = normalizeQuantumFarmLevel(quantumFarmLevels[idx]);
+      if (curLv >= QUANTUM_FARM_MAX_LEVEL) {
+        safeSend(ws, { type: "purchaseError", reason: "quantum_farm_max_level" });
+        return;
+      }
+      const priceQuant = curLv === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      if (!devUnl) {
+        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), `quantum_farm_L${curLv + 1}`, { deferSave: true });
+      }
+      quantumFarmLevels[idx] = curLv + 1;
+      saveRoundState();
+      safeSend(ws, {
+        type: "purchaseOk",
+        kind: "quantumFarmUpgrade",
+        farmId,
+        level: quantumFarmLevels[idx],
+      });
+      safeSend(ws, await buildWalletPayload(ws));
+      broadcast({ type: "quantumFarmsInit", farms: buildQuantumFarmsClientPayload() });
+      broadcast({
+        type: "purchaseVfx",
+        kind: "quantumFarmUpgrade",
+        teamId: tid,
+        farmId,
+        level: quantumFarmLevels[idx],
       });
       scheduleBroadcastWalletDebounced();
       queuePersistWalletPurchaseWrites(pk);
@@ -7052,6 +7537,24 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
+      if (!enemyFlagDef) {
+        const wallRes = tryApplyGreatWallSiegeHit(x, y, teamId, pk);
+        if (wallRes.handled) {
+          u.lastActionAt = now;
+          scheduleEconomyFlushForPlayer(pk);
+          scheduleStatsBroadcast();
+          afterTerritoryMutation();
+          safeSend(ws, await buildWalletPayload(ws));
+          if (wallRes.wallBroken) {
+            const foundTreasureQuant = await tryClaimMapTreasureForPlayer(pk, key, false);
+            if (foundTreasureQuant > 0) {
+              safeSend(ws, { type: "treasureFound", quant: foundTreasureQuant, x, y });
+            }
+          }
+          return;
+        }
+      }
+
       if (enemyFlagDef) {
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "enemy_base" });
         safeSend(ws, { type: "pixelReject", reason: "enemy_base" });
@@ -7066,7 +7569,7 @@ wss.on("connection", (ws, req) => {
       const prevCell = pixels.get(key);
       pixels.set(key, rec);
       tryApplyIncrementalTeamScoreForPixel(x, y, prevCell, rec);
-      queuePixelBroadcast(x, y, teamId, pk, 0);
+      queuePixelBroadcast(x, y, teamId, pk, 0, 0);
       scheduleStatsBroadcast();
       afterTerritoryMutation();
 
@@ -7093,9 +7596,12 @@ wss.on("connection", (ws, req) => {
 
     if (ws.teamId != null) {
       const tid = ws.teamId;
+      if (ws.playerKey) removeTeamMemberKey(tid, ws.playerKey);
       const c = teamPlayerCounts.get(tid) ?? 0;
       teamPlayerCounts.set(tid, Math.max(0, c - 1));
-      broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      if (!tryDeleteTeamWithNoMembers(tid)) {
+        broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+      }
     }
     broadcastStatsImmediate();
   });
@@ -7510,7 +8016,8 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
 }
 
 /**
- * Сброс тренировки: карта → только базы, очки территории 0, ручные бонусы админа 0, кошельки 0, клады заново, события/мстим сняты.
+ * Сброс «только карта и очки», команды сохраняются. Из Telegram бота не вызывается — в UI один полный сброс.
+ * Оставлено для возможного ручного/сервисного вызова.
  * @param {number} telegramUserId
  * @returns {Promise<{ ok: true } | { ok: false; reason: string }>}
  */
@@ -7555,14 +8062,21 @@ async function applyAdminTrainingScoreReset(telegramUserId) {
 }
 
 /**
- * Полный «с нуля»: удалить все команды (в т.ч. названия), раунд 0, чистая карта и клады, снять паузу, кошельки как при сбросе тренировки.
- * Закрытие мини-приложения не очищает серверные данные — только эта команда (или ручное удаление файлов data/).
+ * Полный «как новая игра»: не частичный сброс — всё игровое состояние с нуля.
+ * Удаляются команды (dynamic-teams.json), пиксели, раунд/таймеры/пауза/roundEnding, изоляция, флаги баз,
+ * ручные очки, evt/slots, tiebreak, квантовые фермы пересчитываются, клады заново, round-state.json и снимок карты.
+ * Экономика тренировки: adminResetTrainingEconomyKeepBalances (кулдауны/поля сбрасываются, кванты сохраняются). Список подписчиков бота не трогаем.
+ * Закрытие мини-приложения сервер не чистит — только эта команда.
  * @param {number} telegramUserId
  * @returns {Promise<{ ok: true } | { ok: false; reason: string }>}
  */
 async function applyAdminFullNewGameReset(telegramUserId) {
   if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
   logAdminAction({ command: "full_new_game_reset", byTelegramId: telegramUserId });
+
+  clearAllFlagCaptureState();
+  lastTerritoryCountSnapshot = new Map();
+  roundEnding = false;
 
   if (statsBroadcastTimer != null) {
     clearTimeout(statsBroadcastTimer);
@@ -7572,6 +8086,19 @@ async function applyAdminFullNewGameReset(telegramUserId) {
     clearTimeout(playStartBroadcastTimer);
     playStartBroadcastTimer = null;
   }
+  if (pixelsSnapshotDebounceTimer) {
+    clearTimeout(pixelsSnapshotDebounceTimer);
+    pixelsSnapshotDebounceTimer = null;
+  }
+
+  battleSnapCacheKey = "";
+  battleSnapCacheSnap = null;
+  battleClientPayloadCacheKey = "";
+  battleClientPayloadCache = null;
+  synergyMultCacheKey = "";
+  synergyMultCacheVal = null;
+  quantumFarmIncomeTickSeq = 0;
+  teamScoreStatsEpoch++;
 
   gamePaused = false;
   pauseWallStartedAt = 0;
@@ -7651,8 +8178,8 @@ async function applyAdminFullNewGameReset(telegramUserId) {
   schedulePlayStartBroadcast();
 
   try {
-    if (typeof walletStore.adminResetAllTrainingEconomy === "function") {
-      await walletStore.adminResetAllTrainingEconomy();
+    if (typeof walletStore.adminResetTrainingEconomyKeepBalances === "function") {
+      await walletStore.adminResetTrainingEconomyKeepBalances();
     }
   } catch (e) {
     console.warn("[admin] wallet reset full new game:", e?.message || e);
@@ -7664,6 +8191,15 @@ async function applyAdminFullNewGameReset(telegramUserId) {
     await Promise.all(
       [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
     );
+  }
+  /* Сразу записать пустую карту в файл — не ждать debounce, чтобы после рестарта не подтянулся старый снимок. */
+  try {
+    if (shouldPersistPixelsSnapshot()) {
+      pixelsSnapshotWriteInFlight = false;
+      await writePixelsSnapshotFileAsync();
+    }
+  } catch (e) {
+    console.warn("[full-reset] pixels snapshot flush:", e?.message || e);
   }
   schedulePixelsSnapshotSave();
   return { ok: true };
@@ -7695,6 +8231,27 @@ async function telegramAnswerCallbackQuery(callbackQueryId, opts = {}) {
   }
 }
 
+/**
+ * Одно подтверждение для полного сброса (кнопка в /start и текст «новая игра»).
+ * @param {number | string} chatId
+ */
+async function telegramSendFullGameResetConfirmation(chatId) {
+  await telegramSendMessage(
+    chatId,
+    "Вы уверены?\n\nЭто полностью удалит текущую игру: команды, карту, очки и прогресс раунда. Балансы квантов у аккаунтов Telegram сохраняются. Подключённые игроки потеряют привязку к командам.\n\nДействие необратимо для игрового состояния.",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Да, выполнить полный сброс", callback_data: "adm_full_y" },
+            { text: "Отмена", callback_data: "adm_full_n" },
+          ],
+        ],
+      },
+    }
+  );
+}
+
 /** @param {{ id: string; from?: { id?: number }; message?: { chat?: { id?: number } }; data?: string }} cq */
 async function handleTelegramAdminCallbackQuery(cq) {
   const uid = cq.from?.id;
@@ -7704,29 +8261,51 @@ async function handleTelegramAdminCallbackQuery(cq) {
     await telegramAnswerCallbackQuery(cq.id, { text: "Недоступно", show_alert: true });
     return;
   }
+
+  /* Полный сброс: одна кнопка подтверждения + выполнение */
+  if (data === "adm_full_a" || data === "adm_ng_a") {
+    await telegramAnswerCallbackQuery(cq.id);
+    if (chatId != null) await telegramSendFullGameResetConfirmation(chatId);
+    return;
+  }
+  if (data === "adm_full_n" || data === "adm_ng_n") {
+    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
+    return;
+  }
+  if (data === "adm_full_y" || data === "adm_ng_y") {
+    if (!isClusterLeader()) {
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Только инстанс с CLUSTER_LEADER=true может выполнить полный сброс.",
+        show_alert: true,
+      });
+      return;
+    }
+    await telegramAnswerCallbackQuery(cq.id, { text: "Выполняю полный сброс…" });
+    const r = await applyAdminFullNewGameReset(uid);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        r.ok
+          ? "Готово: полный сброс выполнен — команды и карта с нуля (раунд 0). Кванты на аккаунтах сохранены. Игрокам нужно заново зайти в игру."
+          : r.reason === "not_leader"
+            ? "Сброс только на лидере кластера (CLUSTER_LEADER=true)."
+            : r.reason === "wallet_reset_failed"
+              ? "Состояние игры сброшено, но ошибка кошельков — см. лог сервера."
+              : "Сброс не выполнен."
+      );
+    }
+    return;
+  }
+
+  /* Устаревшие кнопки «сброс тренировки» (двухшаговый поток): частичный сброс из бота снят — отправьте /start. */
   if (data === "adm_rst_a") {
     await telegramAnswerCallbackQuery(cq.id);
     if (chatId != null) {
       await telegramSendMessage(
         chatId,
-        "Сброс тренировки:\n\n" +
-          "• карта — только базы 6×6;\n" +
-          "• очки с территории и ручные бонусы (teams +N) — 0;\n" +
-          "• балансы USDT и таймеры действий у всех игроков в экономике — сброс;\n" +
-          "• сокровища на карте — заново;\n" +
-          "• события evt / Мстим (speed) — выключены.\n\n" +
-          "Подтвердите:",
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "Да, обнулить", callback_data: "adm_rst_y" },
-                { text: "Отмена", callback_data: "adm_rst_n" },
-              ],
-            ],
-          },
-        }
+        "Раньше здесь был отдельный «сброс карты без удаления команд». Сейчас используется один вариант — полный сброс игры. Откройте подтверждение ниже.",
       );
+      await telegramSendFullGameResetConfirmation(chatId);
     }
     return;
   }
@@ -7735,83 +8314,13 @@ async function handleTelegramAdminCallbackQuery(cq) {
     return;
   }
   if (data === "adm_rst_y") {
-    if (!isClusterLeader()) {
-      await telegramAnswerCallbackQuery(cq.id, {
-        text: "Только инстанс с CLUSTER_LEADER=true может сбросить состояние игры.",
-        show_alert: true,
-      });
-      return;
-    }
-    await telegramAnswerCallbackQuery(cq.id, { text: "Выполняю…" });
-    const r = await applyAdminTrainingScoreReset(uid);
-    if (chatId != null) {
-      await telegramSendMessage(
-        chatId,
-        r.ok
-          ? "Готово: тренировочные очки и карта сброшены, кошельки обнулены (реферальные привязки сохранены)."
-          : r.reason === "not_leader"
-            ? "Сброс возможен только на лидере кластера (CLUSTER_LEADER=true)."
-            : r.reason === "wallet_reset_failed"
-              ? "Карта сброшена, но ошибка при сбросе кошельков — см. лог сервера."
-              : "Сброс не выполнен."
-      );
-    }
+    await telegramAnswerCallbackQuery(cq.id, {
+      text: "Эта кнопка устарела. Отправьте /start и используйте «Полный сброс игры».",
+      show_alert: true,
+    });
     return;
   }
-  if (data === "adm_ng_a") {
-    await telegramAnswerCallbackQuery(cq.id);
-    if (chatId != null) {
-      await telegramSendMessage(
-        chatId,
-        "Новая игра с нуля:\n\n" +
-          "• все команды и их названия удаляются с сервера (файл dynamic-teams.json);\n" +
-          "• раунд снова 0, массовая сетка, карта и клады заново;\n" +
-          "• пауза снимается;\n" +
-          "• балансы кошельков — как при «Сброс тренировки».\n\n" +
-          "Закрыть мини-приложение — не то же самое: список команд хранится на сервере.\n\n" +
-          "Подтвердите:",
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: "Да, удалить все команды", callback_data: "adm_ng_y" },
-                { text: "Отмена", callback_data: "adm_ng_n" },
-              ],
-            ],
-          },
-        }
-      );
-    }
-    return;
-  }
-  if (data === "adm_ng_n") {
-    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
-    return;
-  }
-  if (data === "adm_ng_y") {
-    if (!isClusterLeader()) {
-      await telegramAnswerCallbackQuery(cq.id, {
-        text: "Только инстанс с CLUSTER_LEADER=true может сбросить игру.",
-        show_alert: true,
-      });
-      return;
-    }
-    await telegramAnswerCallbackQuery(cq.id, { text: "Выполняю…" });
-    const r = await applyAdminFullNewGameReset(uid);
-    if (chatId != null) {
-      await telegramSendMessage(
-        chatId,
-        r.ok
-          ? "Готово: все команды удалены, игра с нуля (раунд 0). Игрокам нужно заново создать команды."
-          : r.reason === "not_leader"
-            ? "Сброс только на лидере кластера (CLUSTER_LEADER=true)."
-            : r.reason === "wallet_reset_failed"
-              ? "Команды и карта сброшены, но ошибка кошельков — см. лог сервера."
-              : "Сброс не выполнен."
-      );
-    }
-    return;
-  }
+
   await telegramAnswerCallbackQuery(cq.id);
 }
 
@@ -7872,8 +8381,7 @@ async function telegramPollLoop() {
             const rows = [];
             if (startBtn) rows.push([startBtn]);
             if (TELEGRAM_ADMIN_IDS.has(uid)) {
-              rows.push([{ text: "Сброс тренировки (очки, карта)", callback_data: "adm_rst_a" }]);
-              rows.push([{ text: "Новая игра — удалить все команды", callback_data: "adm_ng_a" }]);
+              rows.push([{ text: "⚠️ Полный сброс игры", callback_data: "adm_full_a" }]);
             }
             await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
               reply_markup: { inline_keyboard: rows },
@@ -8274,18 +8782,18 @@ async function telegramPollLoop() {
         ) {
           await telegramSendMessage(
             chatId,
-            "Новая игра с нуля:\n\n" +
+            "Полный сброс игры:\n\n" +
               "• все команды и названия удаляются с сервера;\n" +
               "• раунд 0, чистая карта и клады;\n" +
-              "• кошельки обнуляются как при «Сброс тренировки».\n\n" +
+              "• кванты на аккаунтах Telegram сохраняются (сбрасываются только игровые кулдауны экономики).\n\n" +
               "Закрытие мини-приложения этого не делает.\n\n" +
               "Подтвердите:",
             {
               reply_markup: {
                 inline_keyboard: [
                   [
-                    { text: "Да, всё удалить", callback_data: "adm_ng_y" },
-                    { text: "Отмена", callback_data: "adm_ng_n" },
+                    { text: "Да, выполнить полный сброс", callback_data: "adm_full_y" },
+                    { text: "Отмена", callback_data: "adm_full_n" },
                   ],
                 ],
               },
@@ -8314,7 +8822,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start (сброс тренировки / новая игра), go [часы], quant / quantlist <числовой Telegram id>, teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start (полный сброс игры), go [часы], quant / quantlist <числовой Telegram id>, teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
             );
           }
           continue;

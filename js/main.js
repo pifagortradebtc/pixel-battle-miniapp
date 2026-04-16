@@ -14,6 +14,7 @@ import {
   notifySeismicPreview,
   enqueueBaseCapturedPresentation,
   enqueueTerritoryCapturePresentation,
+  getEffectiveAltSeasonRevengeUntilMs,
 } from "./event-presentation.js";
 import {
   initGameAudio,
@@ -42,6 +43,9 @@ import {
   playMenuChoiceSfx,
   playMenuOpenSfx,
   playMilitaryBaseDeploySound,
+  playGreatWallHit,
+  playGreatWallBreak,
+  playGreatWallBuilt,
   registerSpatialAudioListener,
   registerSpatialAmbientAnchor,
 } from "./game-audio.js";
@@ -67,8 +71,15 @@ import {
 } from "../lib/flag-capture.js";
 import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
-import { TERRITORY_ISOLATION_GRACE_MS, makeGridCellKey, neighborKeysInSet8 } from "../lib/territory-isolation.js";
+import { GRID8_DELTAS, TERRITORY_ISOLATION_GRACE_MS, makeGridCellKey, neighborKeysInSet8 } from "../lib/territory-isolation.js";
 import { scoreTeamsAroundFarm, resolveFarmControl } from "../lib/quantum-farms.js";
+import {
+  normalizeQuantumFarmLevel,
+  QUANTUM_FARM_MAX_LEVEL,
+  quantumFarmTierMeta,
+} from "../lib/quantum-farm-upgrades.js";
+import { GREAT_WALL_MAX_HP, normalizeWallHp } from "../lib/great-wall.js";
+import { isUsdtDepositsEnabled } from "../lib/usdt-deposits-enabled.js";
 
 let gridW = 360;
 let gridH = 360;
@@ -82,11 +93,12 @@ const DRAW_DETAIL_GRADIENT_MAX_CELLS = 7000;
 /** Ещё тяжелее — без анимированных рёбер между командами (второй полный проход по сетке). */
 const DRAW_DETAIL_EDGE_SHIMMER_MAX_CELLS = 11000;
 /**
- * Подсветка зон турнира на суше (gold / дуэль / экономика / shift / сжатие / сейсмика).
- * Раньше было ×0.6 к RGB и α — зоны на карте почти не читались; держим полный цвет и усиливаем α.
+ * Подсветка зон турнира на суше (gold / дуэль / экономика / shift / сжатие / сейсмика и т.д., evt из Telegram).
+ * BATTLE_EVENT_MAP_ZONE_INTENSITY: общая яркость этих оверлеев на карте (~0.5 ≈ на 50% слабее).
  */
-const BATTLE_EVENT_OVERLAY_RGB_MUL = 1;
-const BATTLE_EVENT_OVERLAY_ALPHA_MUL = 1;
+const BATTLE_EVENT_MAP_ZONE_INTENSITY = 0.5;
+const BATTLE_EVENT_OVERLAY_RGB_MUL = BATTLE_EVENT_MAP_ZONE_INTENSITY;
+const BATTLE_EVENT_OVERLAY_ALPHA_MUL = BATTLE_EVENT_MAP_ZONE_INTENSITY;
 /** К целевой α из вызовов: заметность на тайле (~×5 к прошлому «двойному» затуханию 0.6²). */
 const BATTLE_EVENT_OVERLAY_ALPHA_BOOST = 1.85;
 /** Клетка без пикселя игрока: лёгкое затемнение базового цвета карты (пиксели команд читаются ярче). */
@@ -121,6 +133,8 @@ const PLAYER_KEY_STORAGE = "pixel-battle-player-key";
 const WS_PATH = "/ws";
 /** Совпадает с NOWPayments: USDT в сети BEP20 (Binance Smart Chain) */
 const DEPOSIT_PAY_CURRENCY = "usdtbsc";
+/** Подсказка для отключённых платёжных кнопок (fair play). */
+const FAIR_PLAY_DISABLED_TOOLTIP = "Disabled for fair play · Отключено ради честной игры";
 
 /** Если localStorage недоступен — один стабильный ключ на сессию страницы */
 let cachedAnonPlayerKey = null;
@@ -398,6 +412,15 @@ const defeatFlashEl = document.getElementById("defeat-flash");
 const treasureFoundOverlayEl = document.getElementById("treasure-found-overlay");
 const treasureFoundAmountEl = document.getElementById("treasure-found-amount");
 const treasureFoundDismissBtn = document.getElementById("treasure-found-dismiss");
+const quantumFarmPanelEl = document.getElementById("quantum-farm-panel");
+const quantumFarmPanelBackdropEl = document.getElementById("quantum-farm-panel-backdrop");
+const quantumFarmPanelCloseEl = document.getElementById("quantum-farm-panel-close");
+const quantumFarmPanelTitleEl = document.getElementById("quantum-farm-panel-title");
+const quantumFarmPanelLevelEl = document.getElementById("quantum-farm-panel-level");
+const quantumFarmPanelBlurbEl = document.getElementById("quantum-farm-panel-blurb");
+const quantumFarmPanelIncomeEl = document.getElementById("quantum-farm-panel-income");
+const quantumFarmPanelHintEl = document.getElementById("quantum-farm-panel-hint");
+const quantumFarmPanelUpgradeEl = document.getElementById("quantum-farm-panel-upgrade");
 const stageWrapEl = document.getElementById("stage-wrap");
 const btnToolbarBase = document.getElementById("btn-toolbar-base");
 const roundStartSplashEl = document.getElementById("round-start-splash");
@@ -686,6 +709,49 @@ function addClientBfsSeedsFromRectInVertices(vertices, x0, y0, w, h, out, stack)
   }
 }
 
+function addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, defaultSize, out, stack) {
+  const S = defaultSize | 0;
+  /** @type {{ x0: number, y0: number, w: number, h: number }[]} */
+  const rects = [];
+  if (sp && typeof sp.x0 === "number" && typeof sp.y0 === "number") {
+    rects.push({
+      x0: sp.x0 | 0,
+      y0: sp.y0 | 0,
+      w: typeof sp.w === "number" ? sp.w | 0 : S,
+      h: typeof sp.h === "number" ? sp.h | 0 : S,
+    });
+  }
+  for (let i = 0; i < mos.length; i++) {
+    const r = mos[i];
+    if (!r || typeof r.x0 !== "number" || typeof r.y0 !== "number") continue;
+    rects.push({
+      x0: r.x0 | 0,
+      y0: r.y0 | 0,
+      w: typeof r.w === "number" ? r.w | 0 : S,
+      h: typeof r.h === "number" ? r.h | 0 : S,
+    });
+  }
+  for (let ri = 0; ri < rects.length; ri++) {
+    const r = rects[ri];
+    const ox = r.x0;
+    const oy = r.y0;
+    const ww = r.w;
+    const hh = r.h;
+    for (let y = oy; y < oy + hh; y++) {
+      for (let x = ox; x < ox + ww; x++) {
+        for (let di = 0; di < GRID8_DELTAS.length; di++) {
+          const d = GRID8_DELTAS[di];
+          const nk = makeGridCellKey(x + d[0], y + d[1]);
+          if (vertices.has(nk) && !out.has(nk)) {
+            out.add(nk);
+            stack.push(nk);
+          }
+        }
+      }
+    }
+  }
+}
+
 function computeClientBaseConnectedPixelKeys(teamId) {
   const tid = teamId | 0;
   if (!tid) return new Set();
@@ -707,6 +773,9 @@ function computeClientBaseConnectedPixelKeys(teamId) {
   for (let i = 0; i < mos.length; i++) {
     const r = mos[i];
     addClientBfsSeedsFromRectInVertices(vertices, r.x0, r.y0, r.w, r.h, out, stack);
+  }
+  if (!stack.length) {
+    addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, FLAG_SPAWN_SIZE, out, stack);
   }
   if (!stack.length) return new Set();
   while (stack.length) {
@@ -1153,6 +1222,12 @@ function clientPixelTeamIdAt(x, y) {
   const id = typeof v === "number" ? v : v.teamId;
   if (id == null || id === "") return null;
   return Number(id) | 0;
+}
+
+function clientPixelWallHpAt(x, y) {
+  const v = pixels.get(`${x},${y}`);
+  if (!v || typeof v !== "object") return 0;
+  return normalizeWallHp(v.wallHp);
 }
 
 /** Прямоугольник базы команды из meta (как на сервере spawn 6×6). */
@@ -3729,6 +3804,7 @@ function setupCreateTeamUi() {
     if (shopOverlay) shopOverlay.hidden = false;
     resetShopPurchaseButtonsUi();
     syncShopHeaderBalance();
+    refreshUsdtDepositUi();
     updateShopAvailability();
   });
   document.getElementById("crisis-cta-team-recovery")?.addEventListener("click", () => {
@@ -3748,6 +3824,7 @@ function setupCreateTeamUi() {
     if (shopOverlay) shopOverlay.hidden = false;
     resetShopPurchaseButtonsUi();
     syncShopHeaderBalance();
+    refreshUsdtDepositUi();
     updateShopAvailability();
   });
   document.getElementById("crisis-cta-raid")?.addEventListener("click", () => {
@@ -3774,6 +3851,7 @@ function setupCreateTeamUi() {
     if (e.target === defeatOverlayEl) hideDefeatOverlay();
   });
   treasureFoundDismissBtn?.addEventListener("click", hideTreasureFoundOverlay);
+  initQuantumFarmPanel();
   treasureFoundOverlayEl?.addEventListener("click", (e) => {
     if (e.target === treasureFoundOverlayEl) hideTreasureFoundOverlay();
   });
@@ -3972,16 +4050,7 @@ function onMeta(msg) {
   const gh = typeof msg.grid?.h === "number" ? msg.grid.h : gridH;
 
   if (Array.isArray(msg.quantumFarms)) {
-    quantumFarmsMeta = msg.quantumFarms
-      .filter((f) => f && typeof f.x0 === "number" && typeof f.y0 === "number")
-      .map((f) => ({
-        id: Number(f.id) | 0,
-        x0: f.x0 | 0,
-        y0: f.y0 | 0,
-        w: typeof f.w === "number" ? f.w | 0 : 2,
-        h: typeof f.h === "number" ? f.h | 0 : 2,
-      }));
-    syncToolbarQuantumObjective();
+    mergeQuantumFarmsFromServerPayload(msg.quantumFarms);
   }
 
   applyGridFromServer(gw, gh).then(() => {
@@ -4153,7 +4222,10 @@ function syncFlagCaptureStateFromMeta(flags) {
   for (const f of flags) {
     const tid = Number(f.teamId) | 0;
     if (tid <= 0) continue;
-    let maxHp = FLAG_BASE_MAX_HP;
+    const slotKeyEarly =
+      typeof f.clientKey === "string" && f.clientKey.trim() !== "" ? f.clientKey.trim() : clientMainFlagKey(tid);
+    const isMilitaryFlag = slotKeyEarly.startsWith("m:");
+    let maxHp = isMilitaryFlag ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
     if (typeof f.maxHp === "number" && Number.isFinite(f.maxHp)) maxHp = f.maxHp | 0;
     else if (f.maxHp != null && String(f.maxHp).trim() !== "") {
       const mx = Number(f.maxHp);
@@ -4167,8 +4239,7 @@ function syncFlagCaptureStateFromMeta(flags) {
     }
     if (!Number.isFinite(hp)) hp = Math.max(0, maxHp - (f.progress | 0));
     if (hp >= maxHp) continue;
-    const slotKey =
-      typeof f.clientKey === "string" && f.clientKey.trim() !== "" ? f.clientKey.trim() : clientMainFlagKey(tid);
+    const slotKey = slotKeyEarly;
     const prev = flagCaptureClientState.get(slotKey);
     let lh = 0;
     if (typeof f.lastHitAt === "number" && Number.isFinite(f.lastHitAt)) lh = toEpochMsSafe(f.lastHitAt);
@@ -4288,6 +4359,14 @@ function notifyPurchaseError(reason) {
     military_too_close_enemy_main: "Слишком близко к чужой главной базе.",
     military_invalid: "Нельзя разместить здесь.",
     paused: "Игра на паузе (администратор). Покупки временно недоступны.",
+    wall_not_yours: "Стену можно ставить только на свою закрашенную клетку.",
+    wall_already: "Здесь уже стоит стена.",
+    wall_flag_cell: "Нельзя укреплять клетку флага базы.",
+    no_team: "Сначала выберите команду.",
+    water: "Нельзя укреплять воду.",
+    out_of_bounds: "Сюда нельзя (вне карты).",
+    quantum_farm_not_controlled: "Ферма не под контролем вашей команды или нет связи.",
+    quantum_farm_max_level: "Ферма уже максимального уровня.",
   };
   const text = m[reason] || String(reason);
   const severe =
@@ -4423,7 +4502,10 @@ function computeLeaderboardGapHint() {
 }
 
 function getClientGlobalEventSnapshot() {
-  return walletState?.globalEvent || lastStatsGlobalEvent;
+  const w = walletState?.globalEvent;
+  const s = lastStatsGlobalEvent;
+  if (!w && !s) return null;
+  return { ...(typeof s === "object" && s ? s : {}), ...(typeof w === "object" && w ? w : {}) };
 }
 
 function syncEventBanner() {
@@ -4545,19 +4627,9 @@ function isAltSeasonRevengeWallActive(arUntilRaw) {
 
 function syncClientCooldownFromWalletFields() {
   if (!walletState) return;
-  const ge = walletState.globalEvent;
-  const fromGe = typeof ge?.altSeasonRevengeUntilMs === "number" ? ge.altSeasonRevengeUntilMs | 0 : 0;
-  const fromStats =
-    typeof lastStatsGlobalEvent?.altSeasonRevengeUntilMs === "number"
-      ? lastStatsGlobalEvent.altSeasonRevengeUntilMs | 0
-      : 0;
-  const arUntil =
-    (fromGe && isAltSeasonRevengeWallActive(fromGe)
-      ? fromGe
-      : fromStats && isAltSeasonRevengeWallActive(fromStats)
-        ? fromStats
-        : 0) | 0;
-  if (isAltSeasonRevengeWallActive(arUntil)) {
+  const ge = getClientGlobalEventSnapshot();
+  const altUntil = getEffectiveAltSeasonRevengeUntilMs(ge);
+  if (isAltSeasonRevengeWallActive(altUntil)) {
     walletState.effectiveRecoverySec = 1;
     walletState.cooldownMs = 1000;
     return;
@@ -4598,11 +4670,11 @@ function getOnlineLastPixelActionAt() {
   return Math.max(w, lastPlaceAt);
 }
 
-/** Сколько ферм визуально контролирует наша команда (1 ферма = +1 квант / 5 с на команду). */
+/** Сумма уровней ферм под контролем команды (+N квант / 5 с на команду при связи). */
 function computeClientQuantumFarmIncomePer5s() {
   const tid = myTeamId | 0;
   if (!tid || !quantumFarmsMeta.length || gridW < 1 || gridH < 1) return 0;
-  let n = 0;
+  let sum = 0;
   for (let i = 0; i < quantumFarmsMeta.length; i++) {
     const f = quantumFarmsMeta[i];
     const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
@@ -4612,9 +4684,172 @@ function computeClientQuantumFarmIncomePer5s() {
       const v = clientPixelTeamIdAt(x, y);
       return v == null ? 0 : v | 0;
     });
-    if ((resolveFarmControl(scores).owner | 0) === tid) n++;
+    const st = resolveFarmControl(scores);
+    if ((st.owner | 0) === tid && !st.contested) {
+      sum += normalizeQuantumFarmLevel(f.level);
+    }
   }
-  return n;
+  return sum;
+}
+
+function mergeQuantumFarmsFromServerPayload(rows) {
+  if (!Array.isArray(rows)) return;
+  quantumFarmsMeta = rows
+    .filter((f) => f && typeof f.x0 === "number" && typeof f.y0 === "number")
+    .map((f) => ({
+      id: Number(f.id) | 0,
+      x0: f.x0 | 0,
+      y0: f.y0 | 0,
+      w: typeof f.w === "number" ? f.w | 0 : 2,
+      h: typeof f.h === "number" ? f.h | 0 : 2,
+      level: normalizeQuantumFarmLevel(f.level),
+    }));
+  syncToolbarQuantumObjective();
+}
+
+function findQuantumFarmCoveringCell(gx, gy) {
+  if (!quantumFarmsMeta.length) return null;
+  const x = gx | 0;
+  const y = gy | 0;
+  for (let i = 0; i < quantumFarmsMeta.length; i++) {
+    const f = quantumFarmsMeta[i];
+    if (x >= f.x0 && x < f.x0 + f.w && y >= f.y0 && y < f.y0 + f.h) return f;
+  }
+  return null;
+}
+
+function closeQuantumFarmPanel() {
+  if (!quantumFarmPanelEl) return;
+  const card = quantumFarmPanelEl.querySelector(".quantum-farm-panel__card");
+  card?.classList.remove(
+    "quantum-farm-panel__card--tier-1",
+    "quantum-farm-panel__card--tier-2",
+    "quantum-farm-panel__card--tier-3"
+  );
+  quantumFarmPanelEl.hidden = true;
+  quantumFarmPanelEl.setAttribute("aria-hidden", "true");
+}
+
+function openQuantumFarmPanel(f) {
+  if (!quantumFarmPanelEl || !f) return;
+  const lvl = normalizeQuantumFarmLevel(f.level);
+  const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
+    const parts = key.split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    const v = clientPixelTeamIdAt(x, y);
+    return v == null ? 0 : v | 0;
+  });
+  const st = resolveFarmControl(scores);
+  const owner = st.owner | 0;
+  const contested = !!st.contested;
+  const myT = myTeamId != null ? myTeamId | 0 : 0;
+  const ours = myT && owner === myT;
+
+  const tierNow = quantumFarmTierMeta(lvl);
+  if (quantumFarmPanelTitleEl) {
+    quantumFarmPanelTitleEl.textContent = `Квантовая ферма #${f.id | 0}`;
+  }
+  if (quantumFarmPanelLevelEl) {
+    quantumFarmPanelLevelEl.textContent = `Уровень ${lvl} — ${tierNow.name}`;
+  }
+  if (quantumFarmPanelBlurbEl) {
+    quantumFarmPanelBlurbEl.textContent = tierNow.blurb;
+  }
+  const card = quantumFarmPanelEl.querySelector(".quantum-farm-panel__card");
+  if (card) {
+    card.classList.remove(
+      "quantum-farm-panel__card--tier-1",
+      "quantum-farm-panel__card--tier-2",
+      "quantum-farm-panel__card--tier-3"
+    );
+    card.classList.add(`quantum-farm-panel__card--tier-${lvl}`);
+  }
+  if (quantumFarmPanelIncomeEl) {
+    if (!owner) {
+      quantumFarmPanelIncomeEl.textContent = "Спорная зона — доход не начисляется.";
+    } else if (contested) {
+      quantumFarmPanelIncomeEl.textContent = "Спорная зона — доход не начисляется.";
+    } else if (connected) {
+      quantumFarmPanelIncomeEl.textContent = `Доход при связи: +${lvl} квант. / 5 с (команда)`;
+    } else {
+      quantumFarmPanelIncomeEl.textContent = `Контролирует команда — доход +${lvl} / 5 с для них.`;
+    }
+  }
+
+  let hint = "";
+  let showUpgrade = false;
+  if (spectatorMode) {
+    hint = "Режим наблюдателя.";
+  } else if (!myT) {
+    hint = "Вступите в команду для улучшений.";
+  } else if (!ours) {
+    hint = "Улучшать может только команда, контролирующая ферму.";
+  } else if (contested) {
+    hint = "Нет стабильного контроля — нельзя улучшить.";
+  } else if (!connected) {
+    hint = "Нет связи с территорией — доход и улучшения недоступны.";
+  } else if (lvl >= QUANTUM_FARM_MAX_LEVEL) {
+    hint = "Максимальный уровень — ключевая цель удерживается или перехватывается.";
+  } else {
+    const cost = lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
+    const next = lvl + 1;
+    const nextTier = quantumFarmTierMeta(next);
+    hint = `Улучшить до «${nextTier.name}» (ур. ${next}): ${cost} квантов.`;
+    showUpgrade = true;
+  }
+
+  if (quantumFarmPanelHintEl) {
+    const needMoney =
+      showUpgrade &&
+      walletState &&
+      !walletState.devUnlimited &&
+      typeof walletState.balanceUSDT === "number";
+    const qNeed = showUpgrade ? (lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3) : 0;
+    const qHave = needMoney ? usdtToQuant(walletState.balanceUSDT) : 999999;
+    if (showUpgrade && needMoney && qHave < qNeed) {
+      quantumFarmPanelHintEl.textContent = `Недостаточно квантов (нужно ${qNeed}).`;
+      quantumFarmPanelHintEl.hidden = false;
+    } else {
+      quantumFarmPanelHintEl.textContent = hint;
+      quantumFarmPanelHintEl.hidden = !hint;
+    }
+  }
+
+  if (quantumFarmPanelUpgradeEl) {
+    const affordable =
+      !walletState ||
+      walletState.devUnlimited ||
+      typeof walletState.balanceUSDT !== "number" ||
+      usdtToQuant(walletState.balanceUSDT) >= (lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3);
+    quantumFarmPanelUpgradeEl.hidden = !showUpgrade;
+    quantumFarmPanelUpgradeEl.disabled = showUpgrade && !affordable;
+    const cost = lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
+    const next = lvl + 1;
+    const nextTier = quantumFarmTierMeta(next);
+    quantumFarmPanelUpgradeEl.textContent = showUpgrade
+      ? `До «${nextTier.name}» (ур. ${next}) — ${cost} кв.`
+      : "Улучшить";
+    quantumFarmPanelUpgradeEl.dataset.farmId = String(f.id | 0);
+  }
+
+  quantumFarmPanelEl.hidden = false;
+  quantumFarmPanelEl.removeAttribute("aria-hidden");
+  try {
+    window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("light");
+  } catch {
+    /* ignore */
+  }
+}
+
+function initQuantumFarmPanel() {
+  quantumFarmPanelCloseEl?.addEventListener("click", closeQuantumFarmPanel);
+  quantumFarmPanelBackdropEl?.addEventListener("click", closeQuantumFarmPanel);
+  quantumFarmPanelUpgradeEl?.addEventListener("click", () => {
+    const id = Number(quantumFarmPanelUpgradeEl?.dataset?.farmId);
+    if (!Number.isFinite(id) || id < 1) return;
+    wsSendJson({ type: "purchaseQuantumFarmUpgrade", farmId: id });
+  });
 }
 
 const BATTLE_EVENT_ZONE_QUANT_PER_STACK = 5;
@@ -4729,6 +4964,7 @@ function refreshPassiveIncomeDisplays() {
   const online = wantOnline && getWsUrl();
   if (!online || !walletState || spectatorMode || myTeamId == null) return;
   syncShopHeaderBalance();
+  refreshUsdtDepositUi();
   if (!walletBalanceEl || walletState.devUnlimited) return;
   const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
   const t = usdtToQuant(b);
@@ -4790,7 +5026,7 @@ function playQuantumFarmIncomeClientFx(quants) {
   }
 }
 
-/** Бейдж «квантоцентр» в шапке: подчёркивает главную цель раунда. */
+/** Бейдж цели «квантофермы» в шапке: центр и периферия карты. */
 function syncToolbarQuantumObjective() {
   if (!toolbarQuantumObjectiveEl) return;
   const online = wantOnline && getWsUrl();
@@ -4805,8 +5041,8 @@ function syncToolbarQuantumObjective() {
   toolbarQuantumObjectiveEl.hidden = false;
   const total = quantumFarmsMeta.length;
   if (spectatorMode || myTeamId == null) {
-    toolbarQuantumObjectiveEl.textContent = `⚛ Квантоцентр · ${total}`;
-    toolbarQuantumObjectiveEl.title = `${total} квантовых ферм у центра карты — главный источник квантов; бой за центр решает экономику и магазин.`;
+    toolbarQuantumObjectiveEl.textContent = `⚛ Квантофермы · ${total}`;
+    toolbarQuantumObjectiveEl.title = `${total} ферм: ур. 1 базовые, ур. 2 ценные, ур. 3 — ключевые цели. Доход суммируется (до +3 кв. / 5 с с точки макс. уровня).`;
     toolbarQuantumObjectiveEl.classList.remove(
       "toolbar__quantum-objective--held",
       "toolbar__quantum-objective--contested"
@@ -4815,6 +5051,7 @@ function syncToolbarQuantumObjective() {
   }
   const tid = myTeamId | 0;
   let held = 0;
+  let incomeSum = 0;
   let contestedNearUs = 0;
   for (let i = 0; i < quantumFarmsMeta.length; i++) {
     const f = quantumFarmsMeta[i];
@@ -4824,12 +5061,15 @@ function syncToolbarQuantumObjective() {
       return v == null ? 0 : v | 0;
     });
     const st = resolveFarmControl(scores);
-    if ((st.owner | 0) === tid) held++;
+    if ((st.owner | 0) === tid && !st.contested) {
+      held++;
+      incomeSum += normalizeQuantumFarmLevel(f.level);
+    }
     if (st.contested && (scores.get(tid) | 0) > 0) contestedNearUs++;
   }
   toolbarQuantumObjectiveEl.textContent =
-    held > 0 ? `⚛ Удерживаем ${held}/${total}` : `⚛ Штурм центра 0/${total}`;
-  toolbarQuantumObjectiveEl.title = `Квантовые фермы — ключ к победе в экономике: каждая удержанная ферма даёт всей команде +1 квант / 5 с. Сейчас ваших: ${held} из ${total}. Больше клеток команды вокруг фермы, чем у врагов — точка ваша; равенство — спор без дохода.`;
+    held > 0 ? `⚛ Удерживаем ${held}/${total}` : `⚛ Штурм ферм 0/${total}`;
+  toolbarQuantumObjectiveEl.title = `Фермы: ур. 1 базовая (+1), ур. 2 ценная (+2), ур. 3 ключевая цель (+3) кв. / 5 с при контроле и связи. Ваш доход с ферм: до +${incomeSum} / 5 с (${held} из ${total}). Спор — без дохода. Тап по ферме — улучшение.`;
   toolbarQuantumObjectiveEl.classList.toggle("toolbar__quantum-objective--held", held > 0);
   toolbarQuantumObjectiveEl.classList.toggle(
     "toolbar__quantum-objective--contested",
@@ -4860,7 +5100,6 @@ function syncShopHeaderBalance() {
       subEl.textContent = "";
       subEl.hidden = true;
     }
-    syncDevUnlimitedShopHints();
     return;
   }
   if (walletState.devUnlimited) {
@@ -4870,7 +5109,6 @@ function syncShopHeaderBalance() {
       subEl.textContent = "";
       subEl.hidden = true;
     }
-    syncDevUnlimitedShopHints();
     return;
   }
   const b = typeof walletState.balanceUSDT === "number" ? walletState.balanceUSDT : 0;
@@ -4883,7 +5121,6 @@ function syncShopHeaderBalance() {
     subEl.textContent = sub.text;
     subEl.hidden = sub.hidden;
   }
-  syncDevUnlimitedShopHints();
 }
 
 function syncShopDepositButton() {
@@ -5095,7 +5332,7 @@ function updateWalletBar() {
     if (btnDeposit) btnDeposit.hidden = true;
     if (btnShop) btnShop.hidden = true;
     syncShopHeaderBalance();
-    syncShopDepositButton();
+    refreshUsdtDepositUi();
     syncEventBanner();
     syncTeamBuffBanner();
     syncToolbarQuantumObjective();
@@ -5110,7 +5347,7 @@ function updateWalletBar() {
     if (btnDeposit) btnDeposit.hidden = true;
     if (btnShop) btnShop.hidden = spectatorMode;
     syncShopHeaderBalance();
-    syncShopDepositButton();
+    refreshUsdtDepositUi();
     syncEventBanner();
     syncTeamBuffBanner();
     syncToolbarQuantumObjective();
@@ -5145,7 +5382,7 @@ function updateWalletBar() {
         : "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
   }
   syncShopHeaderBalance();
-  syncShopDepositButton();
+  refreshUsdtDepositUi();
   syncEventBanner();
   syncTeamBuffBanner();
   syncToolbarQuantumObjective();
@@ -5432,6 +5669,57 @@ function applyGlobalPurchaseVfx(msg) {
     });
     return;
   }
+  if ((kind === "greatWallBuilt" || kind === "greatWallHit" || kind === "greatWallBreak") && hasGrid) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const tr = getVfxTransform();
+    if (kind === "greatWallBuilt") {
+      const col = teamColor(msg.teamId | 0);
+      boardVfx?.greatWallBuilt(gxi, gyi, col, tr);
+      const sp = spatialForZoneCapture(msg.teamId | 0, gxi, gyi, 1);
+      playGreatWallBuilt(sp);
+    } else if (kind === "greatWallHit") {
+      const col = teamColor(msg.defenderTeamId | 0);
+      boardVfx?.greatWallHit(gxi, gyi, col, tr);
+      const sp = spatialForZoneCapture(msg.defenderTeamId | 0, gxi, gyi, 1);
+      playGreatWallHit(sp);
+    } else {
+      const ac = teamColor(msg.attackerTeamId | 0);
+      const dc = teamColor(msg.defenderTeamId | 0);
+      boardVfx?.greatWallBreak(gxi, gyi, ac, dc, tr);
+      const sp = spatialForZoneCapture(msg.attackerTeamId | 0, gxi, gyi, 1);
+      playGreatWallBreak(sp);
+    }
+    flushBoardVfxFrame();
+    requestAnimationFrame(() => flushBoardVfxFrame());
+    scheduleDraw({ dirty: { gx0: gxi, gy0: gyi, gx1: gxi, gy1: gyi } });
+    return;
+  }
+  if (kind === "quantumFarmUpgrade") {
+    const fid = msg.farmId | 0;
+    const lv = normalizeQuantumFarmLevel(msg.level);
+    if (fid) {
+      for (let i = 0; i < quantumFarmsMeta.length; i++) {
+        if ((quantumFarmsMeta[i].id | 0) === fid) {
+          quantumFarmsMeta[i] = { ...quantumFarmsMeta[i], level: lv };
+          break;
+        }
+      }
+    }
+    {
+      const a = teamSoundAnchor(msg.teamId | 0);
+      const isMine = myTeamId != null && (msg.teamId | 0) === (myTeamId | 0);
+      playBuffTeamSfx(
+        isMine
+          ? { scope: /** @type {const} */ ("personal"), weight: 1 }
+          : { scope: /** @type {const} */ ("local"), gx: a.gx, gy: a.gy, weight: 0.42 }
+      );
+    }
+    refreshPassiveIncomeDisplays();
+    syncToolbarQuantumObjective();
+    scheduleDraw({ full: true });
+    return;
+  }
   if (kind === "teamRecovery") {
     app?.classList.add("fx-team-boost");
     setTimeout(() => app?.classList.remove("fx-team-boost"), 2000);
@@ -5455,6 +5743,34 @@ function handlePurchaseOk(msg) {
   const kind = msg.kind;
   const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
 
+  if (kind === "greatWall") {
+    optimisticGreatWallPending = null;
+    const wx = typeof msg.x === "number" ? msg.x | 0 : NaN;
+    const wy = typeof msg.y === "number" ? msg.y | 0 : NaN;
+    if (Number.isFinite(wx) && Number.isFinite(wy)) {
+      showPlacementFeedback("Стена готова: клетка держит 3 удара, HP не восстанавливается.", "ok", {
+        telegramAlert: false,
+      });
+    }
+  }
+  if (kind === "quantumFarmUpgrade") {
+    const fid = msg.farmId | 0;
+    const lv = normalizeQuantumFarmLevel(msg.level);
+    if (fid) {
+      for (let i = 0; i < quantumFarmsMeta.length; i++) {
+        if ((quantumFarmsMeta[i].id | 0) === fid) {
+          quantumFarmsMeta[i] = { ...quantumFarmsMeta[i], level: lv };
+          break;
+        }
+      }
+    }
+    closeQuantumFarmPanel();
+    showPlacementFeedback(`Квантовая ферма: уровень ${lv}.`, "ok", { telegramAlert: false });
+    playPurchaseSuccess();
+    refreshPassiveIncomeDisplays();
+    syncToolbarQuantumObjective();
+    scheduleDraw({ full: true });
+  }
   if (kind === "personalRecovery") {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
     spawnFloatingText(floatFxHost, `⚡ ЛИЧНО: ${s} С`, flo, "float-fx__pop--gold");
@@ -5584,6 +5900,7 @@ function shopBtnMatchesPurchase(btn, msg) {
   if (kind === "zone12Capture") return action === "zone12Capture";
   if (kind === "nukeBomb") return action === "nukeBomb";
   if (kind === "militaryBase") return action === "militaryBase";
+  if (kind === "greatWall") return action === "greatWall";
   return false;
 }
 
@@ -5641,6 +5958,8 @@ function recordQuickBuyAfterPurchase(kind, msg) {
     pushQuickBuyHistory({ action: "nukeBomb" });
   } else if (kind === "militaryBase") {
     pushQuickBuyHistory({ action: "militaryBase" });
+  } else if (kind === "greatWall") {
+    pushQuickBuyHistory({ action: "greatWall" });
   }
 }
 
@@ -5652,6 +5971,7 @@ function getQuickBuyPriceQuant(entry) {
   if (entry.action === "zone12Capture") return PRICES_QUANT.zone12;
   if (entry.action === "nukeBomb") return PRICES_QUANT.nukeBomb;
   if (entry.action === "militaryBase") return PRICES_QUANT.militaryBase;
+  if (entry.action === "greatWall") return PRICES_QUANT.greatWall;
   return 0;
 }
 
@@ -5663,6 +5983,7 @@ function quickBuyShortLabel(entry) {
   if (entry.action === "zone12Capture") return "12×12";
   if (entry.action === "nukeBomb") return "☢";
   if (entry.action === "militaryBase") return "FOB";
+  if (entry.action === "greatWall") return "Стена";
   return "?";
 }
 
@@ -5676,6 +5997,7 @@ function quickBuyFabGlyphMeta(entry) {
     return { char: "12", glyphClass: " quick-buy-rail__glyph--num quick-buy-rail__glyph--num12" };
   if (entry.action === "nukeBomb") return { char: "☢", glyphClass: "" };
   if (entry.action === "militaryBase") return { char: "⛺", glyphClass: "" };
+  if (entry.action === "greatWall") return { char: "🧱", glyphClass: "" };
   return { char: "?", glyphClass: "" };
 }
 
@@ -5688,6 +6010,7 @@ function quickBuyAriaName(entry) {
   if (entry.action === "zone12Capture") return "Зона 12×12";
   if (entry.action === "nukeBomb") return "Тактическая бомба";
   if (entry.action === "militaryBase") return "Плацдарм";
+  if (entry.action === "greatWall") return "Великая стена";
   return "Покупка";
 }
 
@@ -5714,12 +6037,13 @@ function isQuickBuyEntryBlocked(entry) {
     }
   }
   if (entry.action === "teamRecovery" && myTeamId == null) return true;
-  if (
-    (entry.action === "zoneCapture" ||
+    if (
+      (entry.action === "zoneCapture" ||
       entry.action === "massCapture" ||
       entry.action === "zone12Capture" ||
       entry.action === "nukeBomb" ||
-      entry.action === "militaryBase") &&
+      entry.action === "militaryBase" ||
+      entry.action === "greatWall") &&
     myTeamId == null
   ) {
     return true;
@@ -5785,6 +6109,22 @@ function executeQuickBuy(entry) {
     if (shopOverlay) shopOverlay.hidden = true;
     return;
   }
+  if (entry.action === "greatWall") {
+    pendingMapAction = { type: "greatWall" };
+    setPendingHint();
+    showPlacementFeedback(
+      "Великая стена: тап по своей клетке (не флаг базы). 3 удара врага, HP не растёт. ~160 кв.",
+      "info",
+      { telegramAlert: false }
+    );
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("medium");
+    } catch {
+      /* ignore */
+    }
+    if (shopOverlay) shopOverlay.hidden = true;
+    return;
+  }
   if (entry.action === "militaryBase") {
     pendingMapAction = { type: "militaryBase" };
     setPendingHint();
@@ -5840,7 +6180,8 @@ function renderQuickBuyRail() {
       entry.action === "massCapture" ||
       entry.action === "zone12Capture" ||
       entry.action === "nukeBomb" ||
-      entry.action === "militaryBase"
+      entry.action === "militaryBase" ||
+      entry.action === "greatWall"
     ) {
       btn.title = `${short} · ${q} кв. — тап по карте, затем списание`;
     } else if (!playerCanAffordQuickBuy(entry)) {
@@ -5918,7 +6259,14 @@ function syncQuickBuyRailMapPending() {
   const host = document.getElementById("quick-buy-list");
   if (!host) return;
   const t = pendingMapAction?.type;
-  const mapKinds = new Set(["zoneCapture", "massCapture", "zone12Capture", "nukeBomb", "militaryBase"]);
+  const mapKinds = new Set([
+    "zoneCapture",
+    "massCapture",
+    "zone12Capture",
+    "nukeBomb",
+    "militaryBase",
+    "greatWall",
+  ]);
   host.querySelectorAll(".quick-buy-rail__btn").forEach((btn) => {
     const a = btn.dataset.action || "";
     const armed = mapKinds.has(a) && t === a;
@@ -6119,18 +6467,106 @@ function notifyDevUnlimitedNoDeposit(hint) {
   else alert(msg);
 }
 
+function notifyUsdtPurchasesDisabled() {
+  const msg =
+    "Покупки за реальные деньги отключены ради честной игры. Все соревнуются на равных условиях.";
+  const tg = window.Telegram?.WebApp;
+  if (typeof tg?.showAlert === "function") tg.showAlert(msg);
+  else alert(msg);
+  playUiError();
+}
+
 function syncDevUnlimitedShopHints() {
   const dev = isWalletDevUnlimited();
+  const usdt = isUsdtDepositsEnabled();
   document.querySelectorAll(".shop-topup-pack").forEach((btn) => {
+    if (!usdt) {
+      btn.style.opacity = "";
+      return;
+    }
     btn.style.opacity = dev ? "0.55" : "";
     btn.title = dev ? "В тестовом режиме пополнение не требуется" : "";
   });
+}
+
+function applyUsdtDepositsDisabledUi() {
+  const enabled = isUsdtDepositsEnabled();
+  document
+    .querySelector("#shop-overlay .game-shop")
+    ?.classList.toggle("game-shop--usdt-deposits-off", !enabled);
+  const fairPlayNotice = document.getElementById("shop-fair-play-notice");
+  if (fairPlayNotice) fairPlayNotice.hidden = enabled;
+
+  document.querySelectorAll(".shop-topup-pack").forEach((btn) => {
+    btn.disabled = !enabled;
+    btn.setAttribute("aria-disabled", enabled ? "false" : "true");
+    btn.classList.toggle("shop-topup-pack--usdt-off", !enabled);
+    if (!enabled) btn.title = FAIR_PLAY_DISABLED_TOOLTIP;
+    else btn.title = "";
+  });
+
+  document.querySelectorAll(".deposit-amt").forEach((btn) => {
+    btn.disabled = !enabled;
+    btn.setAttribute("aria-disabled", enabled ? "false" : "true");
+    btn.classList.toggle("deposit-amt--usdt-off", !enabled);
+    if (!enabled) btn.title = FAIR_PLAY_DISABLED_TOOLTIP;
+    else btn.title = "";
+  });
+
+  if (depositCustom) {
+    depositCustom.disabled = !enabled;
+    depositCustom.readOnly = !enabled;
+    depositCustom.title = !enabled ? FAIR_PLAY_DISABLED_TOOLTIP : "";
+  }
+
+  if (depositSubmit) {
+    if (!enabled) {
+      depositSubmit.disabled = true;
+      depositSubmit.textContent = "Отключено";
+      depositSubmit.title = FAIR_PLAY_DISABLED_TOOLTIP;
+    } else {
+      depositSubmit.disabled = false;
+      if (depositSubmit.textContent === "Отключено") depositSubmit.textContent = "Создать счёт";
+      depositSubmit.title = "";
+    }
+  }
+
+  const shopOpen = document.getElementById("shop-open-deposit");
+  if (shopOpen) {
+    shopOpen.disabled = !enabled;
+    shopOpen.classList.toggle("game-shop__deposit-btn--usdt-off", !enabled);
+    if (!enabled) shopOpen.title = FAIR_PLAY_DISABLED_TOOLTIP;
+    else if (!isWalletDevUnlimited()) shopOpen.title = "";
+  }
+
+  if (btnDeposit) {
+    if (!enabled) {
+      btnDeposit.disabled = true;
+      btnDeposit.title = FAIR_PLAY_DISABLED_TOOLTIP;
+      btnDeposit.classList.add("toolbar__btn--usdt-deposit-off");
+    } else {
+      btnDeposit.disabled = false;
+      btnDeposit.title = "Пополнить кванты (оплата USDT)";
+      btnDeposit.classList.remove("toolbar__btn--usdt-deposit-off");
+    }
+  }
+
+  syncDevUnlimitedShopHints();
+}
+
+function refreshUsdtDepositUi() {
+  syncShopDepositButton();
+  applyUsdtDepositsDisabledUi();
 }
 
 function setupEconomyUi() {
   btnDeposit?.addEventListener("click", () => {
     if (isWalletDevUnlimited()) {
       notifyDevUnlimitedNoDeposit();
+      return;
+    }
+    if (!isUsdtDepositsEnabled()) {
+      notifyUsdtPurchasesDisabled();
       return;
     }
     depositBonusQuant = 0;
@@ -6156,6 +6592,10 @@ function setupEconomyUi() {
   });
   depositSubmit?.addEventListener("click", async () => {
     if (depositSubmit?.disabled) return;
+    if (!isUsdtDepositsEnabled()) {
+      notifyUsdtPurchasesDisabled();
+      return;
+    }
     if (isWalletDevUnlimited()) {
       if (depositError) {
         depositError.textContent = "В тестовом режиме пополнение отключено.";
@@ -6204,6 +6644,12 @@ function setupEconomyUi() {
             j.error ||
             (typeof j === "object" && j.message) ||
             "Не удалось создать счёт. Проверьте NOWPAYMENTS_API_KEY и PUBLIC_BASE_URL на Render.";
+          if (
+            msg === "Purchases are currently disabled" ||
+            (typeof msg === "string" && msg.includes("Purchases are currently disabled"))
+          ) {
+            msg = "Покупки отключены ради честной игры.";
+          }
           if (msg === "initData required" || msg.includes("initData")) {
             msg = "Откройте игру из Telegram Mini App — нужна подпись для оплаты.";
           }
@@ -6235,8 +6681,9 @@ function setupEconomyUi() {
         depositError.hidden = false;
       }
     } finally {
-      depositSubmit.disabled = false;
-      depositSubmit.textContent = prevLabel;
+      const depOn = isUsdtDepositsEnabled();
+      depositSubmit.disabled = !depOn;
+      depositSubmit.textContent = depOn ? prevLabel : "Отключено";
     }
   });
 
@@ -6250,6 +6697,7 @@ function setupEconomyUi() {
       setTimeout(() => bal.removeAttribute("data-pulse"), 500);
     }
     syncShopHeaderBalance();
+    refreshUsdtDepositUi();
     updateShopAvailability();
     setPendingHint();
   });
@@ -6261,6 +6709,10 @@ function setupEconomyUi() {
     }
     if (isWalletDevUnlimited()) {
       notifyDevUnlimitedNoDeposit();
+      return;
+    }
+    if (!isUsdtDepositsEnabled()) {
+      notifyUsdtPurchasesDisabled();
       return;
     }
     depositBonusQuant = 0;
@@ -6277,6 +6729,10 @@ function setupEconomyUi() {
       }
       if (isWalletDevUnlimited()) {
         notifyDevUnlimitedNoDeposit();
+        return;
+      }
+      if (!isUsdtDepositsEnabled()) {
+        notifyUsdtPurchasesDisabled();
         return;
       }
       const a = Number(btn.dataset.amt);
@@ -6366,6 +6822,22 @@ function setupEconomyUi() {
         if (shopOverlay) shopOverlay.hidden = true;
         return;
       }
+      if (action === "greatWall") {
+        pendingMapAction = { type: "greatWall" };
+        setPendingHint();
+        showPlacementFeedback(
+          "Великая стена: тап по своей клетке (не флаг). Три удара врага ломают укрепление.",
+          "info",
+          { telegramAlert: false }
+        );
+        try {
+          window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("medium");
+        } catch {
+          /* ignore */
+        }
+        if (shopOverlay) shopOverlay.hidden = true;
+        return;
+      }
       if (action === "militaryBase") {
         pendingMapAction = { type: "militaryBase" };
         setPendingHint();
@@ -6393,6 +6865,7 @@ function setupEconomyUi() {
     btn.addEventListener(
       "click",
       () => {
+        if (btn.disabled) return;
         btn.classList.remove("fx-btn-press");
         void btn.offsetWidth;
         btn.classList.add("fx-btn-press");
@@ -6401,6 +6874,8 @@ function setupEconomyUi() {
       { passive: true }
     );
   });
+
+  refreshUsdtDepositUi();
 }
 
 function setPendingHint() {
@@ -6420,6 +6895,8 @@ function setPendingHint() {
       return "Бомба: тап по эпицентру — хаотичный взрыв ~12×12, территория станет нейтральной";
     if (pendingMapAction.type === "militaryBase")
       return "Передовая база 6×6 — второй активный корень команды: снабжение и изоляция считаются от главной И от неё. Тап по центру на чистой суше";
+    if (pendingMapAction.type === "greatWall")
+      return "Великая стена: тап по своей обычной клетке (не якорь флага). Укрепление до 3 HP без восстановления.";
     return "";
   })();
   /** Короткая строка в шапке — иначе длинный текст раздувает toolbar на пол-экрана */
@@ -6430,6 +6907,7 @@ function setPendingHint() {
     if (pendingMapAction.type === "zone12Capture") return "12×12 · тап по центру";
     if (pendingMapAction.type === "nukeBomb") return "☢ бомба · ~12×12, край неровный · тап";
     if (pendingMapAction.type === "militaryBase") return "Плацдарм 6×6 · превью";
+    if (pendingMapAction.type === "greatWall") return "Стена · тап по своей клетке";
     return "";
   })();
   const text = short;
@@ -6457,6 +6935,7 @@ const WS_PAUSE_BLOCKED_TYPES = new Set([
   "purchaseZone12Capture",
   "purchaseNukeBomb",
   "purchaseMilitaryBase",
+  "purchaseGreatWall",
 ]);
 
 function wsSendJson(obj) {
@@ -6758,6 +7237,7 @@ function connectWs() {
         console.debug("[roundEvent]", msg.phase, msg.eventId, msg.title);
       }
       notifyRoundEventFromServer(msg);
+      syncClientCooldownFromWalletFields();
       syncEventBanner();
       syncTeamBuffBanner();
       scheduleDraw({ full: true });
@@ -7559,7 +8039,11 @@ function connectWs() {
         if (x < 0 || x >= gridW || y < 0 || y >= gridH) continue;
         if (msg.pixelFormat === "v2" && p.length >= 5) {
           const [, , t, , sh] = p;
-          pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: sh || 0 });
+          const wh = p.length >= 6 ? normalizeWallHp(p[5]) : 0;
+          /** @type {{ teamId: number, shieldedUntil: number, wallHp?: number }} */
+          const o = { teamId: t, shieldedUntil: sh || 0 };
+          if (wh > 0) o.wallHp = wh;
+          pixels.set(`${x},${y}`, o);
         } else {
           const [, , t] = p;
           pixels.set(`${x},${y}`, { teamId: t, shieldedUntil: 0 });
@@ -7596,6 +8080,7 @@ function connectWs() {
         const y = row[1] | 0;
         const t = row[2];
         const newSh = fmt === "v2" && row.length >= 5 ? Number(row[4]) || 0 : 0;
+        const wallHp = fmt === "v2" && row.length >= 6 ? normalizeWallHp(row[5]) : 0;
         const pk = `${x},${y}`;
         if (x < 0 || x >= gridW || y < 0 || y >= gridH) {
           pixels.delete(pk);
@@ -7614,10 +8099,10 @@ function connectWs() {
         }
         const prev = pixels.get(pk);
         const prevSh = typeof prev === "object" && prev ? prev.shieldedUntil || 0 : 0;
-        pixels.set(pk, {
-          teamId: t,
-          shieldedUntil: newSh,
-        });
+        /** @type {{ teamId: number, shieldedUntil: number, wallHp?: number }} */
+        const cellRec = { teamId: t, shieldedUntil: newSh };
+        if (wallHp > 0) cellRec.wallHp = wallHp;
+        pixels.set(pk, cellRec);
         const tr = getVfxTransform();
         const col = teamColor(t);
         if (boardVfx && allowBatchVfx) {
@@ -7688,18 +8173,7 @@ function connectWs() {
       return;
     }
     if (msg.type === "quantumFarmsInit") {
-      quantumFarmsMeta = Array.isArray(msg.farms)
-        ? msg.farms
-            .filter((f) => f && typeof f.x0 === "number" && typeof f.y0 === "number")
-            .map((f) => ({
-              id: Number(f.id) | 0,
-              x0: f.x0 | 0,
-              y0: f.y0 | 0,
-              w: typeof f.w === "number" ? f.w | 0 : 2,
-              h: typeof f.h === "number" ? f.h | 0 : 2,
-            }))
-        : [];
-      syncToolbarQuantumObjective();
+      mergeQuantumFarmsFromServerPayload(Array.isArray(msg.farms) ? msg.farms : []);
       scheduleDraw({ full: true });
       return;
     }
@@ -7710,23 +8184,23 @@ function connectWs() {
       if (kind === "connected") {
         playQuantumConnect();
         showPlacementFeedback(
-          "Квантовая ферма в штурме центра: команда получает +1 квант / 5 с с этой точки.",
+          "Квантовая ферма под контролем: доход зависит от уровня (до +3 кв. / 5 с), тап по ферме — улучшение.",
           "ok",
           { telegramAlert: false }
         );
       } else if (kind === "disconnected") {
         playQuantumDisconnect();
         showPlacementFeedback(
-          "Квантовая ферма потеряна — доход с ключевой точки остановлен, бейте центр.",
+          "Квантовая ферма потеряна — пассивный доход с этой точки остановлен.",
           "warn",
           { telegramAlert: false }
         );
       } else if (kind === "lost") {
         playQuantumDisconnect();
-        showPlacementFeedback("Враг отжал квантовую ферму у центра карты.", "warn", { telegramAlert: false });
+        showPlacementFeedback("Враг перехватил вашу квантовую ферму.", "warn", { telegramAlert: false });
       } else if (kind === "captured_from") {
         playQuantumConnect();
-        showPlacementFeedback("Ваша команда захватила квантовую ферму — контроль центра усилен.", "ok", {
+        showPlacementFeedback("Ваша команда захватила квантовую ферму.", "ok", {
           telegramAlert: false,
         });
       }
@@ -7760,6 +8234,13 @@ function connectWs() {
       return;
     }
     if (msg.type === "purchaseError") {
+      if (optimisticGreatWallPending) {
+        const { key: gwk, prev: gwp } = optimisticGreatWallPending;
+        optimisticGreatWallPending = null;
+        if (gwp === undefined) pixels.delete(gwk);
+        else pixels.set(gwk, gwp);
+      }
+      closeQuantumFarmPanel();
       const wk = optimisticWeaponPending?.blastKeys ?? optimisticWeaponPending?.keys;
       revertOptimisticWeapon();
       notifyPurchaseError(msg.reason || "");
@@ -8264,8 +8745,14 @@ function snapshotPixelCell(pk) {
   const v = pixels.get(pk);
   if (v === undefined) return undefined;
   if (typeof v === "number") return v;
-  return { teamId: v.teamId, shieldedUntil: Number(v.shieldedUntil) || 0 };
+  const o = { teamId: v.teamId, shieldedUntil: Number(v.shieldedUntil) || 0 };
+  const wh = normalizeWallHp(v.wallHp);
+  if (wh > 0) o.wallHp = wh;
+  return o;
 }
+
+/** @type {{ key: string, prev: ReturnType<typeof snapshotPixelCell> } | null} */
+let optimisticGreatWallPending = null;
 
 function revertOptimisticPixel() {
   if (!optimisticPixelPending) return;
@@ -8304,6 +8791,25 @@ function isClientEnemyOwnedFlagAnchor(attackerTeamId, gx, gy) {
       if (fx !== gx || fy !== gy) continue;
       const owner = clientPixelOwnerTeamAt(gx, gy);
       return owner === tid;
+    }
+  }
+  return false;
+}
+
+/** Якорь флага любой команды (клетка флага главной или плацдарма) — нельзя ставить Великую стену. */
+function clientCellIsAnyFlagAnchor(gx, gy) {
+  if (!teamsMeta) return false;
+  for (const t of teamsMeta) {
+    if (t.solo || t.eliminated) continue;
+    if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      if (fx === gx && fy === gy) return true;
+    }
+    const mos = clientMilitaryOutpostRects(t.id | 0);
+    for (let mi = 0; mi < mos.length; mi++) {
+      const r = mos[mi];
+      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
+      if (fx === gx && fy === gy) return true;
     }
   }
   return false;
@@ -8483,7 +8989,8 @@ function applyOptimisticNukeBomb(cx, cy) {
   }
   revertOptimisticWeapon();
   const prev = new Map();
-  const clearedKeys = [];
+  /** @type {string[]} */
+  const touchedKeys = [];
   for (const k of blastKeys) {
     const [px, py] = k.split(",").map(Number);
     if (clientCellNukeProtectedSpawn(px, py)) continue;
@@ -8491,20 +8998,32 @@ function applyOptimisticNukeBomb(cx, cy) {
     if (cell === undefined) continue;
     const tid = typeof cell === "number" ? cell | 0 : Number(cell.teamId) | 0;
     if (tid === 0) continue;
+    const wh = typeof cell === "object" && cell ? normalizeWallHp(cell.wallHp) : 0;
+    const sh = typeof cell === "object" && cell ? Number(cell.shieldedUntil) || 0 : 0;
     prev.set(k, cell);
-    pixels.delete(k);
-    clearedKeys.push(k);
+    touchedKeys.push(k);
+    if (wh > 0) {
+      const nextHp = wh - 1;
+      if (nextHp > 0) {
+        pixels.set(k, { teamId: tid, shieldedUntil: sh, wallHp: nextHp });
+      } else {
+        pixels.delete(k);
+      }
+    } else {
+      pixels.delete(k);
+    }
   }
+  if (touchedKeys.length === 0) return false;
   optimisticWeaponPending = {
     kind: "nukeBomb",
     gx: cx | 0,
     gy: cy | 0,
     size: 14,
-    keys: clearedKeys,
+    keys: touchedKeys,
     blastKeys,
     prev,
   };
-  const dr = dirtyRectFromKeys(blastKeys.length ? blastKeys : clearedKeys);
+  const dr = dirtyRectFromKeys(blastKeys.length ? blastKeys : touchedKeys);
   scheduleDraw(dr ? { dirty: dr } : { full: true });
   return true;
 }
@@ -8562,8 +9081,37 @@ function applyOptimisticWeapon(kind, cx, cy) {
     return !isClientEnemyOwnedFlagAnchor(myTeamId, x, y);
   });
   const prev = new Map();
+  const myT = myTeamId | 0;
   for (const k of paintKeys) {
-    prev.set(k, snapshotPixelCell(k));
+    const prevSnap = snapshotPixelCell(k);
+    prev.set(k, prevSnap);
+    if (prevSnap === undefined) {
+      pixels.set(k, { teamId: myTeamId, shieldedUntil: 0 });
+      continue;
+    }
+    const prevTid = typeof prevSnap === "number" ? prevSnap | 0 : prevSnap.teamId | 0;
+    const wh =
+      typeof prevSnap === "object" && prevSnap && prevSnap.wallHp != null
+        ? normalizeWallHp(prevSnap.wallHp)
+        : 0;
+    const sh = typeof prevSnap === "object" && prevSnap ? Number(prevSnap.shieldedUntil) || 0 : 0;
+    if (prevTid === myT) {
+      if (wh > 0) {
+        pixels.set(k, { teamId: myTeamId, shieldedUntil: sh, wallHp: wh });
+      } else {
+        pixels.set(k, { teamId: myTeamId, shieldedUntil: 0 });
+      }
+      continue;
+    }
+    if (prevTid !== 0 && wh > 0) {
+      const nextHp = wh - 1;
+      if (nextHp > 0) {
+        pixels.set(k, { teamId: prevTid, shieldedUntil: sh, wallHp: nextHp });
+      } else {
+        pixels.set(k, { teamId: myTeamId, shieldedUntil: 0 });
+      }
+      continue;
+    }
     pixels.set(k, { teamId: myTeamId, shieldedUntil: 0 });
   }
   const gx0 = kind === "zoneCapture" ? cx - 1 : kind === "massCapture" ? cx - 2 : cx - 5;
@@ -8672,6 +9220,56 @@ function drawMapTreasureChestIcon(ctx, px, py, cw, ch) {
   ctx.arc(0, bh * 0.28, Math.max(1.2, scale * 0.055), 0, Math.PI * 2);
   ctx.fill();
 
+  ctx.restore();
+}
+
+/**
+ * Великая стена: каменный парапет, трещины при 2 и 1 HP, мелкая метка HP.
+ */
+function drawGreatWallStoneDecor(ctx, px, py, cw, ch, teamHex, wallHp, time) {
+  const wh = wallHp | 0;
+  if (wh < 1 || wh > GREAT_WALL_MAX_HP) return;
+  const { r, g, b } = hexToRgb(teamHex);
+  const pulse = 0.5 + 0.5 * Math.sin(time * 0.0031);
+  const lift = Math.max(0.5, Math.min(2.4, ch * 0.08));
+  ctx.save();
+  ctx.fillStyle = `rgba(${Math.min(255, r + 22)},${Math.min(255, g + 22)},${Math.min(255, b + 22)},0.38)`;
+  ctx.fillRect(px, py - lift * 0.42, cw, lift * 0.42);
+  const gr = ctx.createLinearGradient(px, py, px, py + ch);
+  gr.addColorStop(0, `rgba(255,255,255,${0.08 + pulse * 0.05})`);
+  gr.addColorStop(0.42, `rgba(${r},${g},${b},0.18)`);
+  gr.addColorStop(1, `rgba(0,0,0,${0.2 + (GREAT_WALL_MAX_HP - wh) * 0.05})`);
+  ctx.fillStyle = gr;
+  ctx.fillRect(px + cw * 0.07, py + ch * 0.07, cw * 0.86, ch * 0.76);
+  ctx.strokeStyle = `rgba(248,242,232,${0.5 + pulse * 0.15})`;
+  ctx.lineWidth = Math.max(1.2, ch * 0.085);
+  ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+  ctx.strokeStyle = `rgba(28,22,18,${0.48 + pulse * 0.12})`;
+  ctx.lineWidth = Math.max(2, ch * 0.12);
+  ctx.strokeRect(px + 0.5, py + 0.5 - lift * 0.18, cw - 1, ch - 1 + lift * 0.18);
+  if (wh <= 2) {
+    ctx.strokeStyle = `rgba(18,14,12,${0.55 + pulse * 0.22})`;
+    ctx.lineWidth = Math.max(1, ch * 0.048);
+    ctx.beginPath();
+    ctx.moveTo(px + cw * 0.14, py + ch * 0.34);
+    ctx.lineTo(px + cw * 0.8, py + ch * 0.7);
+    ctx.stroke();
+  }
+  if (wh <= 1) {
+    ctx.strokeStyle = `rgba(110,48,28,${0.72 + pulse * 0.18})`;
+    ctx.lineWidth = Math.max(1.15, ch * 0.065);
+    ctx.beginPath();
+    ctx.moveTo(px + cw * 0.84, py + ch * 0.2);
+    ctx.lineTo(px + cw * 0.2, py + ch * 0.9);
+    ctx.moveTo(px + cw * 0.74, py + ch * 0.14);
+    ctx.lineTo(px + cw * 0.12, py + ch * 0.64);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  ctx.font = `800 ${Math.max(7, ch * 0.3)}px system-ui,Segoe UI,sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(String(wh), px + cw * 0.5, py + ch - ch * 0.08);
   ctx.restore();
 }
 
@@ -8855,6 +9453,10 @@ function draw(time = performance.now(), drawOpts = {}) {
                 ctx.fillRect(px, py, cw, ch);
               }
             }
+            const wHp = typeof owner === "object" && owner ? normalizeWallHp(owner.wallHp) : 0;
+            if (wHp > 0 && cell >= 2.2) {
+              drawGreatWallStoneDecor(ctx, px, py, cw, ch, tc, wHp, time);
+            }
           }
         } else {
           ctx.fillStyle = PALETTE[owner] ?? "#888";
@@ -8897,6 +9499,8 @@ function draw(time = performance.now(), drawOpts = {}) {
   if (drawQuantumUnderlay) {
     for (let fi = 0; fi < quantumFarmsMeta.length; fi++) {
       const f = quantumFarmsMeta[fi];
+      const farmLvl = normalizeQuantumFarmLevel(f.level);
+      const tierFootprint = 1 + (farmLvl - 1) * 0.16;
       const igx0 = Math.max(0, f.x0 - 1);
       const igy0 = Math.max(0, f.y0 - 1);
       const igx1 = Math.min(gridW - 1, f.x0 + f.w);
@@ -8926,7 +9530,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.restore();
       ctx.save();
       ctx.globalCompositeOperation = "screen";
-      const bloomR = Math.min(w, h, cell * 4.2 * (0.92 + pulse * 0.1));
+      const bloomR = Math.min(w, h, cell * 4.2 * (0.92 + pulse * 0.1)) * tierFootprint;
       const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, bloomR);
       if (contested) {
         bg.addColorStop(0, `rgba(255, 240, 200, ${0.2 + pulse * 0.12})`);
@@ -8941,6 +9545,9 @@ function draw(time = performance.now(), drawOpts = {}) {
         bg.addColorStop(0.55, `rgba(80, 180, 255, ${0.08 + pulse * 0.05})`);
         bg.addColorStop(1, "rgba(10, 40, 80, 0)");
       }
+      if (farmLvl >= 3 && !contested) {
+        bg.addColorStop(0.2, `rgba(255, 210, 120, ${0.06 + pulse * 0.05})`);
+      }
       ctx.fillStyle = bg;
       ctx.beginPath();
       ctx.arc(cx, cy, bloomR, 0, Math.PI * 2);
@@ -8952,7 +9559,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         : owner
           ? `rgba(${tr},${tg},${tb},${0.28 + pulse * 0.22})`
           : `rgba(160, 230, 255, ${0.26 + pulse * 0.2})`;
-      ctx.lineWidth = Math.max(1.2, cell * 0.085);
+      ctx.lineWidth = Math.max(1.2, cell * (0.085 + (farmLvl - 1) * 0.035));
       ctx.setLineDash([Math.max(4, cell * 0.42), Math.max(3, cell * 0.28)]);
       ctx.lineDashOffset = -(time * 0.035 + fi * 7);
       ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1);
@@ -9213,7 +9820,8 @@ function draw(time = performance.now(), drawOpts = {}) {
     const aft = Date.now();
     if (aft < seismicAftermathUntilMs) {
       const fade = Math.min(1, (seismicAftermathUntilMs - aft) / 20_000);
-      const dust = 0.06 * fade + 0.04 * fade * Math.sin(time * 0.01);
+      const dust =
+        BATTLE_EVENT_MAP_ZONE_INTENSITY * (0.06 * fade + 0.04 * fade * Math.sin(time * 0.01));
       ctx.fillStyle = `rgba(180, 150, 120, ${dust})`;
       ctx.fillRect(0, 0, w, h);
     }
@@ -9405,6 +10013,8 @@ function draw(time = performance.now(), drawOpts = {}) {
       const fy1 = f.y0 + f.h - 1;
       if (fx1 < x0 || f.x0 > x1 || fy1 < y0 || f.y0 > y1) continue;
       const { owner, contested } = qFarmCtrl(f);
+      const lvl = normalizeQuantumFarmLevel(f.level);
+      const tierBoost = lvl === 1 ? 1 : lvl === 2 ? 1.22 : 1.52;
       const sx0 = offsetX + f.x0 * cell;
       const sy0 = offsetY + f.y0 * cell;
       const sw = f.w * cell;
@@ -9413,24 +10023,36 @@ function draw(time = performance.now(), drawOpts = {}) {
       const cy = sy0 + sh * 0.5;
       const pulse = 0.5 + 0.5 * Math.sin(time * 0.0038 + fi * 0.61);
       const pulse2 = 0.5 + 0.5 * Math.sin(time * 0.0055 + fi * 0.31);
-      const pad = cell * 0.065;
+      const pulseL3 = lvl >= 3 ? 0.5 + 0.5 * Math.sin(time * 0.0024 + fi * 0.41) : 0;
+      const pad = cell * (0.056 + (lvl - 1) * 0.03);
       const teamHex = owner ? teamColor(owner) : null;
-      const rgb = teamHex ? hexToRgb(teamHex) : { r: 120, g: 210, b: 255 };
+      const rgb = teamHex
+        ? hexToRgb(teamHex)
+        : lvl === 1
+          ? { r: 92, g: 188, b: 245 }
+          : lvl === 2
+            ? { r: 118, g: 208, b: 255 }
+            : { r: 150, g: 225, b: 255 };
       const tr = rgb.r;
       const tg = rgb.g;
       const tb = rgb.b;
       const mine = myT && owner === myT;
-      for (let ring = 0; ring < 3; ring++) {
+      const ringCount = lvl === 1 ? 3 : lvl === 2 ? 5 : 7;
+      const ringAlphaMul = lvl === 1 ? 0.82 : lvl === 2 ? 1 : 1.14;
+      for (let ring = 0; ring < ringCount; ring++) {
         const phase = (time * 0.0019 + fi * 0.31 + ring * 0.21) % 1;
-        const rad = Math.min(sw, sh) * (0.52 + ring * 0.28 + phase * 0.22);
-        const a = (0.07 + 0.14 * (1 - phase)) * (contested ? 1.25 : 1);
+        const rad = Math.min(sw, sh) * (0.52 + ring * 0.28 + phase * 0.22) * tierBoost;
+        const a =
+          (0.07 + 0.14 * (1 - phase)) * (contested ? 1.25 : 1) * ringAlphaMul * (lvl >= 3 ? 1 + pulseL3 * 0.08 : 1);
         ctx.save();
         ctx.strokeStyle = contested
           ? `rgba(255, 160, 90, ${a})`
           : owner
             ? `rgba(${tr},${tg},${tb},${a * 0.95})`
-            : `rgba(120, 210, 255, ${a})`;
-        ctx.lineWidth = Math.max(1, cell * (0.05 + ring * 0.018));
+            : lvl >= 2
+              ? `rgba(${Math.min(255, tr + 15)},${tg},${tb},${a})`
+              : `rgba(92, 188, 245, ${a})`;
+        ctx.lineWidth = Math.max(1, cell * (0.048 + ring * 0.02 + (lvl - 1) * 0.012));
         ctx.beginPath();
         ctx.arc(cx, cy, rad, 0, Math.PI * 2);
         ctx.stroke();
@@ -9442,18 +10064,18 @@ function draw(time = performance.now(), drawOpts = {}) {
         : owner
           ? `rgba(${tr},${tg},${tb},${0.3 + pulse * 0.35})`
           : `rgba(190, 240, 255, ${0.28 + pulse * 0.3})`;
-      ctx.lineWidth = Math.max(1.5, cell * 0.07);
+      ctx.lineWidth = Math.max(1.5, cell * (0.07 + (lvl - 1) * 0.028));
       ctx.setLineDash([cell * 0.5, cell * 0.35]);
       ctx.lineDashOffset = -(time * 0.055 + fi * 11);
       ctx.beginPath();
-      ctx.arc(cx, cy, Math.min(sw, sh) * 0.62, 0, Math.PI * 2);
+      ctx.arc(cx, cy, Math.min(sw, sh) * (0.6 + (lvl - 1) * 0.02), 0, Math.PI * 2);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.restore();
       ctx.save();
       if (mine) {
         ctx.shadowColor = `rgba(${tr},${tg},${tb},0.85)`;
-        ctx.shadowBlur = Math.min(28, cell * 0.95);
+        ctx.shadowBlur = Math.min(36, cell * (0.75 + lvl * 0.28));
       }
       ctx.fillStyle = contested
         ? `rgba(52, 36, 48, ${0.48 + pulse2 * 0.12})`
@@ -9468,9 +10090,37 @@ function draw(time = performance.now(), drawOpts = {}) {
       } else {
         ctx.strokeStyle = `rgba(190, 240, 255, ${0.48 + pulse * 0.34})`;
       }
-      ctx.lineWidth = Math.max(2.2, cell * 0.13);
+      ctx.lineWidth = Math.max(2.2, cell * (0.12 + (lvl - 1) * 0.045));
       ctx.strokeRect(sx0 + pad * 0.65, sy0 + pad * 0.65, sw - pad * 1.3, sh - pad * 1.3);
-      const cr = Math.max(2.8, Math.min(sw, sh) * 0.21);
+      if (lvl === 2) {
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 200, 100, ${0.28 + pulse * 0.22})`;
+        ctx.lineWidth = Math.max(1, cell * 0.055);
+        ctx.setLineDash([cell * 0.22, cell * 0.18]);
+        ctx.lineDashOffset = -(time * 0.07 + fi * 3);
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(sw, sh) * 0.44, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      } else if (lvl >= 3) {
+        ctx.save();
+        ctx.strokeStyle = `rgba(255, 245, 200, ${0.32 + pulse * 0.25})`;
+        ctx.lineWidth = Math.max(1.2, cell * 0.065);
+        ctx.setLineDash([cell * 0.2, cell * 0.14]);
+        ctx.lineDashOffset = -(time * 0.095 + fi * 3);
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(sw, sh) * 0.46, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = `rgba(120, 255, 255, ${0.18 + pulseL3 * 0.2})`;
+        ctx.lineWidth = Math.max(1, cell * 0.04);
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(sw, sh) * 0.36, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      const cr = Math.max(2.8, Math.min(sw, sh) * 0.21 * tierBoost);
       const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, cr * 2.55);
       if (contested) {
         const wob = 0.5 + 0.5 * Math.sin(time * 0.021);
@@ -9483,7 +10133,10 @@ function draw(time = performance.now(), drawOpts = {}) {
         grd.addColorStop(1, "rgba(25, 45, 95, 0)");
       } else {
         grd.addColorStop(0, "rgba(255, 255, 255, 0.96)");
-        grd.addColorStop(0.4, "rgba(120, 220, 255, 0.58)");
+        grd.addColorStop(
+          0.4,
+          lvl >= 3 ? "rgba(160, 235, 255, 0.62)" : lvl === 2 ? "rgba(130, 215, 255, 0.58)" : "rgba(110, 200, 250, 0.52)"
+        );
         grd.addColorStop(1, "rgba(20, 70, 120, 0)");
       }
       ctx.fillStyle = grd;
@@ -9496,20 +10149,42 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.beginPath();
       ctx.arc(cx, cy, cr * 0.42, 0, Math.PI * 2);
       ctx.fill();
-      const nRay = 9;
+      const nRay = lvl === 1 ? 9 : lvl === 2 ? 14 : 18;
+      const rayAlpha = lvl === 1 ? 0.85 : lvl === 2 ? 1 : 1.12;
       for (let ri = 0; ri < nRay; ri++) {
         const ang = (ri / nRay) * Math.PI * 2 + time * 0.0014 + fi * 0.17;
-        const len = Math.min(sw, sh) * (0.48 + pulse * 0.14);
+        const len = Math.min(sw, sh) * (0.46 + pulse * 0.16 + (lvl - 1) * 0.04) * tierBoost;
+        const ra = rayAlpha;
         ctx.strokeStyle = contested
-          ? `rgba(255, 230, 150, ${0.16 + pulse2 * 0.26})`
+          ? `rgba(255, 230, 150, ${(0.16 + pulse2 * 0.26) * ra})`
           : owner
-            ? `rgba(${tr},${tg},${tb},${0.13 + pulse * 0.24})`
-            : `rgba(160, 230, 255, ${0.11 + pulse * 0.2})`;
-        ctx.lineWidth = Math.max(1.2, cell * 0.065);
+            ? `rgba(${tr},${tg},${tb},${(0.13 + pulse * 0.24) * ra})`
+            : lvl >= 3
+              ? `rgba(200, 245, 255, ${(0.14 + pulse * 0.22) * ra})`
+              : `rgba(150, 220, 255, ${(0.1 + pulse * 0.18) * ra})`;
+        ctx.lineWidth = Math.max(1.2, cell * (0.062 + (lvl - 1) * 0.022));
         ctx.beginPath();
         ctx.moveTo(cx + Math.cos(ang) * cr * 0.45, cy + Math.sin(ang) * cr * 0.45);
         ctx.lineTo(cx + Math.cos(ang) * len, cy + Math.sin(ang) * len);
         ctx.stroke();
+      }
+      if (lvl >= 3) {
+        ctx.save();
+        const beaconR = Math.min(sw, sh) * (0.72 + pulseL3 * 0.06);
+        ctx.strokeStyle = `rgba(255, 215, 130, ${0.28 + pulseL3 * 0.32})`;
+        ctx.lineWidth = Math.max(1.4, cell * 0.09);
+        ctx.setLineDash([cell * 0.45, cell * 0.2]);
+        ctx.lineDashOffset = -(time * 0.031 + fi * 5);
+        ctx.beginPath();
+        ctx.arc(cx, cy, beaconR, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.strokeStyle = `rgba(255, 120, 200, ${0.12 + pulseL3 * 0.14})`;
+        ctx.lineWidth = Math.max(1, cell * 0.055);
+        ctx.beginPath();
+        ctx.arc(cx, cy, beaconR * 1.08, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
       }
       ctx.restore();
     }
@@ -9519,15 +10194,28 @@ function draw(time = performance.now(), drawOpts = {}) {
   if (!lite && online && teamsMeta && cell >= 1.5) {
     const shNowF = Date.now();
     /** Главная база и FOB — одна логика HP (`flagCaptureClientState` по clientKey). */
-    const drawClientFlagBaseHpUi = (fgx, fgy, tidFlag, stateKey, teamHex, compact, teamDisplayName) => {
+    const drawClientFlagBaseHpUi = (fgx, fgy, tidFlag, stateKey, teamHex, compact, teamDisplayName, teamEmoji) => {
       const maxHpFallback = compact ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
       const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
       if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) return;
       const raw = flagCaptureClientState.get(stateKey);
-      const effHpFloat = computeClientFlagDisplayEffHp(raw, shNowF, maxHpFallback);
+      let rawForEff = raw;
+      if (
+        raw &&
+        !compact &&
+        maxHpFallback === FLAG_MAIN_BASE_MAX_HP &&
+        (raw.maxHp | 0) === FLAG_BASE_MAX_HP
+      ) {
+        rawForEff = { ...raw, maxHp: FLAG_MAIN_BASE_MAX_HP };
+      }
+      const effHpFloat = computeClientFlagDisplayEffHp(rawForEff, shNowF, maxHpFallback);
       let maxH = maxHpFallback;
-      if (raw && typeof raw.maxHp === "number" && Number.isFinite(raw.maxHp) && raw.maxHp > 0) {
-        maxH = raw.maxHp | 0;
+      if (rawForEff && typeof rawForEff.maxHp === "number" && Number.isFinite(rawForEff.maxHp) && rawForEff.maxHp > 0) {
+        maxH = rawForEff.maxHp | 0;
+      }
+      /* Главная база — 50 HP: починить устаревшее состояние, если в кэше ошибочно 20. */
+      if (!compact && maxHpFallback === FLAG_MAIN_BASE_MAX_HP && maxH === FLAG_BASE_MAX_HP) {
+        maxH = FLAG_MAIN_BASE_MAX_HP;
       }
       const displayHp = Math.min(maxH, Math.max(0, Math.floor(effHpFloat + 1e-9)));
       const dmgTaken = maxH - displayHp;
@@ -9643,27 +10331,37 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.strokeRect(bx + 0.5, by + 0.5, barW - 1, barH - 1);
       if (cell >= 2.8) {
         ctx.save();
-        const fs = Math.max(8, Math.min(15, cell * 0.4));
+        const em =
+          teamEmoji != null && String(teamEmoji).trim() !== "" ? `${String(teamEmoji).trim()} ` : "";
+        const nameRaw = String(teamDisplayName || "").trim();
+        const nameMax = compact ? 16 : 22;
+        const nameLbl = nameRaw.slice(0, nameMax);
+        const hpPart = `${displayHp} / ${maxH} HP`;
+        let hpLabel;
+        if (displayHp <= 0) {
+          hpLabel = "FINISH!";
+        } else if (nameLbl) {
+          hpLabel = `${em}${nameLbl} — ${hpPart}`;
+        } else {
+          hpLabel = hpPart;
+        }
+        let fs = Math.max(8, Math.min(15, cell * (compact ? 0.34 : 0.4)));
         ctx.font = `700 ${fs}px system-ui,sans-serif`;
+        if (ctx.measureText(hpLabel).width > cw * 4.2) {
+          fs = Math.max(7, fs * 0.88);
+          ctx.font = `700 ${fs}px system-ui,sans-serif`;
+        }
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
         const tx = px + cw / 2;
         const ty = by - 3;
-        const nameLbl = String(teamDisplayName || "")
-          .trim()
-          .slice(0, 28);
-        const hpLabel = compact
-          ? displayHp <= 0
-            ? "FINISH!"
-            : `${displayHp} / ${maxH} HP`
-          : displayHp <= 0
-            ? "FINISH!"
-            : nameLbl || "—";
-        ctx.lineWidth = Math.max(2, fs * 0.18);
-        ctx.strokeStyle = "rgba(0,0,0,0.8)";
-        ctx.strokeText(hpLabel, tx, ty);
+        ctx.shadowColor = "rgba(0,0,0,0.92)";
+        ctx.shadowBlur = Math.max(2, fs * 0.22);
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
         ctx.fillStyle = dangerCrit ? "#ffcccc" : "rgba(255,252,240,0.96)";
         ctx.fillText(hpLabel, tx, ty);
+        ctx.shadowBlur = 0;
         ctx.restore();
       }
     };
@@ -9679,7 +10377,8 @@ function draw(time = performance.now(), drawOpts = {}) {
         clientMainFlagKey(tidFlag),
         t.color || teamColor(t.id),
         false,
-        typeof t.name === "string" ? t.name : ""
+        typeof t.name === "string" ? t.name : "",
+        t.emoji
       );
     }
     for (const tm of teamsMeta) {
@@ -9718,7 +10417,8 @@ function draw(time = performance.now(), drawOpts = {}) {
           clientMilitaryFlagKey(tidM, gx00, gy00),
           teamHex,
           true,
-          typeof tm.name === "string" ? tm.name : ""
+          typeof tm.name === "string" ? tm.name : "",
+          tm.emoji
         );
       }
     }
@@ -9739,16 +10439,20 @@ function draw(time = performance.now(), drawOpts = {}) {
       const fy1 = f.y0 + f.h - 1;
       if (fx1 < x0 || f.x0 > x1 || fy1 < y0 || f.y0 > y1) continue;
       const { owner, contested } = qFarmCtrl(f);
+      const farmLvlC = normalizeQuantumFarmLevel(f.level);
       const sx0 = offsetX + f.x0 * cell;
       const sy0 = offsetY + f.y0 * cell;
       const sw = f.w * cell;
       const sh = f.h * cell;
       const cx = sx0 + sw * 0.5;
       const pulse = 0.5 + 0.5 * Math.sin(time * 0.0048 + fi * 0.52);
-      const fs = Math.max(12, Math.min(24, cell * 0.56));
-      const ty = sy0 - cell * 0.1 - pulse * cell * 0.04;
+      const pulseL3c = farmLvlC >= 3 ? 0.5 + 0.5 * Math.sin(time * 0.0035 + fi * 0.4) : 0;
+      const fsMul = farmLvlC === 1 ? 1 : farmLvlC === 2 ? 1.06 : 1.14;
+      const fs = Math.max(12, Math.min(26, cell * 0.56 * fsMul));
+      const ty = sy0 - cell * (0.1 + (farmLvlC - 1) * 0.03) - pulse * cell * 0.04;
       const teamHexC = owner ? teamColor(owner) : null;
       const rgbC = teamHexC ? hexToRgb(teamHexC) : { r: 186, g: 240, b: 255 };
+      const roman = farmLvlC === 1 ? "I" : farmLvlC === 2 ? "II" : "III";
       ctx.save();
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
@@ -9758,17 +10462,25 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.strokeText("⚛", cx, ty);
       ctx.fillStyle = contested
         ? `rgba(255, ${180 + (pulse * 75) | 0}, 90, 0.98)`
-        : `rgba(${rgbC.r},${rgbC.g},${rgbC.b},0.96)`;
+        : farmLvlC >= 3 && !contested
+          ? `rgba(${Math.min(255, rgbC.r + 25)},${Math.min(255, rgbC.g + 35)},255,${0.92 + pulseL3c * 0.06})`
+          : `rgba(${rgbC.r},${rgbC.g},${rgbC.b},0.96)`;
       ctx.fillText("⚛", cx, ty);
       if (cell >= 3.2) {
         const subFs = Math.max(7, fs * 0.36);
         ctx.font = `800 ${subFs}px system-ui,Segoe UI,sans-serif`;
         const subY = ty + subFs * 1.05;
-        const sub = contested ? "СПОР" : "ЦЕНТР";
+        const sub = contested ? "СПОР" : `УЗЕЛ ${roman}`;
         ctx.lineWidth = Math.max(1, subFs * 0.12);
         ctx.strokeStyle = "rgba(0,0,0,0.78)";
         ctx.strokeText(sub, cx, subY);
-        ctx.fillStyle = contested ? "rgba(255,220,180,0.92)" : "rgba(200,235,255,0.88)";
+        ctx.fillStyle = contested
+          ? "rgba(255,220,180,0.92)"
+          : farmLvlC === 2
+            ? "rgba(255, 210, 140, 0.95)"
+            : farmLvlC >= 3
+              ? `rgba(255, 245, 200, ${0.92 + pulseL3c * 0.06})`
+              : "rgba(190, 230, 255, 0.9)";
         ctx.fillText(sub, cx, subY);
       }
       ctx.restore();
@@ -9879,23 +10591,7 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.closePath();
         ctx.fill();
       }
-      const cx = px0 + pw / 2;
-      const cy = py0 + ph / 2;
-      const label = `${tm.emoji ? `${tm.emoji} ` : ""}${tm.name || "База"}`.trim();
-      const fs = Math.min(15, Math.max(9, cell * 0.42));
-      ctx.font = `600 ${fs}px system-ui, -apple-system, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const textW = Math.min(pw - 8, ctx.measureText(label).width + 10);
-      const textH = Math.min(ph * 0.55, Math.max(16, fs + 8));
-      ctx.fillStyle = "rgba(4, 10, 28, 0.78)";
-      ctx.fillRect(cx - textW / 2, cy - textH / 2, textW, textH);
-      ctx.strokeStyle = `${tm.color || "#ffffff"}aa`;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(cx - textW / 2 + 0.5, cy - textH / 2 + 0.5, textW - 1, textH - 1);
-      ctx.fillStyle = "#f2f6ff";
-      const short = label.length > 36 ? `${label.slice(0, 34)}…` : label;
-      ctx.fillText(short, cx, cy);
+      /* Имя и HP базы — только у флага (drawClientFlagBaseHpUi), без второй подписи по центру 6×6. */
     }
   }
 
@@ -9952,6 +10648,14 @@ function placePixel(gx, gy) {
     return;
   }
 
+  if (online && !onEnemyFlag && !pendingMapAction) {
+    const qFarmCell = findQuantumFarmCoveringCell(gx, gy);
+    if (qFarmCell) {
+      openQuantumFarmPanel(qFarmCell);
+      return;
+    }
+  }
+
   if (online && pendingMapAction && !onEnemyFlag) {
     if (pendingMapAction.type === "zoneCapture") {
       lastZoneGx = gx - 1;
@@ -10004,6 +10708,32 @@ function placePixel(gx, gy) {
       setPendingHint();
       return;
     }
+    if (pendingMapAction.type === "greatWall") {
+      if ((clientPixelTeamIdAt(gx, gy) | 0) !== (myTeamId | 0)) {
+        notifyPurchaseError("wall_not_yours");
+        return;
+      }
+      if (clientPixelWallHpAt(gx, gy) > 0) {
+        notifyPurchaseError("wall_already");
+        return;
+      }
+      if (clientCellIsAnyFlagAnchor(gx, gy)) {
+        notifyPurchaseError("wall_flag_cell");
+        return;
+      }
+      const pkGw = `${gx},${gy}`;
+      optimisticGreatWallPending = { key: pkGw, prev: snapshotPixelCell(pkGw) };
+      const cur = pixels.get(pkGw);
+      const sh0 = typeof cur === "object" && cur ? Number(cur.shieldedUntil) || 0 : 0;
+      pixels.set(pkGw, { teamId: myTeamId | 0, shieldedUntil: sh0, wallHp: GREAT_WALL_MAX_HP });
+      scheduleDraw({ dirty: { gx0: gx, gy0: gy, gx1: gx, gy1: gy } });
+      wsSendJson({ type: "purchaseGreatWall", x: gx, y: gy });
+      pendingMapAction = null;
+      setPendingHint();
+      playPurchaseSuccess();
+      updateToolbarHud();
+      return;
+    }
     if (pendingMapAction.type === "militaryBase") {
       const v = validateClientMilitaryBasePreview(gx, gy);
       if (!v.ok) {
@@ -10045,6 +10775,14 @@ function placePixel(gx, gy) {
     if (!cellTouchesTeamTerritoryClient(gx, gy, myTeamId, computeClientBaseConnectedPixelKeys(myTeamId | 0))) {
       notifyReject(onEnemyFlag ? "enemy_base_not_adjacent" : "not_adjacent");
       lastPlaceAt = 0;
+      return;
+    }
+
+    const wHpEnemy = clientPixelWallHpAt(gx, gy);
+    const oTid = clientPixelTeamIdAt(gx, gy);
+    if (!onEnemyFlag && wHpEnemy > 0 && oTid != null && (oTid | 0) !== (myTeamId | 0)) {
+      sendPixelOnline(gx, gy);
+      updateToolbarHud();
       return;
     }
 

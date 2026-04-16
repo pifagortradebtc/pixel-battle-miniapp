@@ -190,6 +190,7 @@ function battleLayersCoverRoundEvent(layers, re) {
  */
 function appendRoundEventHudFallback(chips, ge) {
   if (chips.length >= 6) return;
+  if (chips.some((c) => c.kind === "alt_season_revenge")) return;
   const re = lastRoundEventStartMsg;
   if (!re || typeof re.untilMs !== "number" || re.untilMs <= Date.now()) return;
   const rawLayers = ge?.battleEvents?.layers;
@@ -621,6 +622,26 @@ function updateHudTimersFromDom() {
  * }} opts
  * @returns {boolean} hideLegacyBattleBanner (всегда false)
  */
+
+/**
+ * До какого wall-time (ms) действует «Мстим за Альт Сезон».
+ * globalEvent иногда приходит без altSeasonRevengeUntilMs; тогда HUD берёт until из roundEvent (fallback).
+ * Кулдаун пикселя должен использовать тот же источник, что и HUD.
+ * @param {object | null | undefined} ge
+ */
+export function getEffectiveAltSeasonRevengeUntilMs(ge) {
+  const g = ge || null;
+  let u = typeof g?.altSeasonRevengeUntilMs === "number" ? g.altSeasonRevengeUntilMs | 0 : 0;
+  if (u <= 0 && typeof g?.until === "number") {
+    if (String(g.kind || "") === "alt_season_revenge") u = g.until | 0;
+  }
+  const re = lastRoundEventStartMsg;
+  if (u <= 0 && re && String(re.eventType || "") === "alt_season_revenge" && typeof re.untilMs === "number") {
+    u = re.untilMs | 0;
+  }
+  return u;
+}
+
 export function syncPremiumBattlePresentation(opts) {
   const { ge, seismicPreview, online, spectator, gameFinished, roundEndsAtMs, leaderboardHint } = opts;
   lastStripRoundEndMs = typeof roundEndsAtMs === "number" ? roundEndsAtMs : null;
@@ -651,10 +672,9 @@ export function syncPremiumBattlePresentation(opts) {
   /** @type {object[]} */
   const chips = [];
 
+  const arUntilRaw = getEffectiveAltSeasonRevengeUntilMs(ge);
   const arUntil =
-    ge && typeof ge.altSeasonRevengeUntilMs === "number" && ge.altSeasonRevengeUntilMs > Date.now()
-      ? ge.altSeasonRevengeUntilMs
-      : 0;
+    typeof arUntilRaw === "number" && arUntilRaw > Date.now() ? arUntilRaw : 0;
   if (arUntil > 0) {
     chips.push({
       kind: "alt_season_revenge",

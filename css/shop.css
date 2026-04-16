@@ -1349,3 +1349,78 @@
   color: var(--shop-muted);
   margin-top: auto;
 }
+
+.game-shop__fair-play-notice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: var(--shop-radius);
+  background: linear-gradient(
+    145deg,
+    rgba(34, 197, 94, 0.1) 0%,
+    rgba(59, 130, 246, 0.08) 50%,
+    rgba(12, 14, 28, 0.92) 100%
+  );
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.game-shop__fair-play-notice__icon {
+  flex-shrink: 0;
+  font-size: 1.35rem;
+  line-height: 1.2;
+  filter: drop-shadow(0 0 8px rgba(125, 211, 252, 0.25));
+}
+
+.game-shop__fair-play-notice__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.game-shop__fair-play-notice__en {
+  margin: 0 0 8px;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.92);
+  letter-spacing: 0.01em;
+}
+
+.game-shop__fair-play-notice__ru {
+  margin: 0;
+  font-size: 0.66rem;
+  line-height: 1.45;
+  font-weight: 600;
+  color: rgba(186, 230, 253, 0.88);
+}
+
+.game-shop--usdt-deposits-off .shop-topup-pack:disabled,
+.game-shop--usdt-deposits-off .shop-topup-pack.shop-topup-pack--usdt-off {
+  opacity: 0.52;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+  transform: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+.game-shop--usdt-deposits-off .shop-topup-pack:disabled:hover,
+.game-shop--usdt-deposits-off .shop-topup-pack.shop-topup-pack--usdt-off:hover {
+  transform: none;
+  border-color: rgba(251, 191, 36, 0.22);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+.game-shop--usdt-deposits-off .shop-topup-pack:disabled:active,
+.game-shop--usdt-deposits-off .shop-topup-pack.shop-topup-pack--usdt-off:active {
+  transform: none;
+}
+
+.game-shop__deposit-btn:disabled,
+.game-shop__deposit-btn.game-shop__deposit-btn--usdt-off {
+  opacity: 0.52;
+  cursor: not-allowed;
+  filter: grayscale(0.35);
+  pointer-events: none;
+}
