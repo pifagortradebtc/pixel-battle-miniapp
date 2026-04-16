@@ -5600,8 +5600,7 @@ function parseTeamquantTelegramCommand(normRaw) {
  */
 function parseAllquantsTelegramCommand(restartNorm) {
   const s = String(restartNorm || "").trim().replace(/\s+/g, " ");
-  if (s === "allquants") return { limit: ALLQUANTS_DEFAULT_TOP, minQuants: 0, showAll: false };
-  if (s === "allquants all") return { limit: 0, minQuants: 0, showAll: true };
+  if (s === "allquants" || s === "allquants all") return { limit: 0, minQuants: 0, showAll: true };
   const topM = /^allquants top (\d{1,5})$/.exec(s);
   if (topM) {
     const n = parseInt(topM[1], 10);
@@ -5613,9 +5612,9 @@ function parseAllquantsTelegramCommand(restartNorm) {
     const n = parseInt(minM[1], 10);
     if (!Number.isFinite(n) || n < 0) return null;
     return {
-      limit: ALLQUANTS_DEFAULT_TOP,
+      limit: 0,
       minQuants: Math.min(ADMIN_QUANT_SINGLE_OP_MAX, n),
-      showAll: false,
+      showAll: true,
     };
   }
   return null;
@@ -5694,10 +5693,10 @@ async function applyAdminAllquantsTelegramCommand(chatId, adminTelegramUid, pars
     return `${idx + 1}) ${idStr} — ${unStr} — ${qStr}`;
   });
   let header;
-  if (parsed.showAll) {
-    header = `allquants all: ${totalPlayers} записей, кванты ↓.`;
-  } else if (parsed.minQuants > 0) {
-    header = `Показано ${lines.length} из ${totalMatching} с ≥${parsed.minQuants} quants. Всего в экономике: ${totalPlayers}.`;
+  if (parsed.showAll && parsed.minQuants > 0) {
+    header = `allquants: все ${totalMatching} игроков с ≥${parsed.minQuants} quants (в экономике ${totalPlayers}). Кванты ↓.`;
+  } else if (parsed.showAll) {
+    header = `allquants: все ${totalPlayers} игроков, кванты ↓.`;
   } else {
     header = `Топ ${lines.length} из ${totalPlayers} игроков (кванты ↓).`;
   }
