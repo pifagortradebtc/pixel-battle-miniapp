@@ -1446,6 +1446,8 @@ body {
   border-radius: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     transform 0.18s cubic-bezier(0.34, 1.45, 0.64, 1),
     box-shadow 0.2s ease,
@@ -1496,6 +1498,11 @@ body {
 
 .overlay--game-onboarding .overlay__actions .overlay__btn--secondary:active {
   transform: scale(0.98);
+}
+
+/* Не ломаем сетку карточки: дети формы ведут себя как прямые дети .overlay__card */
+.create-team-form {
+  display: contents;
 }
 
 .create-team__inline-error {

@@ -488,6 +488,8 @@ let regionRgb = null;
 let selectedColor = 5;
 /** Откуда открыли форму создания команды — «Назад» ведёт на welcome или список команд */
 let createTeamFromWelcome = false;
+/** После touchend на «Создать» игнорируем синтетический submit/click в течение короткого окна. */
+let createTeamIgnoreSubmitUntilMs = 0;
 /** Индекс в TEAM_CREATE_PALETTE при создании команды */
 let createTeamColorIdx = 0;
 let scale = 1;
@@ -3697,6 +3699,22 @@ function setCreateTeamInlineError(text) {
   }
 }
 
+/** Подсказки в форме «Создать команду» при ответе сервера `playRejected`. */
+const CREATE_TEAM_PLAY_REJECT_HINTS = {
+  spectator:
+    "Сервер отклонил создание команды: нет допуска к этому этапу или включён режим наблюдателя. Обновите Mini App (меню ⋯) или откройте ссылку из бота после прошлого раунда — нужен токен победителя.",
+  not_eligible:
+    "В списке допущенных к этому этапу вас нет (обычно только участники победившей команды прошлого раунда). Играйте с той же учётной записью Telegram, что и раньше.",
+  need_telegram: "Откройте игру из Telegram Mini App (нужна подпись initData).",
+};
+
+function setCreateTeamInlineErrorIfOverlayOpenForPlayReject(reason) {
+  if (!createTeamOverlay || createTeamOverlay.hidden) return;
+  const r = String(reason || "").trim();
+  const line = CREATE_TEAM_PLAY_REJECT_HINTS[r];
+  if (line) setCreateTeamInlineError(line);
+}
+
 function openCreateTeamOverlay(fromWelcome) {
   hideRoundEndedOverlay();
   createTeamFromWelcome = !!fromWelcome;
@@ -3726,7 +3744,7 @@ function closeCreateTeamOverlay() {
   if (createTeamOverlay) createTeamOverlay.hidden = true;
 }
 
-function submitCreateTeam() {
+function submitCreateTeamCommitted() {
   if (sessionRestorePending) {
     const m = "Подождите секунду — восстанавливается сессия.";
     setCreateTeamInlineError(m);
@@ -3784,6 +3802,16 @@ function submitCreateTeam() {
     if (typeof tg?.showAlert === "function") tg.showAlert(m);
     return;
   }
+  if (spectatorMode && !gameFinishedMeta) {
+    const m =
+      roundIndexMeta > 0
+        ? "Клиент в режиме наблюдателя или допуск к этапу ещё не подтверждён. Подождите секунду, обновите Mini App или откройте ссылку из бота — затем снова «Создать команду»."
+        : "Клиент в режиме наблюдателя — создание команды сейчас недоступно. Обновите страницу или откройте игру из Telegram.";
+    setCreateTeamInlineError(m);
+    showPlacementFeedback(m, "warn", { telegramAlert: false });
+    tryClaimEligibility();
+    return;
+  }
   setCreateTeamInlineError("");
   ws.send(
     JSON.stringify({
@@ -3794,6 +3822,10 @@ function submitCreateTeam() {
       playerKey: getOrCreatePlayerKey(),
     })
   );
+}
+
+function submitCreateTeam() {
+  submitCreateTeamCommitted();
 }
 
 function showWelcomeOverlay() {
@@ -3976,7 +4008,22 @@ function setupCreateTeamUi() {
       teamOverlay.hidden = false;
     }
   });
-  btnCreateTeamSubmit?.addEventListener("click", submitCreateTeam);
+  const createTeamForm = document.getElementById("create-team-form");
+  createTeamForm?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (Date.now() < createTeamIgnoreSubmitUntilMs) return;
+    submitCreateTeamCommitted();
+  });
+  /* Telegram WebView / iOS: первый тап по кнопке иногда только снимает фокус с input — touchend + preventDefault даёт надёжный submit */
+  btnCreateTeamSubmit?.addEventListener(
+    "touchend",
+    (e) => {
+      e.preventDefault();
+      createTeamIgnoreSubmitUntilMs = Date.now() + 450;
+      submitCreateTeamCommitted();
+    },
+    { passive: false }
+  );
   createTeamOverlay?.addEventListener("click", (e) => {
     if (e.target === createTeamOverlay) closeCreateTeamOverlay();
   });
@@ -7477,6 +7524,9 @@ function connectWs() {
         updateRoundTimer();
         syncTournamentWarmupOverlay();
         notifyReject("paused");
+        if (createTeamOverlay && !createTeamOverlay.hidden) {
+          setCreateTeamInlineError("Игра на паузе (администратор). Создание команды временно недоступно.");
+        }
         setFooterMode();
         return;
       }
@@ -7486,6 +7536,7 @@ function connectWs() {
           ? msg.reason
           : msg.reason || ""
       );
+      setCreateTeamInlineErrorIfOverlayOpenForPlayReject(msg.reason);
       setFooterMode();
       return;
     }
@@ -8322,14 +8373,15 @@ function connectWs() {
         teamOverlay.hidden = true;
         openCreateTeamOverlay(true);
       } else if (openTeamList) {
+        closeCreateTeamOverlay();
         if (welcomeOverlay) welcomeOverlay.hidden = true;
         hideRoundEndedOverlay();
         teamOverlay.hidden = false;
       } else {
+        closeCreateTeamOverlay();
         showWelcomeOverlay();
         teamOverlay.hidden = true;
       }
-      closeCreateTeamOverlay();
       closeTeamSettings();
       hideReferralSplash();
       rebuildTeamList();
