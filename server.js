@@ -1963,11 +1963,6 @@ const teamFirstHitPeakAt = new Map();
  */
 const flagCaptureByDefender = new Map();
 /**
- * Если 20 с подряд нет ни одного пикселя владельца в 6×6 — передовая база снимается (напр. смыв бомбой).
- * При коллапсе изоляции FOB в кармане удаляется сразу — см. removeMilitaryOutpostsFullyInsideIsolationCellSet.
- */
-const MILITARY_OUTPOST_ABANDON_MS = 20_000;
-/**
  * HP флага передовой базы: ключ `${defenderId}:${x0}:${y0}` (левый верх 6×6).
  * @type {Map<string, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number, _flagRegenBroadcastPhase?: boolean, _lastRegenBroadcastAt?: number }>}
  */
@@ -2644,7 +2639,6 @@ function advanceTerritoryIsolationState() {
           const sy = Number(parts[1]);
           if (Number.isFinite(sx) && Number.isFinite(sy)) xyList.push([sx | 0, sy | 0]);
         }
-        /* FOB целиком в этом кармане — убрать сразу; иначе игрок ждал бы ещё MILITARY_OUTPOST_ABANDON_MS после обнуления клеток. */
         removeMilitaryOutpostsFullyInsideIsolationCellSet(m.teamId, m.cells);
         broadcast({
           type: "territoryIsolationCollapse",
@@ -4154,31 +4148,10 @@ function removeMilitaryOutpostAtIndexCore(dt, index, reason) {
 }
 
 /**
- * Передовая 6×6 полностью внутри нейтрализованного изолированного кармана — снять сразу при коллапсе.
- * @param {number} teamId
- * @param {Set<string>} cellSet ключи "x,y"
+ * Раньше: снять FOB при коллапсе изоляции. Плацдарм из магазина не должен исчезать из‑за таймера/кармана.
  */
-function removeMilitaryOutpostsFullyInsideIsolationCellSet(teamId, cellSet) {
-  const tid = teamId | 0;
-  if (tid <= 0 || !cellSet || cellSet.size < 1) return;
-  const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
-  if (!dt || dt.solo || dt.eliminated || !Array.isArray(dt.militaryOutposts) || !dt.militaryOutposts.length) return;
-  const S = TEAM_SPAWN_SIZE;
-  for (let i = dt.militaryOutposts.length - 1; i >= 0; i--) {
-    const o = dt.militaryOutposts[i];
-    if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
-    const x0 = o.x0 | 0;
-    const y0 = o.y0 | 0;
-    let allInPocket = true;
-    for (let yy = y0; yy < y0 + S && allInPocket; yy++) {
-      for (let xx = x0; xx < x0 + S && allInPocket; xx++) {
-        if (!cellSet.has(`${xx},${yy}`)) allInPocket = false;
-      }
-    }
-    if (allInPocket) {
-      removeMilitaryOutpostAtIndexCore(dt, i, "isolation_collapse");
-    }
-  }
+function removeMilitaryOutpostsFullyInsideIsolationCellSet(_teamId, _cellSet) {
+  /* no-op: военная база (плацдарм) самодостаточна, без автоснятия при изоляции */
 }
 
 function removeMilitaryOutpostAtIndex(dt, index, reason) {
@@ -4186,39 +4159,8 @@ function removeMilitaryOutpostAtIndex(dt, index, reason) {
   afterTerritoryMutation();
 }
 
-function scanMilitaryOutpostsVacancyAndExpire(now) {
-  if (gameFinished) return;
-  if (REDIS_URL && !isClusterLeader()) return;
-  for (const t of dynamicTeams) {
-    if (t.solo || t.eliminated) continue;
-    const tid = t.id | 0;
-    if (!Array.isArray(t.militaryOutposts)) continue;
-    for (let i = t.militaryOutposts.length - 1; i >= 0; i--) {
-      const o = t.militaryOutposts[i];
-      if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
-      const x0 = o.x0 | 0;
-      const y0 = o.y0 | 0;
-      let hasOwned = false;
-      for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE && !hasOwned; yy++) {
-        for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
-          const pv = pixels.get(`${xx},${yy}`);
-          if (pv != null && (pixelTeam(pv) | 0) === tid) {
-            hasOwned = true;
-            break;
-          }
-        }
-      }
-      if (hasOwned) {
-        if (o.vacantSinceMs != null) delete o.vacantSinceMs;
-        continue;
-      }
-      if (o.vacantSinceMs == null || !Number.isFinite(o.vacantSinceMs)) {
-        o.vacantSinceMs = now;
-      } else if (now - o.vacantSinceMs >= MILITARY_OUTPOST_ABANDON_MS) {
-        removeMilitaryOutpostAtIndex(t, i, "abandoned");
-      }
-    }
-  }
+function scanMilitaryOutpostsVacancyAndExpire(_now) {
+  /* no-op: плацдарм из магазина не снимается по таймеру «пустой 6×6» */
 }
 
 /** Захват передовой базы: снять узел с защитника, перекрасить 6×6 атакующему (команда защитника не выбывает). */
@@ -4510,7 +4452,7 @@ function ensureAllTeamSpawnsAfterLoad() {
   afterTerritoryMutation();
 }
 
-/** Раньше подтягивали пиксели 6×6 — теперь пустой плацдарм живёт до таймера {@link MILITARY_OUTPOST_ABANDON_MS} и снимается. */
+/** Зарезервировано под миграции; плацдарм не снимается таймером «пустой 6×6». */
 function ensureMilitaryOutpostPixelsAfterLoad() {}
 
 /** Подсчёт пикселей по teamId на суше (как в stats). */
@@ -4571,7 +4513,7 @@ function afterTerritoryMutation() {
     const st = buildStatsPayload();
     updateTiebreakFromStatsPayload(st);
     checkDuelWinByElimination(st);
-    scanMilitaryOutpostsVacancyAndExpire(Date.now());
+    scanMilitaryOutpostsVacancyAndExpire(Date.now()); /* no-op: плацдарм без автотаймера */
     schedulePixelsSnapshotSave();
   }
   /* Всегда: иначе при паузе / раннем return кэш «связь с базой» устаревает — нельзя ставить пиксели от передовой базы. */
