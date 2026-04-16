@@ -1498,6 +1498,22 @@ body {
   transform: scale(0.98);
 }
 
+.create-team__inline-error {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.55);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+}
+
+.create-team__inline-error[hidden] {
+  display: none !important;
+}
+
 .overlay--game-onboarding .team-create-btn {
   border: 1px dashed rgba(129, 140, 248, 0.55);
   background: linear-gradient(180deg, rgba(79, 70, 229, 0.2), rgba(30, 27, 75, 0.35));
@@ -2283,7 +2299,8 @@ a.overlay__btn {
 
 .event-banner-stack {
   position: fixed;
-  z-index: 50;
+  /* Выше .overlay онбординга (100) и магазина (120), иначе алерты не видны под модалками «Создать команду». */
+  z-index: 160;
   left: 0;
   right: 0;
   /* Под шапкой (Магазин, База…): плашки не перекрывают кнопки тулбара */

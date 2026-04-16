@@ -378,6 +378,7 @@ const btnOpenCreateTeam = document.getElementById("btn-open-create-team");
 const btnCreateTeamCancel = document.getElementById("create-team-cancel");
 const btnCreateTeamSubmit = document.getElementById("create-team-submit");
 const createTeamReferralHintEl = document.getElementById("create-team-referral-hint");
+const createTeamInlineErrorEl = document.getElementById("create-team-inline-error");
 const referralSplashOverlay = document.getElementById("referral-splash-overlay");
 const referralSplashText = document.getElementById("referral-splash-text");
 const btnReferralSplashCopy = document.getElementById("referral-splash-copy");
@@ -3679,9 +3680,27 @@ function syncCreateTeamReferralHintVisibility() {
   createTeamReferralHintEl.hidden = (roundIndexMeta | 0) !== 0;
 }
 
+function setCreateTeamInlineError(text) {
+  if (!createTeamInlineErrorEl) return;
+  const t = String(text || "").trim();
+  if (!t) {
+    createTeamInlineErrorEl.hidden = true;
+    createTeamInlineErrorEl.textContent = "";
+    return;
+  }
+  createTeamInlineErrorEl.textContent = t;
+  createTeamInlineErrorEl.hidden = false;
+  try {
+    createTeamInlineErrorEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  } catch {
+    /* ignore */
+  }
+}
+
 function openCreateTeamOverlay(fromWelcome) {
   hideRoundEndedOverlay();
   createTeamFromWelcome = !!fromWelcome;
+  setCreateTeamInlineError("");
   if (createTeamNameInput) createTeamNameInput.value = "";
   if (createTeamEmojiInput) createTeamEmojiInput.value = EMOJI_PRESETS[0] || "🔥";
   syncCreateEmojiPresetHighlight();
@@ -3692,55 +3711,80 @@ function openCreateTeamOverlay(fromWelcome) {
   buildCreateTeamColorPalette();
   syncCreateTeamReferralHintVisibility();
   if (createTeamOverlay) createTeamOverlay.hidden = false;
+  requestAnimationFrame(() => {
+    try {
+      createTeamNameInput?.focus();
+      createTeamNameInput?.scrollIntoView({ block: "center", behavior: "smooth" });
+    } catch {
+      /* ignore */
+    }
+  });
 }
 
 function closeCreateTeamOverlay() {
+  setCreateTeamInlineError("");
   if (createTeamOverlay) createTeamOverlay.hidden = true;
 }
 
 function submitCreateTeam() {
   if (sessionRestorePending) {
-    const tg = window.Telegram?.WebApp;
     const m = "Подождите секунду — восстанавливается сессия.";
+    setCreateTeamInlineError(m);
+    showPlacementFeedback(m, "warn", { telegramAlert: false });
+    const tg = window.Telegram?.WebApp;
     if (typeof tg?.showAlert === "function") tg.showAlert(m);
-    else alert(m);
     return;
   }
   const name = createTeamNameInput?.value.trim() ?? "";
   const emoji = createTeamEmojiInput?.value.trim() ?? "";
   if (!name || !emoji) {
+    const msg = !name
+      ? "Введите название команды (поле вверху формы)."
+      : "Выберите или введите смайлик команды.";
+    setCreateTeamInlineError(msg);
+    showPlacementFeedback(msg, "warn", { telegramAlert: false });
     const tg = window.Telegram?.WebApp;
-    const msg = "Укажите название и смайлик команды.";
     if (typeof tg?.showAlert === "function") tg.showAlert(msg);
-    else alert(msg);
+    if (!name) {
+      try {
+        createTeamNameInput?.focus();
+        createTeamNameInput?.scrollIntoView({ block: "center", behavior: "smooth" });
+      } catch {
+        /* ignore */
+      }
+    }
     return;
   }
   const ci = Math.max(0, Math.min(createTeamColorIdx, TEAM_CREATE_PALETTE.length - 1));
   if (getTakenCreateTeamPaletteIndexSet().has(ci)) {
-    const tg = window.Telegram?.WebApp;
     const m = "Этот цвет уже занят — выберите другой.";
+    setCreateTeamInlineError(m);
+    showPlacementFeedback(m, "warn", { telegramAlert: false });
+    const tg = window.Telegram?.WebApp;
     if (typeof tg?.showAlert === "function") tg.showAlert(m);
-    else alert(m);
     createTeamColorIdx = pickFirstAvailableCreateTeamColorIdx();
     buildCreateTeamColorPalette();
     return;
   }
   const color = TEAM_CREATE_PALETTE[ci];
   if (!color) {
-    const tg = window.Telegram?.WebApp;
     const m = "Выберите цвет команды.";
+    setCreateTeamInlineError(m);
+    showPlacementFeedback(m, "warn", { telegramAlert: false });
+    const tg = window.Telegram?.WebApp;
     if (typeof tg?.showAlert === "function") tg.showAlert(m);
-    else alert(m);
     return;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    const tg = window.Telegram?.WebApp;
     const m =
       "Нет соединения с сервером (WebSocket). Подождите «онлайн» в интерфейсе или обновите страницу. Если не помогает — проверьте, что сервер на Render запущен и Cloudflare пропускает WebSocket.";
+    setCreateTeamInlineError(m);
+    showPlacementFeedback(m, "error", { telegramAlert: false });
+    const tg = window.Telegram?.WebApp;
     if (typeof tg?.showAlert === "function") tg.showAlert(m);
-    else alert(m);
     return;
   }
+  setCreateTeamInlineError("");
   ws.send(
     JSON.stringify({
       type: "createTeam",
@@ -8097,14 +8141,16 @@ function connectWs() {
           const tg = window.Telegram?.WebApp;
           const text =
             "На сервере оставалась сессия в команде — выход выполнен. Нажмите «Создать команду» ещё раз.";
+          setCreateTeamInlineError(text);
+          showPlacementFeedback(text, "warn", { telegramAlert: false });
           if (typeof tg?.showAlert === "function") tg.showAlert(text);
-          else alert(text);
         } else {
           const tg = window.Telegram?.WebApp;
           const text =
             "Нет соединения с сервером. Закройте и откройте Mini App снова, затем повторите вход.";
+          setCreateTeamInlineError(text);
+          showPlacementFeedback(text, "error", { telegramAlert: false });
           if (typeof tg?.showAlert === "function") tg.showAlert(text);
-          else alert(text);
         }
         return;
       }
@@ -8116,9 +8162,10 @@ function connectWs() {
           "Не удалось разместить стартовую базу 6×6 на карте (мало места). Попробуйте позже или сообщите администратору.",
       };
       const text = map[msg.reason] || "Не удалось создать команду.";
+      setCreateTeamInlineError(text);
+      showPlacementFeedback(text, "error", { telegramAlert: false });
       const tg = window.Telegram?.WebApp;
       if (typeof tg?.showAlert === "function") tg.showAlert(text);
-      else alert(text);
       return;
     }
     if (msg.type === "updateTeamError") {

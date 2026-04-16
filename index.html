@@ -171,7 +171,14 @@
       </p>
       <label class="field game-form__field">
         <span class="field__label game-form__section-label">Название</span>
-        <input type="text" id="create-team-name" class="field__input" maxlength="40" autocomplete="off" />
+        <input
+          type="text"
+          id="create-team-name"
+          class="field__input"
+          maxlength="40"
+          autocomplete="off"
+          placeholder="Обязательно: название отряда"
+        />
       </label>
       <p class="field__label game-form__section-label">Цвет команды <span class="game-form__section-meta">30 вариантов · потом не меняется</span></p>
       <div id="create-team-color-palette" class="palette palette--create-team" role="listbox" aria-label="Цвет команды"></div>
@@ -181,6 +188,7 @@
         <span class="field__label game-form__section-label">Свой эмодзи</span>
         <input type="text" id="create-team-emoji" class="field__input" maxlength="8" autocomplete="off" placeholder="например 🦁" />
       </label>
+      <p id="create-team-inline-error" class="create-team__inline-error" role="alert" hidden></p>
       <div class="overlay__actions">
         <button type="button" id="create-team-cancel" class="overlay__btn overlay__btn--secondary">Назад</button>
         <button type="button" id="create-team-submit" class="overlay__btn">Создать</button>
