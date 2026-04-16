@@ -61,12 +61,16 @@ import {
   cellsInManhattanBall,
   computeBattleScoringSnapshot,
   computeSeismicManhattanBalls,
+  eventWindowEndMs,
   getNextTimelineEvent,
   getRoundTimeline,
+  listTimelineEventIdsForManualCmd,
   MANUAL_BATTLE_EVENT_DEFAULT_DURATION_MS,
   MANUAL_BATTLE_EVENT_HELP_RU,
   MANUAL_TELEGRAM_CMD_FIRST_WORDS,
+  mergeAutoTimelineEventsIntoSnapshot,
   mergeManualBattleSlotsIntoSnapshot,
+  isTimelineEventSuppressedByManual,
   pointInRect,
   resolveManualBattleCommandToTimelineDef,
   tournamentCompressionMultiplierForCell,
@@ -1129,6 +1133,9 @@ const MILITARY_MIN_EDGE_GAP_ENEMY_MAIN = 6;
 /** Сохранённые одноразовые шаги событий (сейсмика / предупреждение). */
 let battleEventsApplied = {};
 
+/** eventId таймлайна → истина: снято админом «evt CMD off» до конца раунда / сброса. */
+let timelineEventsCancelled = {};
+
 /** Ручные события карты (Telegram evt …): ключ команды → untilMs (конец действия). Только лидер кластера меняет. */
 const manualBattleSlotsByCmd = new Map();
 
@@ -1166,6 +1173,11 @@ function manualBattleSlotsCacheSignature() {
   return JSON.stringify(arr);
 }
 
+function timelineEventsCancelledSignature() {
+  const keys = Object.keys(timelineEventsCancelled).filter((k) => timelineEventsCancelled[k]).sort();
+  return keys.join(",");
+}
+
 let battleSnapCacheKey = "";
 /** @type {import("./lib/battle-events.js").BattleScoringSnapshot | null} */
 let battleSnapCacheSnap = null;
@@ -1193,12 +1205,15 @@ function computeBattleScoringSnapshotWithManualBattle(nowMs, ctx) {
     gamePaused ? 1 : 0,
     pauseWallStartedAt | 0,
     manualBattleSlotsCacheSignature(),
+    timelineEventsCancelledSignature(),
   ].join("|");
   if (cacheKey === battleSnapCacheKey && battleSnapCacheSnap != null) {
     return battleSnapCacheSnap;
   }
   const snap = computeBattleScoringSnapshot(nowMs, ctx);
-  mergeManualBattleSlotsIntoSnapshot(snap, getActiveManualBattleSlots(nowMs), nowMs, ctx);
+  const manualSlots = getActiveManualBattleSlots(nowMs);
+  mergeManualBattleSlotsIntoSnapshot(snap, manualSlots, nowMs, ctx);
+  mergeAutoTimelineEventsIntoSnapshot(snap, nowMs, ctx, timelineEventsCancelled, manualSlots);
   battleSnapCacheKey = cacheKey;
   battleSnapCacheSnap = snap;
   return snap;
@@ -1217,6 +1232,9 @@ function broadcastManualBattleSyncAndStats() {
 
 /** Чтобы не слать повторно roundEvent start/end при каждом тике. */
 let lastAnnouncedActiveEventIds = new Set();
+
+/** Автотаймлайн: какие eventId уже анонсированы roundEvent start. */
+let lastAnnouncedAutoTimelineEventIds = new Set();
 
 function getBattleEventsContext(nowMs) {
   if (gameFinished) return null;
@@ -1418,7 +1436,9 @@ function broadcastSeismicImpact(cleared, uniqueEventKey) {
     pixels.delete(`${x},${y}`);
   }
   const tl = getRoundTimeline(roundIndex);
-  const sev = tl.find((e) => e.eventType === "seismic");
+  const sev =
+    tl.find((e) => e.eventId === uniqueEventKey && e.eventType === "seismic") ||
+    tl.find((e) => e.eventType === "seismic");
   const aftermathMs =
     sev && typeof sev.payload?.aftermathMs === "number" ? sev.payload.aftermathMs | 0 : 20_000;
   const impactNow = Date.now();
@@ -1432,10 +1452,10 @@ function broadcastSeismicImpact(cleared, uniqueEventKey) {
 }
 
 /**
- * Ручная сейсмика из бота: сначала preview 3 с (баннер + зоны), затем очистка.
- * @returns {{ ok: true } | { ok: false; reason: "no_cells" }}
+ * Сейсмика: превью (баннер + зоны), затем очистка. `optWarnLeadMs` — пауза до удара (мс), иначе 3 с.
+ * @returns {{ ok: true } | { ok: false; reason: "no_cells" | "paused" }}
  */
-function scheduleManualSeismicFromBot(defId, uniqueEventKey) {
+function scheduleManualSeismicFromBot(defId, uniqueEventKey, optWarnLeadMs) {
   if (gamePaused) return { ok: false, reason: "paused" };
   clearPendingManualSeismicSchedule();
   const { balls, cleared } = computeSeismicClearData(defId);
@@ -1446,7 +1466,14 @@ function scheduleManualSeismicFromBot(defId, uniqueEventKey) {
     cy: b.cy,
     r: b.r,
   }));
-  const impactAtMs = Date.now() + MANUAL_SEISMIC_WARNING_MS;
+  const lead =
+    typeof optWarnLeadMs === "number" &&
+    Number.isFinite(optWarnLeadMs) &&
+    optWarnLeadMs >= 1000 &&
+    optWarnLeadMs <= 30_000
+      ? optWarnLeadMs | 0
+      : MANUAL_SEISMIC_WARNING_MS;
+  const impactAtMs = Date.now() + lead;
   broadcast({
     type: "seismicPreview",
     eventId: uniqueEventKey,
@@ -1461,7 +1488,7 @@ function scheduleManualSeismicFromBot(defId, uniqueEventKey) {
     if (!p) return;
     if (gamePaused) return;
     broadcastSeismicImpact(p.cleared, p.uniqueEventKey);
-  }, MANUAL_SEISMIC_WARNING_MS);
+  }, lead);
   return { ok: true };
 }
 
@@ -1501,12 +1528,89 @@ function tickBattleEvents(nowMs) {
   /* События боя меняют getCellValue — инкрементальное табло сбрасываем раз в тик (1 Гц). */
   teamScoreStatsEpoch++;
 
-  /* Автосейсмика по таймлайну отключена — только команда seismic / evt seismic в боте (лидер кластера). */
+  tryAutoTimelineSeismic(nowMs, ctx);
+  tickTimelineRoundEventAnnounces(nowMs, ctx);
+}
+
+/**
+ * Сейсмика по таймлайну раунда (одноразово на eventId). Ручная команда seismic в боте по-прежнему работает.
+ * Пока идёт предупреждение/таймер ручной сейсмики — следующую из таймлайна не стартуем.
+ */
+function tickTimelineRoundEventAnnounces(nowMs, ctx) {
+  const play = ctx.playStartMs;
+  const end = ctx.battleEndMs;
+  const tl = getRoundTimeline(roundIndex);
+  const manualSlots = getActiveManualBattleSlots(nowMs);
+  /** @type {Set<string>} */
+  const active = new Set();
+  for (let i = 0; i < tl.length; i++) {
+    const ev = tl[i];
+    if (!ev || ev.eventType === "seismic") continue;
+    if (timelineEventsCancelled[ev.eventId]) continue;
+    if (isTimelineEventSuppressedByManual(ev, manualSlots)) continue;
+    const startAt = play + (ev.startOffsetMs | 0);
+    const wEnd = eventWindowEndMs(ev, play, end);
+    if (nowMs >= startAt && nowMs < wEnd) active.add(ev.eventId);
+  }
+  for (const prev of lastAnnouncedAutoTimelineEventIds) {
+    if (!active.has(prev)) {
+      broadcast({ type: "roundEvent", phase: "end", eventId: prev, roundIndex });
+    }
+  }
+  for (const id of active) {
+    if (!lastAnnouncedAutoTimelineEventIds.has(id)) {
+      const ev = tl.find((e) => e.eventId === id);
+      if (ev) {
+        broadcast({
+          type: "roundEvent",
+          phase: "start",
+          eventId: id,
+          eventType: ev.eventType,
+          title: ev.uiTitle,
+          subtitle: ev.uiSubtitle,
+          untilMs: eventWindowEndMs(ev, play, end),
+          roundIndex,
+        });
+      }
+    }
+  }
+  lastAnnouncedAutoTimelineEventIds = active;
+}
+
+function tryAutoTimelineSeismic(nowMs, ctx) {
+  if (pendingManualSeismicTimer != null) return;
+  const play = ctx.playStartMs;
+  const tl = getRoundTimeline(roundIndex);
+  for (let i = 0; i < tl.length; i++) {
+    const ev = tl[i];
+    if (!ev || ev.eventType !== "seismic") continue;
+    const id = ev.eventId;
+    if (!id || battleEventsApplied[id]) continue;
+    const fireAt = play + (ev.startOffsetMs | 0);
+    if (nowMs < fireAt) continue;
+    battleEventsApplied[id] = true;
+    try {
+      saveRoundState();
+    } catch {
+      /* ignore */
+    }
+    const r = scheduleManualSeismicFromBot(id, id, ev.warnLeadMs);
+    if (r.ok) break;
+    delete battleEventsApplied[id];
+    try {
+      saveRoundState();
+    } catch {
+      /* ignore */
+    }
+    break;
+  }
 }
 
 function resetBattleEventsStateForNewBattleRound() {
   battleEventsApplied = {};
+  timelineEventsCancelled = {};
   lastAnnouncedActiveEventIds = new Set();
+  lastAnnouncedAutoTimelineEventIds = new Set();
   manualBattleSlotsByCmd.clear();
   clearPendingManualSeismicSchedule();
 }
@@ -1680,6 +1784,7 @@ function saveRoundState() {
         gameFinished,
         winnerTokensByPlayerKey,
         battleEventsApplied,
+        timelineEventsCancelled,
         manualBattleSlots: Object.fromEntries(manualBattleSlotsByCmd),
         treasureGridW: gridW,
         treasureGridH: gridH,
@@ -1866,6 +1971,11 @@ function loadRoundState() {
       } else {
         battleEventsApplied = {};
       }
+      if (j.timelineEventsCancelled && typeof j.timelineEventsCancelled === "object" && !Array.isArray(j.timelineEventsCancelled)) {
+        timelineEventsCancelled = { ...j.timelineEventsCancelled };
+      } else {
+        timelineEventsCancelled = {};
+      }
       manualBattleSlotsByCmd.clear();
       if (j.manualBattleSlots && typeof j.manualBattleSlots === "object" && !Array.isArray(j.manualBattleSlots)) {
         for (const [k, v] of Object.entries(j.manualBattleSlots)) {
@@ -1933,6 +2043,7 @@ function loadRoundState() {
       gameFinished = false;
       winnerTokensByPlayerKey = {};
       battleEventsApplied = {};
+      timelineEventsCancelled = {};
       manualBattleSlotsByCmd.clear();
       roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
       round0WarmupMs = WARMUP_MS;
@@ -1950,6 +2061,7 @@ function loadRoundState() {
     gameFinished = false;
     winnerTokensByPlayerKey = {};
     battleEventsApplied = {};
+    timelineEventsCancelled = {};
     manualBattleSlotsByCmd.clear();
     roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
     round0WarmupMs = WARMUP_MS;
@@ -8468,6 +8580,7 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
     clearPendingManualSeismicSchedule();
     manualBattleSlotsByCmd.clear();
     mstimAltSeasonBurstUntilMs = 0;
+    timelineEventsCancelled = {};
     saveRoundState();
     broadcast({ type: "mstimAltSeasonSync", untilMs: 0 });
     broadcast({ type: "roundEvent", phase: "end", roundIndex });
@@ -8475,16 +8588,32 @@ async function handleTelegramManualBattleCommand(chatId, lineRaw) {
     void broadcastWalletPayloadToAllClients();
     await telegramSendMessage(
       chatId,
-      "Все ручные события сняты. Режим «Мстим за Альт Сезон» (speed), если был включён, тоже выключен."
+      "Все ручные события сняты; отмены автотаймлайна сброшены — расписание снова полное. Режим «Мстим за Альт Сезон» (speed), если был включён, тоже выключен."
     );
     return;
   }
   const cmd0 = normalizeManualBattleCmdKey(parts[0]);
   if (parts[1] === "off") {
     manualBattleSlotsByCmd.delete(cmd0);
+    const cancelIds = listTimelineEventIdsForManualCmd(cmd0, roundIndex);
+    for (let ci = 0; ci < cancelIds.length; ci++) {
+      const eid = cancelIds[ci];
+      timelineEventsCancelled[eid] = true;
+      if (lastAnnouncedAutoTimelineEventIds.has(eid)) {
+        broadcast({ type: "roundEvent", phase: "end", eventId: eid, roundIndex });
+      }
+    }
+    lastAnnouncedAutoTimelineEventIds = new Set(
+      [...lastAnnouncedAutoTimelineEventIds].filter((id) => !cancelIds.includes(id))
+    );
     saveRoundState();
     broadcastManualBattleSyncAndStats();
-    await telegramSendMessage(chatId, `Событие «${cmd0}» выключено.`);
+    await telegramSendMessage(
+      chatId,
+      cancelIds.length
+        ? `Событие «${cmd0}» выключено (ручной слот и пункты таймлайна: ${cancelIds.join(", ")}).`
+        : `Событие «${cmd0}» выключено (только ручной слот; в таймлайне нет такого типа).`
+    );
     return;
   }
   if (cmd0 === "seismic") {

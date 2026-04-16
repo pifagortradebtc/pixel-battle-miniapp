@@ -136,6 +136,8 @@ function shortStatusForLayer(L) {
     if (st === "final_hour") return "Решающий отрезок";
     return "Особый режим очков";
   }
+  const sub = String(L.subtitle || "").trim();
+  if (sub) return sub.length > 100 ? `${sub.slice(0, 97)}…` : sub;
   return "";
 }
 
@@ -698,7 +700,7 @@ export function syncPremiumBattlePresentation(opts) {
     chips.push({
       kind: "seismic_preview",
       title: "СЕЙСМИКА",
-      status: "Скоро удар по карте",
+      status: "Скоро удар — часть захваченных клеток исчезнет",
       untilMs: seismicPreview.impactAtMs,
       theme: "seismic",
     });

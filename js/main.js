@@ -7545,16 +7545,24 @@ function connectWs() {
       return;
     }
     if (msg.type === "seismicPreview") {
+      let impactAtMs = typeof msg.impactAtMs === "number" ? msg.impactAtMs : 0;
+      if (!impactAtMs || impactAtMs <= Date.now()) {
+        impactAtMs = Date.now() + SEISMIC_WARNING_BANNER_MS;
+      }
       seismicPreviewClient = {
         eventId: typeof msg.eventId === "string" ? msg.eventId : "",
         regions: Array.isArray(msg.regions) ? msg.regions : [],
-        impactAtMs: typeof msg.impactAtMs === "number" ? msg.impactAtMs : 0,
+        impactAtMs,
       };
-      startBoardSeismicPreviewShake(3500);
+      const leadMs = Math.min(
+        Math.max(impactAtMs - Date.now(), 400),
+        BANNER_MAX_VISIBLE_MS
+      );
+      startBoardSeismicPreviewShake(Math.max(leadMs, 800));
       showSeismicWarningBanner(
         "Землетрясение",
-        "Некоторые ваши пиксели могут быть повреждены.",
-        SEISMIC_WARNING_BANNER_MS
+        "Часть захваченных клеток в зонах удара исчезнет.",
+        Math.min(leadMs + 200, BANNER_MAX_VISIBLE_MS)
       );
       applySeismicTremorBodyOverride();
       notifySeismicPreview({
