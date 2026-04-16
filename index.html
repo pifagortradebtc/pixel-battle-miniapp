@@ -520,13 +520,16 @@
         </div>
 
         <div class="game-shop__panel" data-panel="area" id="shop-panel-area" hidden>
-          <div class="game-shop__grid">
-            <article class="game-shop__card">
+          <div class="game-shop__grid game-shop__grid--recovery">
+            <article
+              class="game-shop__card"
+              title="Мгновенно перекрашивает все клетки 4×4 в ваш цвет. Тап по углу области на карте."
+            >
               <div class="game-shop__card-head">
                 <div class="game-shop__icon">▦</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Зона 4×4</h3>
-                  <p class="game-shop__card-desc">Мгновенно перекрашивает все клетки 4×4 в ваш цвет. Тап по углу области на карте.</p>
+                  <p class="game-shop__card-desc">16 клеток · тап по углу блока</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
@@ -536,7 +539,10 @@
                 <button type="button" class="game-shop__buy shop-btn" id="shop-zone-capture" data-action="zoneCapture">Выбрать</button>
               </div>
             </article>
-            <article class="game-shop__card game-shop__card--premium game-shop__card--elite">
+            <article
+              class="game-shop__card game-shop__card--premium game-shop__card--elite"
+              title="Мгновенно перекрашивает все 36 клеток 6×6. Тап по центру области."
+            >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Премиум</span>
               </div>
@@ -544,7 +550,7 @@
                 <div class="game-shop__icon">💥</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Масс-захват 6×6</h3>
-                  <p class="game-shop__card-desc">Мгновенно перекрашивает все 36 клеток 6×6. Тап по центру области.</p>
+                  <p class="game-shop__card-desc">36 клеток · тап по центру</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
@@ -554,7 +560,10 @@
                 <button type="button" class="game-shop__buy shop-btn" id="shop-mass-capture" data-action="massCapture">Выбрать</button>
               </div>
             </article>
-            <article class="game-shop__card game-shop__card--premium game-shop__card--elite">
+            <article
+              class="game-shop__card game-shop__card--premium game-shop__card--elite"
+              title="Мгновенно перекрашивает 144 клетки. Тап по центру области на карте."
+            >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Мега</span>
               </div>
@@ -562,7 +571,7 @@
                 <div class="game-shop__icon">💥</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Захват 12×12</h3>
-                  <p class="game-shop__card-desc">Мгновенно перекрашивает 144 клетки. Тап по центру области на карте.</p>
+                  <p class="game-shop__card-desc">144 клетки · тап по центру</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
@@ -572,7 +581,10 @@
                 <button type="button" class="game-shop__buy shop-btn" id="shop-zone12-capture" data-action="zone12Capture">Выбрать</button>
               </div>
             </article>
-            <article class="game-shop__card game-shop__card--premium game-shop__card--elite">
+            <article
+              class="game-shop__card game-shop__card--premium game-shop__card--elite"
+              title="Удар по карте: органическая волна ~12×12 с рваным краем сносит закраску в нейтраль. Клетки главной базы 6×6 и передовой 2×2 не стираются пачкой; если кратер задевает чужую главную базу — по ней один удар по флагу, как от одного пикселя (−1 HP)."
+            >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Оружие</span>
               </div>
@@ -580,9 +592,7 @@
                 <div class="game-shop__icon">☢</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Тактическая бомба</h3>
-                  <p class="game-shop__card-desc">
-                    Удар по карте: органическая волна ~12×12 с рваным краем сносит закраску в нейтраль. Клетки главной базы 6×6 и передовой 2×2 не стираются пачкой; если кратер задевает чужую главную базу — по ней один удар по флагу, как от одного пикселя (−1 HP).
-                  </p>
+                  <p class="game-shop__card-desc">Волна ~12×12 → нейтраль · базы не пачкой</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
@@ -592,7 +602,10 @@
                 <button type="button" class="game-shop__buy shop-btn" id="shop-nuke-bomb" data-action="nukeBomb">Выбрать</button>
               </div>
             </article>
-            <article class="game-shop__card game-shop__card--premium">
+            <article
+              class="game-shop__card game-shop__card--premium"
+              title="Укрепите свою закрашенную клетку (не якорь флага базы): 3 HP, без восстановления. Враг снимает по 1 HP за удар; на третьем ударе стена ломается и клетка сразу становится его территорией."
+            >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Оборона</span>
               </div>
@@ -600,11 +613,7 @@
                 <div class="game-shop__icon" aria-hidden="true">🧱</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Великая стена</h3>
-                  <p class="game-shop__card-desc">
-                    Укрепите <strong>свою</strong> закрашенную клетку (не якорь флага базы): <strong>3 HP</strong>, без
-                    восстановления. Враг снимает по 1 HP за удар; на третьем ударе стена ломается и клетка
-                    <strong>сразу</strong> становится его территорией.
-                  </p>
+                  <p class="game-shop__card-desc">+3 HP своей клетке (не флаг) · 3 удара</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
@@ -618,25 +627,23 @@
             </article>
             <article
               class="game-shop__card game-shop__card--premium game-shop__card--elite game-shop__card--military-supreme"
+              title="Премиум: удар с воздуха — передовая база 2×2 на суше (тап — левый верх блока). Вторая активная база команды: территория, связанная с ней или с главной, снабжается; изолированы только карманы, оторванные от всех ваших баз."
             >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Топ</span>
                 <span class="game-shop__badge game-shop__badge--best">FOB</span>
               </div>
-              <div class="game-shop__card-head game-shop__card-head--wide">
-                <div class="game-shop__icon game-shop__icon--xl" aria-hidden="true">🎖️</div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon" aria-hidden="true">🎖️</div>
                 <div class="game-shop__card-text">
-                  <h3 class="game-shop__card-title game-shop__card-title--glow">Военная база</h3>
-                  <p class="game-shop__card-desc">
-                    <strong>Премиум-способность:</strong> удар с воздуха — закрепите передовую базу 2×2 на суше (тап — левый верх блока). Это
-                    <strong>вторая активная база</strong> команды: территория, связанная с ней или с главной базой, снабжается и
-                    не считается отрезанной; изолированы только карманы, оторванные от <strong>всех</strong> ваших баз.
-                  </p>
+                  <h3 class="game-shop__card-title">Военная база</h3>
+                  <p class="game-shop__card-desc">FOB 2×2 · тап левый верх · вторая точка снабжения</p>
                 </div>
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price game-shop__price--xl">1000 квантов</span>
+                  <span class="game-shop__price">1000 квантов</span>
+                  <span class="game-shop__price-sub">кулдаун ~2 мин</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn shop-btn--supreme" id="shop-military-base" data-action="militaryBase">
                   Развернуть

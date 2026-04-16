@@ -1176,10 +1176,9 @@
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45), 0 0 48px rgba(168, 85, 247, 0.12);
 }
 
-/* Премиум: военная база (FOB) — крупнее и заметнее остальных карточек */
+/* Премиум: военная база (FOB) — та же сетка 2×2, что и «Команда» / «Захват зоны» */
 .game-shop__card--military-supreme {
-  grid-column: 1 / -1;
-  padding: 18px 16px 16px;
+  padding: 14px 14px 12px;
   border-width: 2px;
   border-color: rgba(251, 191, 36, 0.55);
   background: linear-gradient(
