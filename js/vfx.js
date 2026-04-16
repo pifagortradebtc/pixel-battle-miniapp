@@ -870,6 +870,31 @@ export function spawnFloatingText(host, text, pos, kind = "") {
 }
 
 /**
+ * Тик дохода квантофермы: компактный +N, подъём и затухание (премиальный «energy» стиль).
+ * @param {HTMLElement} host
+ * @param {{ x: number; y: number }} pos — client coords (центр фермы на экране)
+ * @param {number} amount
+ */
+export function spawnQuantumFarmIncomeFloat(host, pos, amount) {
+  if (!host) return;
+  const n = amount | 0;
+  if (n < 1) return;
+  const el = document.createElement("div");
+  el.className = "float-fx__pop float-fx__pop--quant-farm";
+  el.textContent = `+${n}`;
+  el.style.left = `${pos.x}px`;
+  el.style.top = `${pos.y}px`;
+  host.appendChild(el);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => el.classList.add("float-fx__pop--show"));
+  });
+  setTimeout(() => {
+    el.classList.add("float-fx__pop--out");
+    setTimeout(() => el.remove(), 420);
+  }, 880);
+}
+
+/**
  * @param {HTMLElement} el
  * @param {number} target
  * @param {number} durationMs

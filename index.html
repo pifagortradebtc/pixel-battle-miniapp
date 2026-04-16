@@ -213,20 +213,32 @@
     </div>
   </div>
 
-  <div id="quantum-farm-panel" class="quantum-farm-panel" hidden aria-hidden="true">
-    <div class="quantum-farm-panel__backdrop" id="quantum-farm-panel-backdrop"></div>
-    <div class="quantum-farm-panel__card" role="dialog" aria-labelledby="quantum-farm-panel-title">
-      <button type="button" class="quantum-farm-panel__close" id="quantum-farm-panel-close" aria-label="Закрыть">
-        ×
-      </button>
-      <h2 class="quantum-farm-panel__title" id="quantum-farm-panel-title">Квантовая ферма</h2>
-      <p class="quantum-farm-panel__line" id="quantum-farm-panel-level"></p>
-      <p class="quantum-farm-panel__blurb" id="quantum-farm-panel-blurb"></p>
-      <p class="quantum-farm-panel__line quantum-farm-panel__line--income" id="quantum-farm-panel-income"></p>
-      <p class="quantum-farm-panel__hint" id="quantum-farm-panel-hint" hidden></p>
-      <button type="button" class="quantum-farm-panel__upgrade" id="quantum-farm-panel-upgrade" hidden>
-        Улучшить
-      </button>
+  <div id="quantum-farm-panel" class="qf-command" hidden aria-hidden="true">
+    <div class="qf-command__backdrop" id="quantum-farm-panel-backdrop" aria-hidden="true"></div>
+    <div class="qf-command__dock" id="quantum-farm-panel-dock">
+      <div class="qf-command__nib" aria-hidden="true"></div>
+      <div
+        class="qf-command__card quantum-farm-panel__card"
+        role="dialog"
+        aria-labelledby="quantum-farm-panel-title"
+      >
+        <div class="qf-command__top">
+          <div class="qf-command__title-row">
+            <span class="qf-command__tactical-icon" aria-hidden="true"></span>
+            <h2 class="qf-command__title" id="quantum-farm-panel-title">Квантовая ферма</h2>
+          </div>
+          <button type="button" class="qf-command__close" id="quantum-farm-panel-close" aria-label="Закрыть">
+            ×
+          </button>
+        </div>
+        <p class="qf-command__level" id="quantum-farm-panel-level"></p>
+        <p class="qf-command__income" id="quantum-farm-panel-income"></p>
+        <p class="qf-command__blurb" id="quantum-farm-panel-blurb"></p>
+        <p class="qf-command__hint" id="quantum-farm-panel-hint" hidden></p>
+        <button type="button" class="qf-command__cta quantum-farm-panel__upgrade" id="quantum-farm-panel-upgrade" hidden>
+          Улучшить
+        </button>
+      </div>
     </div>
   </div>
 
@@ -597,7 +609,7 @@
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">160 квантов</span>
+                  <span class="game-shop__price">40 квантов</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-great-wall" data-action="greatWall">
                   Укрепить

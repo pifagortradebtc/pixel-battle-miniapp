@@ -2187,6 +2187,49 @@ a.overlay__btn {
   transform: translate(-50%, -200%) scale(0.88);
 }
 
+/* Тик дохода у фермы: читаемый «ресурсный» счётчик, без лишнего неона */
+.float-fx__pop--quant-farm {
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+  font-size: clamp(0.88rem, 2.4vw, 1.08rem);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: #e0f8ff;
+  -webkit-text-stroke: 0.45px rgba(0, 12, 24, 0.75);
+  text-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.85),
+    0 0 16px rgba(34, 180, 220, 0.35);
+  transition:
+    opacity 0.2s ease,
+    transform 0.88s cubic-bezier(0.22, 0.82, 0.28, 1);
+}
+.float-fx__pop--quant-farm.float-fx__pop--show {
+  opacity: 1;
+  transform: translate(-50%, -128%) scale(1.04);
+}
+.float-fx__pop--quant-farm.float-fx__pop--out {
+  opacity: 0;
+  transform: translate(-50%, -198%) scale(0.94);
+}
+
+/* Подпись апгрейда — та же сдержанная читаемость */
+.float-fx__pop--quant-upgrade {
+  font-size: clamp(0.68rem, 1.9vw, 0.82rem);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #d8f6ff;
+  -webkit-text-stroke: 0.35px rgba(0, 10, 20, 0.7);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.float-fx__pop--quant-upgrade.float-fx__pop--show {
+  transform: translate(-50%, -118%) scale(1.02);
+}
+.float-fx__pop--quant-upgrade.float-fx__pop--out {
+  transform: translate(-50%, -178%) scale(0.94);
+}
+
 /* Полноэкранные .fx-speed / .fx-flash убраны: в TG WebView давали «туман» на большой площади карты. */
 
 .app.fx-military-deploy-moment {
@@ -3152,132 +3195,265 @@ a.overlay__btn {
   accent-color: #7c9cff;
 }
 
-/* Панель квантовой фермы (уровни / апгрейд) */
-.quantum-farm-panel {
+/* Квантоферма: компактная тактическая панель (RTS command strip), без «модального» блеска */
+.qf-command {
   position: fixed;
   inset: 0;
   z-index: 20100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
   pointer-events: none;
 }
-/* Telegram WebView: авторский display:flex иначе может перебить UA [hidden] — панель «висит» при первом запуске. */
-.quantum-farm-panel[hidden] {
+.qf-command[hidden] {
   display: none !important;
   pointer-events: none !important;
   visibility: hidden !important;
 }
-.quantum-farm-panel:not([hidden]) {
+.qf-command:not([hidden]) {
   pointer-events: auto;
 }
-.quantum-farm-panel__backdrop {
+.qf-command__backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  backdrop-filter: blur(4px);
+  pointer-events: auto;
+  background: rgba(2, 6, 14, 0.14);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: qf-backdrop-in 0.18s ease-out both;
 }
-.quantum-farm-panel__card {
+@keyframes qf-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.qf-command__dock {
+  position: fixed;
+  z-index: 2;
+  pointer-events: none;
+  width: min(276px, calc(100vw - 24px));
+  transform: translateX(-50%);
+  will-change: transform, opacity;
+  filter: drop-shadow(0 10px 28px rgba(0, 0, 0, 0.55));
+}
+.qf-command__dock--in {
+  animation: qf-dock-in 0.26s cubic-bezier(0.2, 1, 0.3, 1) both;
+}
+@keyframes qf-dock-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+.qf-command__nib {
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  width: 0;
+  height: 0;
+  margin-left: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 8px solid rgba(56, 189, 248, 0.38);
+  pointer-events: none;
+  z-index: 0;
+}
+.quantum-farm-panel__card.qf-command__card {
   position: relative;
   z-index: 1;
-  width: min(360px, 92vw);
-  padding: 18px 18px 16px;
-  border-radius: 14px;
-  background: rgba(18, 24, 36, 0.97);
-  border: 1px solid rgba(120, 200, 255, 0.28);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  pointer-events: auto;
+  padding: 11px 12px 11px 13px;
+  border-radius: 6px;
+  background: linear-gradient(168deg, rgba(14, 20, 32, 0.97) 0%, rgba(8, 11, 18, 0.98) 100%);
+  border: 1px solid rgba(56, 100, 130, 0.55);
+  border-left: 3px solid rgba(56, 189, 248, 0.82);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.35);
+  transition: border-color 0.2s ease;
 }
 .quantum-farm-panel__card--tier-1 {
-  border-color: rgba(100, 180, 240, 0.45);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(90, 160, 220, 0.12);
+  border-left-color: rgba(56, 189, 248, 0.88);
+  border-color: rgba(70, 120, 160, 0.55);
 }
 .quantum-farm-panel__card--tier-2 {
-  border-color: rgba(251, 191, 36, 0.55);
-  box-shadow:
-    0 16px 48px rgba(0, 0, 0, 0.5),
-    0 0 28px rgba(251, 191, 36, 0.18),
-    inset 0 0 0 1px rgba(251, 191, 36, 0.15);
+  border-left-color: rgba(251, 191, 36, 0.9);
+  border-color: rgba(160, 120, 60, 0.5);
 }
 .quantum-farm-panel__card--tier-3 {
-  border-color: rgba(248, 250, 180, 0.65);
-  box-shadow:
-    0 16px 52px rgba(0, 0, 0, 0.55),
-    0 0 36px rgba(255, 200, 120, 0.28),
-    0 0 52px rgba(255, 100, 160, 0.12),
-    inset 0 0 0 1px rgba(255, 240, 200, 0.2);
+  border-left-color: rgba(253, 224, 200, 0.95);
+  border-color: rgba(140, 120, 100, 0.52);
 }
-.quantum-farm-panel__close {
+.qf-command__top {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+  min-height: 28px;
+}
+.qf-command__top::after {
+  content: "";
   position: absolute;
-  top: 8px;
-  right: 10px;
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--tg-text);
-  font-size: 1.35rem;
+  left: 0;
+  right: 0;
+  bottom: -9px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.32), transparent 78%);
+  pointer-events: none;
+}
+.qf-command__title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.qf-command__tactical-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid rgba(103, 232, 249, 0.45);
+  border-radius: 2px;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 3px,
+    rgba(56, 189, 248, 0.07) 3px,
+    rgba(56, 189, 248, 0.07) 4px
+  );
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.qf-command__tactical-icon::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: rgba(167, 243, 208, 0.38);
+  border-radius: 1px;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.28);
+}
+.qf-command__title {
+  margin: 0;
+  font-size: 0.69rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(226, 238, 252, 0.92);
+  line-height: 1.2;
+  font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+}
+.qf-command__close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  color: rgba(220, 232, 245, 0.88);
+  font-size: 1.1rem;
   line-height: 1;
   cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.1s ease;
 }
-.quantum-farm-panel__title {
-  margin: 0 0 12px;
-  font-size: 1.05rem;
-  letter-spacing: 0.04em;
-  color: #e8f4ff;
+.qf-command__close:active {
+  transform: scale(0.96);
 }
-.quantum-farm-panel__line {
-  margin: 0 0 8px;
+.qf-command__close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.qf-command__level {
+  margin: 0 0 5px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(200, 220, 240, 0.94);
+  line-height: 1.35;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.qf-command__income {
+  margin: 0 0 7px;
   font-size: 0.92rem;
-  color: rgba(220, 232, 255, 0.92);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  color: #bae6fd;
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
 }
-.quantum-farm-panel__blurb {
-  margin: 0 0 12px;
-  font-size: 0.82rem;
-  line-height: 1.45;
-  color: rgba(186, 210, 235, 0.88);
+.qf-command__blurb {
+  margin: 0 0 8px;
+  font-size: 0.7rem;
+  line-height: 1.38;
+  color: rgba(170, 198, 220, 0.82);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.quantum-farm-panel__card--tier-2 .quantum-farm-panel__blurb {
-  color: rgba(254, 230, 180, 0.9);
+.quantum-farm-panel__card--tier-2 .qf-command__blurb {
+  color: rgba(230, 200, 150, 0.82);
 }
-.quantum-farm-panel__card--tier-3 .quantum-farm-panel__blurb {
-  color: rgba(255, 244, 220, 0.92);
+.quantum-farm-panel__card--tier-3 .qf-command__blurb {
+  color: rgba(240, 220, 200, 0.84);
 }
-.quantum-farm-panel__line--income {
-  font-weight: 600;
-  color: #a5f3fc;
+.qf-command__hint {
+  margin: 0 0 9px;
+  font-size: 0.68rem;
+  line-height: 1.38;
+  color: rgba(251, 191, 36, 0.92);
+  font-variant-numeric: tabular-nums;
 }
-.quantum-farm-panel__hint {
-  margin: 0 0 12px;
-  font-size: 0.82rem;
-  color: #fbbf24;
-}
-.quantum-farm-panel__upgrade {
+.qf-command__cta {
   width: 100%;
-  margin-top: 6px;
-  padding: 12px 14px;
-  border: none;
-  border-radius: 12px;
-  font-size: 0.95rem;
-  font-weight: 600;
+  margin-top: 2px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
   cursor: pointer;
-  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
-  color: #fff;
+  color: rgba(240, 249, 255, 0.98);
+  background: rgba(8, 60, 90, 0.92);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition: transform 0.1s ease, background 0.15s ease, border-color 0.15s ease;
 }
-.quantum-farm-panel__card--tier-1 .quantum-farm-panel__upgrade {
-  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+.qf-command__cta:active:not(:disabled) {
+  transform: scale(0.99);
 }
-.quantum-farm-panel__card--tier-2 .quantum-farm-panel__upgrade {
-  background: linear-gradient(180deg, #d97706 0%, #b45309 100%);
-  box-shadow: 0 2px 12px rgba(217, 119, 6, 0.35);
+.qf-command__cta:hover:not(:disabled) {
+  background: rgba(12, 80, 118, 0.95);
+  border-color: rgba(125, 211, 252, 0.55);
 }
-.quantum-farm-panel__card--tier-3 .quantum-farm-panel__upgrade {
-  background: linear-gradient(180deg, #e11d48 0%, #7c2d12 55%, #b45309 100%);
-  box-shadow: 0 2px 16px rgba(225, 29, 72, 0.25);
+.quantum-farm-panel__card--tier-1 .qf-command__cta {
+  background: rgba(8, 60, 90, 0.92);
+  border-color: rgba(56, 189, 248, 0.45);
 }
-.quantum-farm-panel__upgrade:disabled {
-  opacity: 0.45;
+.quantum-farm-panel__card--tier-2 .qf-command__cta {
+  background: rgba(75, 45, 8, 0.92);
+  border-color: rgba(251, 191, 36, 0.5);
+}
+.quantum-farm-panel__card--tier-3 .qf-command__cta {
+  background: rgba(65, 12, 28, 0.92);
+  border-color: rgba(253, 164, 175, 0.48);
+}
+.qf-command__cta:disabled {
+  opacity: 0.48;
   cursor: not-allowed;
+  box-shadow: none;
+}
+.qf-command__cta--warn {
+  box-shadow:
+    inset 0 0 0 1px rgba(251, 191, 36, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }

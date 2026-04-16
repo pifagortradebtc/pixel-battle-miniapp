@@ -4,7 +4,7 @@
  * после создания смена запрещена — в панели только индикатор из метаданных.
  */
 
-import { createBoardVfx, spawnFloatingText } from "./vfx.js";
+import { createBoardVfx, spawnFloatingText, spawnQuantumFarmIncomeFloat } from "./vfx.js";
 import {
   initEventPresentation,
   resetEventPresentationForRound,
@@ -72,7 +72,7 @@ import {
 import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
 import { GRID8_DELTAS, TERRITORY_ISOLATION_GRACE_MS, makeGridCellKey, neighborKeysInSet8 } from "../lib/territory-isolation.js";
-import { scoreTeamsAroundFarm, resolveFarmControl } from "../lib/quantum-farms.js";
+import { getQuantumFarmInfluenceKeys, scoreTeamsAroundFarm, resolveFarmControl } from "../lib/quantum-farms.js";
 import {
   normalizeQuantumFarmLevel,
   QUANTUM_FARM_MAX_LEVEL,
@@ -381,6 +381,7 @@ const browserTelegramInviteHint = document.getElementById("browser-telegram-invi
 const browserTelegramInviteOpen = document.getElementById("browser-telegram-invite-open");
 const browserTelegramInviteDismiss = document.getElementById("browser-telegram-invite-dismiss");
 const leaderboardPanel = document.getElementById("leaderboard-panel");
+const leaderboardToggleEl = document.getElementById("leaderboard-toggle");
 const onlineCountEl = document.getElementById("online-count");
 const leaderboardListEl = document.getElementById("leaderboard-list");
 const roundTimerEl = document.getElementById("round-timer");
@@ -421,6 +422,7 @@ const quantumFarmPanelBlurbEl = document.getElementById("quantum-farm-panel-blur
 const quantumFarmPanelIncomeEl = document.getElementById("quantum-farm-panel-income");
 const quantumFarmPanelHintEl = document.getElementById("quantum-farm-panel-hint");
 const quantumFarmPanelUpgradeEl = document.getElementById("quantum-farm-panel-upgrade");
+const quantumFarmPanelDockEl = document.getElementById("quantum-farm-panel-dock");
 const stageWrapEl = document.getElementById("stage-wrap");
 const btnToolbarBase = document.getElementById("btn-toolbar-base");
 const roundStartSplashEl = document.getElementById("round-start-splash");
@@ -774,9 +776,7 @@ function computeClientBaseConnectedPixelKeys(teamId) {
     const r = mos[i];
     addClientBfsSeedsFromRectInVertices(vertices, r.x0, r.y0, r.w, r.h, out, stack);
   }
-  if (!stack.length) {
-    addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, FLAG_SPAWN_SIZE, out, stack);
-  }
+  addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, FLAG_SPAWN_SIZE, out, stack);
   if (!stack.length) return new Set();
   while (stack.length) {
     const cur = stack.pop();
@@ -1050,8 +1050,10 @@ let pendingLeaveToCreate = false;
 let walletState = null;
 
 /** Позиции квантовых ферм с сервера (2×2 якоря). */
-/** @type {{ id: number, x0: number, y0: number, w: number, h: number }[]} */
+/** @type {{ id: number, x0: number, y0: number, w: number, h: number, level?: number }[]} */
 let quantumFarmsMeta = [];
+/** id фермы, к которой привязано контекстное меню (позиция обновляется в draw). */
+let quantumFarmPanelAnchorFarmId = /** @type {number | null} */ (null);
 let lastStatsGlobalEvent = null;
 /** Предупреждение сейсмики: подсветка зон до удара. */
 let seismicPreviewClient = null;
@@ -1611,6 +1613,12 @@ function triggerMapShake(ms = 560, mode = "default") {
   }, ms);
 }
 
+/** Короткая тряска сцены при ударе по Великой стене (сильнее при обрушении). */
+function triggerGreatWallImpactShake(mode = "hit") {
+  const ms = mode === "break" ? 720 : 380;
+  triggerMapShake(ms, "default");
+}
+
 /** Детерминированный «шум» для силы ожога по клетке (хаотично, но стабильно на кадрах). */
 function nukeScorchHash01(gx, gy) {
   let h = ((gx | 0) * 374761393 + (gy | 0) * 668265263) >>> 0;
@@ -1643,14 +1651,28 @@ function applyNukeAftermathFromEpicenter(gxi, gyi) {
   let mnY = Infinity;
   let mxX = -1;
   let mxY = -1;
+  const myTAfter = myTeamId | 0;
   for (let i = 0; i < pairs.length; i++) {
     const x = pairs[i][0] | 0;
     const y = pairs[i][1] | 0;
-    nukeAftermathBlastKeys.add(`${x},${y}`);
+    const pk = `${x},${y}`;
+    if (myTAfter) {
+      const v = pixels.get(pk);
+      if (v != null) {
+        const tid = typeof v === "number" ? v | 0 : Number(v.teamId) | 0;
+        if (tid === myTAfter) continue;
+      }
+    }
+    nukeAftermathBlastKeys.add(pk);
     mnX = Math.min(mnX, x);
     mnY = Math.min(mnY, y);
     mxX = Math.max(mxX, x);
     mxY = Math.max(mxY, y);
+  }
+  if (nukeAftermathBlastKeys.size === 0) {
+    nukeAftermathBlastKeys = null;
+    nukeAftermathGx1 = -1;
+    return;
   }
   const margin = 1;
   nukeAftermathGx0 = Math.max(0, mnX - margin);
@@ -1698,7 +1720,9 @@ function clientNukeBlastWouldClearTerritory(cx, cy) {
     const v = pixels.get(`${x},${y}`);
     if (v == null) continue;
     const tid = typeof v === "number" ? v | 0 : Number(v.teamId) | 0;
-    if (tid !== 0) return true;
+    if (tid === 0) continue;
+    if (myT && tid === myT) continue;
+    return true;
   }
   return false;
 }
@@ -2289,6 +2313,104 @@ function hexToRgb(hex) {
 
 function getVfxTransform() {
   return { offsetX, offsetY, scale, gridW, gridH, BASE_CELL, dpr: boardVfxDpr };
+}
+
+/** Центр клетки сетки → клиентские px (для DOM поверх карты). */
+function gridCellCenterToClientPx(gcx, gcy) {
+  if (!canvas) return null;
+  const cell = BASE_CELL * scale;
+  const bx = offsetX + gcx * cell;
+  const by = offsetY + gcy * cell;
+  const r = canvas.getBoundingClientRect();
+  const cw = canvas.clientWidth || 1;
+  const ch = canvas.clientHeight || 1;
+  return {
+    x: r.left + (bx / cw) * r.width,
+    y: r.top + (by / ch) * r.height,
+  };
+}
+
+/** Плавающий +N у фермы: только при «вчитанном» зуме и в центре внимания (без шума на обзоре). */
+function clientWantsQuantumFarmIncomeFloatNearGrid(gcx, gcy) {
+  if (!canvas) return false;
+  const cell = BASE_CELL * scale;
+  if (scale < 0.74 || cell < 6.1) return false;
+  const bx = offsetX + gcx * cell;
+  const by = offsetY + gcy * cell;
+  const cw = canvas.clientWidth || 0;
+  const ch = canvas.clientHeight || 0;
+  const margin = 28;
+  if (bx < margin || by < margin || bx > cw - margin || by > ch - margin) return false;
+  const cx = cw * 0.5;
+  const cy = ch * 0.5;
+  const maxD = Math.min(cw, ch) * 0.42;
+  const dx = bx - cx;
+  const dy = by - cy;
+  return dx * dx + dy * dy <= maxD * maxD;
+}
+
+function layoutQuantumFarmContextualPanel(f) {
+  const dock = quantumFarmPanelDockEl;
+  if (!dock || !f || !canvas) return;
+  const gcx = f.x0 + f.w * 0.5;
+  const gcy = f.y0 + f.h * 0.5;
+  const tip = gridCellCenterToClientPx(gcx, gcy);
+  if (!tip) return;
+  const wasVis = dock.style.visibility;
+  dock.style.visibility = "hidden";
+  dock.style.left = "-9999px";
+  dock.style.top = "0";
+  const rect0 = dock.getBoundingClientRect();
+  const dw = rect0.width || 268;
+  const dh = rect0.height || 210;
+  dock.style.visibility = wasVis || "";
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const pad = 10;
+  let left = tip.x;
+  let top = tip.y - dh - 20;
+  left = Math.max(pad + dw * 0.5, Math.min(vw - pad - dw * 0.5, left));
+  top = Math.max(pad, Math.min(vh - dh - pad - 12, top));
+  dock.style.left = `${left}px`;
+  dock.style.top = `${top}px`;
+  const nib = dock.querySelector(".qf-command__nib");
+  if (nib) {
+    const dockLeft = left - dw * 0.5;
+    const nibX = tip.x - dockLeft;
+    const clamped = Math.max(32, Math.min(dw - 32, nibX));
+    nib.style.left = `${clamped}px`;
+  }
+}
+
+function syncQuantumFarmPanelLayoutIfOpen() {
+  if (!quantumFarmPanelEl || quantumFarmPanelEl.hidden || quantumFarmPanelAnchorFarmId == null) return;
+  const af = quantumFarmsMeta.find((x) => (x.id | 0) === (quantumFarmPanelAnchorFarmId | 0));
+  if (!af) {
+    closeQuantumFarmPanel();
+    return;
+  }
+  layoutQuantumFarmContextualPanel(af);
+}
+
+function celebrateQuantumFarmUpgrade(f, lv) {
+  const tr = getVfxTransform();
+  const gcx = f.x0 + f.w * 0.5;
+  const gcy = f.y0 + f.h * 0.5;
+  boardVfx?.ripple(gcx | 0, gcy | 0, "#67e8f9", tr);
+  boardVfx?.burst(gcx | 0, gcy | 0, "#a5f3fc", tr, 22);
+  flushBoardVfxFrame();
+  requestAnimationFrame(() => flushBoardVfxFrame());
+  if (floatFxHost && clientWantsQuantumFarmIncomeFloatNearGrid(gcx, gcy)) {
+    const pos = gridCellCenterToClientPx(gcx, gcy);
+    if (pos) {
+      spawnFloatingText(
+        floatFxHost,
+        `Уровень ${lv}`,
+        { x: pos.x, y: pos.y - 22 },
+        "float-fx__pop--quant-upgrade"
+      );
+    }
+  }
 }
 
 function setConnState(state, text) {
@@ -2964,6 +3086,27 @@ function renderLeaderboardImmediate(msg) {
     lastMyTeamScoreShare = share;
   }
   syncEventBanner();
+}
+
+/** Свернуть / развернуть виджет рейтинга (класс `lb-widget--collapsed` в hud-premium.css). */
+function syncLeaderboardCollapsedChrome() {
+  if (!leaderboardPanel || !leaderboardToggleEl) return;
+  const collapsed = leaderboardPanel.classList.contains("lb-widget--collapsed");
+  leaderboardToggleEl.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  leaderboardPanel.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  leaderboardToggleEl.title = collapsed ? "Показать полный рейтинг" : "Свернуть до топ‑3";
+}
+
+function setupLeaderboardPanelUi() {
+  if (!leaderboardPanel || !leaderboardToggleEl) return;
+  syncLeaderboardCollapsedChrome();
+  leaderboardToggleEl.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    leaderboardPanel.classList.toggle("lb-widget--collapsed");
+    syncLeaderboardCollapsedChrome();
+    playMenuChoiceSfx();
+  });
 }
 
 function clientPrefersReducedMotion() {
@@ -4705,6 +4848,10 @@ function mergeQuantumFarmsFromServerPayload(rows) {
       level: normalizeQuantumFarmLevel(f.level),
     }));
   syncToolbarQuantumObjective();
+  if (quantumFarmPanelAnchorFarmId != null) {
+    const ok = quantumFarmsMeta.some((x) => (x.id | 0) === (quantumFarmPanelAnchorFarmId | 0));
+    if (!ok) closeQuantumFarmPanel();
+  }
 }
 
 function findQuantumFarmCoveringCell(gx, gy) {
@@ -4718,14 +4865,38 @@ function findQuantumFarmCoveringCell(gx, gy) {
   return null;
 }
 
+/**
+ * Связь фермы с «снабжением» команды: хотя бы одна наша клетка в зоне влияния входит в компонент территории, связанный с базой.
+ * (Согласовано с визуализацией зональных покупок через computeClientBaseConnectedPixelKeys.)
+ */
+function clientQuantumFarmSupplyConnected(teamId, farm) {
+  const tid = teamId | 0;
+  if (!tid || !farm || gridW < 1 || gridH < 1) return false;
+  const keys = getQuantumFarmInfluenceKeys(farm.x0 | 0, farm.y0 | 0, gridW, gridH);
+  const baseConn = computeClientBaseConnectedPixelKeys(tid);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const parts = k.split(",");
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if ((clientPixelTeamIdAt(x, y) | 0) !== tid) continue;
+    if (baseConn.has(k)) return true;
+  }
+  return false;
+}
+
 function closeQuantumFarmPanel() {
   if (!quantumFarmPanelEl) return;
+  quantumFarmPanelAnchorFarmId = null;
+  quantumFarmPanelDockEl?.classList.remove("qf-command__dock--in");
   const card = quantumFarmPanelEl.querySelector(".quantum-farm-panel__card");
   card?.classList.remove(
     "quantum-farm-panel__card--tier-1",
     "quantum-farm-panel__card--tier-2",
     "quantum-farm-panel__card--tier-3"
   );
+  quantumFarmPanelUpgradeEl?.classList.remove("qf-command__cta--warn");
   quantumFarmPanelEl.hidden = true;
   quantumFarmPanelEl.setAttribute("aria-hidden", "true");
 }
@@ -4751,11 +4922,13 @@ function openQuantumFarmPanel(f) {
   const ours = myT && owner === myT;
 
   const tierNow = quantumFarmTierMeta(lvl);
+  const supplyLinked =
+    owner && !contested && myT && owner === myT ? clientQuantumFarmSupplyConnected(myT, f) : true;
   if (quantumFarmPanelTitleEl) {
-    quantumFarmPanelTitleEl.textContent = `Квантовая ферма #${f.id | 0}`;
+    quantumFarmPanelTitleEl.textContent = "Квантовая ферма";
   }
   if (quantumFarmPanelLevelEl) {
-    quantumFarmPanelLevelEl.textContent = `Уровень ${lvl} — ${tierNow.name}`;
+    quantumFarmPanelLevelEl.textContent = `Уровень ${lvl} · ${tierNow.name} · #${f.id | 0}`;
   }
   if (quantumFarmPanelBlurbEl) {
     quantumFarmPanelBlurbEl.textContent = tierNow.blurb;
@@ -4771,13 +4944,15 @@ function openQuantumFarmPanel(f) {
   }
   if (quantumFarmPanelIncomeEl) {
     if (!owner) {
-      quantumFarmPanelIncomeEl.textContent = "Спорная зона — доход не начисляется.";
+      quantumFarmPanelIncomeEl.textContent = "Спор — доход: 0 / 5 с";
     } else if (contested) {
-      quantumFarmPanelIncomeEl.textContent = "Спорная зона — доход не начисляется.";
-    } else if (connected) {
-      quantumFarmPanelIncomeEl.textContent = `Доход при связи: +${lvl} квант. / 5 с (команда)`;
+      quantumFarmPanelIncomeEl.textContent = "Спор — доход: 0 / 5 с";
+    } else if (owner === myT) {
+      quantumFarmPanelIncomeEl.textContent = supplyLinked
+        ? `Доход: +${lvl} / 5 с`
+        : "Доход: 0 / 5 с (нет связи с базой)";
     } else {
-      quantumFarmPanelIncomeEl.textContent = `Контролирует команда — доход +${lvl} / 5 с для них.`;
+      quantumFarmPanelIncomeEl.textContent = `Чужой контроль · их доход: +${lvl} / 5 с`;
     }
   }
 
@@ -4791,7 +4966,7 @@ function openQuantumFarmPanel(f) {
     hint = "Улучшать может только команда, контролирующая ферму.";
   } else if (contested) {
     hint = "Нет стабильного контроля — нельзя улучшить.";
-  } else if (!connected) {
+  } else if (!supplyLinked) {
     hint = "Нет связи с территорией — доход и улучшения недоступны.";
   } else if (lvl >= QUANTUM_FARM_MAX_LEVEL) {
     hint = "Максимальный уровень — ключевая цель удерживается или перехватывается.";
@@ -4821,24 +4996,45 @@ function openQuantumFarmPanel(f) {
   }
 
   if (quantumFarmPanelUpgradeEl) {
+    const cost = lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
     const affordable =
       !walletState ||
       walletState.devUnlimited ||
       typeof walletState.balanceUSDT !== "number" ||
-      usdtToQuant(walletState.balanceUSDT) >= (lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3);
-    quantumFarmPanelUpgradeEl.hidden = !showUpgrade;
-    quantumFarmPanelUpgradeEl.disabled = showUpgrade && !affordable;
-    const cost = lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
-    const next = lvl + 1;
-    const nextTier = quantumFarmTierMeta(next);
-    quantumFarmPanelUpgradeEl.textContent = showUpgrade
-      ? `До «${nextTier.name}» (ур. ${next}) — ${cost} кв.`
-      : "Улучшить";
+      usdtToQuant(walletState.balanceUSDT) >= cost;
+    quantumFarmPanelUpgradeEl.classList.toggle("qf-command__cta--warn", showUpgrade && !affordable);
     quantumFarmPanelUpgradeEl.dataset.farmId = String(f.id | 0);
+    if (lvl >= QUANTUM_FARM_MAX_LEVEL) {
+      quantumFarmPanelUpgradeEl.hidden = false;
+      quantumFarmPanelUpgradeEl.disabled = true;
+      quantumFarmPanelUpgradeEl.textContent = "Макс. уровень";
+      quantumFarmPanelUpgradeEl.classList.remove("qf-command__cta--warn");
+    } else if (showUpgrade) {
+      quantumFarmPanelUpgradeEl.hidden = false;
+      quantumFarmPanelUpgradeEl.disabled = !affordable;
+      const next = lvl + 1;
+      const nextTier = quantumFarmTierMeta(next);
+      quantumFarmPanelUpgradeEl.textContent = affordable
+        ? `Улучшить до ур. ${next} — ${cost} кв.`
+        : `Нужно ${cost} кв. · до «${nextTier.name}»`;
+    } else {
+      quantumFarmPanelUpgradeEl.hidden = true;
+      quantumFarmPanelUpgradeEl.disabled = true;
+      quantumFarmPanelUpgradeEl.textContent = "Улучшить";
+    }
   }
 
+  quantumFarmPanelAnchorFarmId = f.id | 0;
   quantumFarmPanelEl.hidden = false;
   quantumFarmPanelEl.removeAttribute("aria-hidden");
+  requestAnimationFrame(() => {
+    layoutQuantumFarmContextualPanel(f);
+    if (quantumFarmPanelDockEl) {
+      quantumFarmPanelDockEl.classList.remove("qf-command__dock--in");
+      void quantumFarmPanelDockEl.offsetWidth;
+      quantumFarmPanelDockEl.classList.add("qf-command__dock--in");
+    }
+  });
   try {
     window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("light");
   } catch {
@@ -4982,15 +5178,24 @@ function refreshPassiveIncomeDisplays() {
       : "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
 }
 
-/** Вспышка на фермах + всплывающий текст при пассивном доходе (фермы и/или зоны турнира, каждые 5 с). */
-function playQuantumFarmIncomeClientFx(quants) {
+/**
+ * Пассивный доход: вспышки на фермах, премиальные +N у удерживаемых ферм (с зумом/фокусом),
+ * отдельно подсказка у кошелька для зон турнира или если сервер не прислал разбивку по фермам.
+ * @param {{ farmQuants?: number, eventZoneQuants?: number }} [opts]
+ */
+function playQuantumFarmIncomeClientFx(quants, opts = {}) {
   const q = quants | 0;
   if (q < 1 || spectatorMode) return;
   const tid = myTeamId | 0;
   if (!tid) return;
   const tr = getVfxTransform();
   const gold = "#f0c040";
+  const farmQ = typeof opts.farmQuants === "number" && Number.isFinite(opts.farmQuants) ? opts.farmQuants | 0 : -1;
+  const zoneQ =
+    typeof opts.eventZoneQuants === "number" && Number.isFinite(opts.eventZoneQuants) ? opts.eventZoneQuants | 0 : 0;
+  const doPerFarmFloats = farmQ > 0;
   if (quantumFarmsMeta.length) {
+    let farmFloatIdx = 0;
     for (let i = 0; i < quantumFarmsMeta.length; i++) {
       const f = quantumFarmsMeta[i];
       const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
@@ -4999,11 +5204,24 @@ function playQuantumFarmIncomeClientFx(quants) {
         return v == null ? 0 : v | 0;
       });
       if ((resolveFarmControl(scores).owner | 0) !== tid) continue;
-      const gcx = f.x0 + ((f.w / 2) | 0);
-      const gcy = f.y0 + ((f.h / 2) | 0);
+      const gcx = f.x0 + f.w * 0.5;
+      const gcy = f.y0 + f.h * 0.5;
+      const gxi = gcx | 0;
+      const gyi = gcy | 0;
       if (boardVfx) {
-        boardVfx.ripple(gcx, gcy, gold, tr);
-        boardVfx.burst(gcx, gcy, "#ffd85c", tr, 16);
+        boardVfx.ripple(gxi, gyi, gold, tr);
+        boardVfx.burst(gxi, gyi, "#ffd85c", tr, 14);
+      }
+      if (doPerFarmFloats && floatFxHost && clientWantsQuantumFarmIncomeFloatNearGrid(gcx, gcy)) {
+        const pos = gridCellCenterToClientPx(gcx, gcy);
+        if (pos) {
+          const inc = normalizeQuantumFarmLevel(f.level);
+          const delay = farmFloatIdx * 44;
+          farmFloatIdx++;
+          window.setTimeout(() => {
+            spawnQuantumFarmIncomeFloat(floatFxHost, pos, inc);
+          }, delay);
+        }
       }
     }
     flushBoardVfxFrame();
@@ -5017,12 +5235,13 @@ function playQuantumFarmIncomeClientFx(quants) {
   }
   if (floatFxHost && walletBalanceEl) {
     const r = walletBalanceEl.getBoundingClientRect();
-    spawnFloatingText(
-      floatFxHost,
-      `+${q} ${quantWord(q)} 💵`,
-      { x: r.left + r.width * 0.5, y: r.top + r.height * 0.15 },
-      "float-fx__pop--gold"
-    );
+    const wx = r.left + r.width * 0.5;
+    const wy = r.top + r.height * 0.14;
+    if (zoneQ > 0) {
+      spawnFloatingText(floatFxHost, `+${zoneQ} зона`, { x: wx, y: wy }, "float-fx__pop--gold");
+    } else if (!doPerFarmFloats && q > 0) {
+      spawnFloatingText(floatFxHost, `+${q} ${quantWord(q)} 💵`, { x: wx, y: wy }, "float-fx__pop--gold");
+    }
   }
   try {
     window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
@@ -5685,12 +5904,14 @@ function applyGlobalPurchaseVfx(msg) {
       playGreatWallBuilt(sp);
     } else if (kind === "greatWallHit") {
       const col = teamColor(msg.defenderTeamId | 0);
+      triggerGreatWallImpactShake("hit");
       boardVfx?.greatWallHit(gxi, gyi, col, tr);
       const sp = spatialForZoneCapture(msg.defenderTeamId | 0, gxi, gyi, 1);
       playGreatWallHit(sp);
     } else {
       const ac = teamColor(msg.attackerTeamId | 0);
       const dc = teamColor(msg.defenderTeamId | 0);
+      triggerGreatWallImpactShake("break");
       boardVfx?.greatWallBreak(gxi, gyi, ac, dc, tr);
       const sp = spatialForZoneCapture(msg.attackerTeamId | 0, gxi, gyi, 1);
       playGreatWallBreak(sp);
@@ -5769,12 +5990,25 @@ function handlePurchaseOk(msg) {
         }
       }
     }
-    closeQuantumFarmPanel();
-    showPlacementFeedback(`Квантовая ферма: уровень ${lv}.`, "ok", { telegramAlert: false });
     playPurchaseSuccess();
     refreshPassiveIncomeDisplays();
     syncToolbarQuantumObjective();
     scheduleDraw({ full: true });
+    const keepOpen =
+      quantumFarmPanelAnchorFarmId != null &&
+      (quantumFarmPanelAnchorFarmId | 0) === (fid | 0) &&
+      quantumFarmPanelEl &&
+      !quantumFarmPanelEl.hidden;
+    if (keepOpen) {
+      const nf = quantumFarmsMeta.find((x) => (x.id | 0) === (fid | 0));
+      if (nf) {
+        openQuantumFarmPanel(nf);
+        celebrateQuantumFarmUpgrade(nf, lv);
+        return;
+      }
+    }
+    closeQuantumFarmPanel();
+    showPlacementFeedback(`Квантовая ферма: уровень ${lv}.`, "ok", { telegramAlert: false });
   }
   if (kind === "personalRecovery") {
     const s = typeof msg.tierSec === "number" ? msg.tierSec : "?";
@@ -6102,7 +6336,7 @@ function executeQuickBuy(entry) {
     pendingMapAction = { type: "nukeBomb" };
     setPendingHint();
     showPlacementFeedback(
-      "Тактическая бомба: тап по карте. Зона ~12×12 с неровным краем — очистит чужую территорию и может разорвать связи.",
+      "Тактическая бомба: тап по карте. Зона ~12×12 с неровным краем — снимает чужую закраску и стены; ваши клетки не затрагиваются.",
       "warn",
       { telegramAlert: false }
     );
@@ -6118,7 +6352,7 @@ function executeQuickBuy(entry) {
     pendingMapAction = { type: "greatWall" };
     setPendingHint();
     showPlacementFeedback(
-      "Великая стена: тап по своей клетке (не флаг базы). 3 удара врага, HP не растёт. ~160 кв.",
+      "Великая стена: тап по своей клетке (не флаг базы). 3 удара врага, HP не растёт. ~40 кв.",
       "info",
       { telegramAlert: false }
     );
@@ -6897,7 +7131,7 @@ function setPendingHint() {
     if (pendingMapAction.type === "zone12Capture")
       return "Зона 12×12: тап по центру — 144 клетки перекрасятся";
     if (pendingMapAction.type === "nukeBomb")
-      return "Бомба: тап по эпицентру — хаотичный взрыв ~12×12, территория станет нейтральной";
+      return "Бомба: тап по эпицентру — взрыв ~12×12; чужие клетки снимаются, свои не страдают";
     if (pendingMapAction.type === "militaryBase")
       return "Передовая база 6×6 — второй активный корень команды: снабжение и изоляция считаются от главной И от неё. Тап по центру на чистой суше";
     if (pendingMapAction.type === "greatWall")
@@ -8216,7 +8450,10 @@ function connectWs() {
       const tid = msg.teamId | 0;
       if (!myTeamId || (tid | 0) !== (myTeamId | 0)) return;
       const q = typeof msg.quants === "number" && Number.isFinite(msg.quants) ? msg.quants | 0 : 0;
-      playQuantumFarmIncomeClientFx(q);
+      playQuantumFarmIncomeClientFx(q, {
+        farmQuants: typeof msg.farmQuants === "number" ? msg.farmQuants : undefined,
+        eventZoneQuants: typeof msg.eventZoneQuants === "number" ? msg.eventZoneQuants : undefined,
+      });
       return;
     }
     if (msg.type === "treasureClaimed") {
@@ -9003,6 +9240,7 @@ function applyOptimisticNukeBomb(cx, cy) {
     if (cell === undefined) continue;
     const tid = typeof cell === "number" ? cell | 0 : Number(cell.teamId) | 0;
     if (tid === 0) continue;
+    if (tid === (myTeamId | 0)) continue;
     const wh = typeof cell === "object" && cell ? normalizeWallHp(cell.wallHp) : 0;
     const sh = typeof cell === "object" && cell ? Number(cell.shieldedUntil) || 0 : 0;
     prev.set(k, cell);
@@ -9018,7 +9256,13 @@ function applyOptimisticNukeBomb(cx, cy) {
       pixels.delete(k);
     }
   }
-  if (touchedKeys.length === 0) return false;
+  if (touchedKeys.length === 0) {
+    if (!clientNukeBlastWouldClearTerritory(cx | 0, cy | 0)) {
+      notifyReject("nuke_no_effect");
+      return false;
+    }
+    return true;
+  }
   optimisticWeaponPending = {
     kind: "nukeBomb",
     gx: cx | 0,
@@ -9229,52 +9473,159 @@ function drawMapTreasureChestIcon(ctx, px, py, cw, ch) {
 }
 
 /**
- * Великая стена: каменный парапет, трещины при 2 и 1 HP, мелкая метка HP.
+ * Великая стена: псевдо-объём, тень, камень/металл; трещины по HP (3→чисто, 2→скол, 1→разрушение).
  */
 function drawGreatWallStoneDecor(ctx, px, py, cw, ch, teamHex, wallHp, time) {
   const wh = wallHp | 0;
   if (wh < 1 || wh > GREAT_WALL_MAX_HP) return;
   const { r, g, b } = hexToRgb(teamHex);
   const pulse = 0.5 + 0.5 * Math.sin(time * 0.0031);
-  const lift = Math.max(0.5, Math.min(2.4, ch * 0.08));
+  const lift = Math.max(1, Math.min(7, ch * 0.14));
+  const pad = Math.max(0.5, cw * 0.028);
+  const stress = (GREAT_WALL_MAX_HP - wh) / GREAT_WALL_MAX_HP;
+  const faceX = px + pad;
+  const faceY = py + pad - lift * 0.55;
+  const faceW = cw - pad * 2;
+  const faceH = ch - pad * 2 + lift * 0.45;
+  const capH = Math.max(2, lift * 0.85);
+
   ctx.save();
-  ctx.fillStyle = `rgba(${Math.min(255, r + 22)},${Math.min(255, g + 22)},${Math.min(255, b + 22)},0.38)`;
-  ctx.fillRect(px, py - lift * 0.42, cw, lift * 0.42);
-  const gr = ctx.createLinearGradient(px, py, px, py + ch);
-  gr.addColorStop(0, `rgba(255,255,255,${0.08 + pulse * 0.05})`);
-  gr.addColorStop(0.42, `rgba(${r},${g},${b},0.18)`);
-  gr.addColorStop(1, `rgba(0,0,0,${0.2 + (GREAT_WALL_MAX_HP - wh) * 0.05})`);
-  ctx.fillStyle = gr;
-  ctx.fillRect(px + cw * 0.07, py + ch * 0.07, cw * 0.86, ch * 0.76);
-  ctx.strokeStyle = `rgba(248,242,232,${0.5 + pulse * 0.15})`;
-  ctx.lineWidth = Math.max(1.2, ch * 0.085);
-  ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
-  ctx.strokeStyle = `rgba(28,22,18,${0.48 + pulse * 0.12})`;
-  ctx.lineWidth = Math.max(2, ch * 0.12);
-  ctx.strokeRect(px + 0.5, py + 0.5 - lift * 0.18, cw - 1, ch - 1 + lift * 0.18);
-  if (wh <= 2) {
-    ctx.strokeStyle = `rgba(18,14,12,${0.55 + pulse * 0.22})`;
-    ctx.lineWidth = Math.max(1, ch * 0.048);
+  ctx.lineJoin = "miter";
+  ctx.lineCap = "butt";
+
+  /* Мягкая тень под «блоком» — ощущение веса и высоты */
+  const shGrad = ctx.createRadialGradient(
+    px + cw * 0.5,
+    py + ch * 0.94,
+    cw * 0.06,
+    px + cw * 0.5,
+    py + ch * 0.94,
+    cw * 0.58
+  );
+  shGrad.addColorStop(0, `rgba(0,0,0,${0.38 + stress * 0.12})`);
+  shGrad.addColorStop(0.55, `rgba(0,0,0,${0.12 + stress * 0.06})`);
+  shGrad.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = shGrad;
+  ctx.beginPath();
+  ctx.ellipse(px + cw * 0.5, py + ch * 0.93, cw * 0.46, ch * 0.16, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  /* Боковая грань (тёмнее) — глубина */
+  const sideW = Math.max(1.5, cw * 0.07);
+  ctx.fillStyle = `rgba(${Math.max(0, r - 70)},${Math.max(0, g - 70)},${Math.max(0, b - 70)},0.55)`;
+  ctx.beginPath();
+  ctx.moveTo(px + cw - pad, py + ch - pad);
+  ctx.lineTo(px + cw - pad + sideW * 0.35, py + ch - pad + lift * 0.25);
+  ctx.lineTo(px + cw - pad + sideW * 0.35, faceY + faceH);
+  ctx.lineTo(px + cw - pad, py + ch - pad);
+  ctx.fill();
+
+  /* Основная грань: камень + лёгкий оттенок команды (не «плоский пиксель») */
+  const faceGrad = ctx.createLinearGradient(faceX, faceY, faceX + faceW, faceY + faceH);
+  faceGrad.addColorStop(0, `rgba(210, 200, 188, ${0.92 - stress * 0.08})`);
+  faceGrad.addColorStop(0.35, `rgba(${Math.min(255, r + 40)},${Math.min(255, g + 35)},${Math.min(255, b + 30)},0.42)`);
+  faceGrad.addColorStop(0.65, `rgba(78, 72, 68, ${0.55 + stress * 0.12})`);
+  faceGrad.addColorStop(1, `rgba(22, 18, 16, ${0.72 + stress * 0.1})`);
+  ctx.fillStyle = faceGrad;
+  ctx.fillRect(faceX, faceY, faceW, faceH);
+
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillStyle = `rgba(${r},${g},${b},${0.38 + pulse * 0.06})`;
+  ctx.fillRect(faceX, faceY, faceW, faceH);
+  ctx.globalCompositeOperation = "source-over";
+
+  /* Кладка / армированная текстура */
+  ctx.strokeStyle = `rgba(18, 16, 14, ${0.35 + stress * 0.15})`;
+  ctx.lineWidth = Math.max(0.6, ch * 0.018);
+  const rows = 4;
+  for (let i = 1; i < rows; i++) {
+    const yy = faceY + (faceH * i) / rows;
     ctx.beginPath();
-    ctx.moveTo(px + cw * 0.14, py + ch * 0.34);
-    ctx.lineTo(px + cw * 0.8, py + ch * 0.7);
+    ctx.moveTo(faceX + faceW * 0.04, yy);
+    ctx.lineTo(faceX + faceW * 0.96, yy);
+    ctx.stroke();
+  }
+  ctx.fillStyle = `rgba(255, 252, 245, ${0.04 + pulse * 0.04})`;
+  for (let i = 0; i < 3; i++) {
+    const ox = faceX + faceW * (0.18 + i * 0.28);
+    ctx.fillRect(ox, faceY + faceH * 0.12, faceW * 0.08, faceH * 0.78);
+  }
+
+  /* Верхний парапет (свет сверху) */
+  const capGrad = ctx.createLinearGradient(faceX, faceY, faceX, faceY + capH);
+  capGrad.addColorStop(0, `rgba(255,255,255,${0.35 + pulse * 0.1})`);
+  capGrad.addColorStop(0.55, `rgba(${r},${g},${b},0.35)`);
+  capGrad.addColorStop(1, "rgba(40,32,28,0.55)");
+  ctx.fillStyle = capGrad;
+  ctx.fillRect(faceX - pad * 0.2, faceY - capH * 0.2, faceW + pad * 0.4, capH);
+
+  /* Толстая внешняя рамка-барьер */
+  ctx.strokeStyle = `rgba(240, 232, 220, ${0.55 + pulse * 0.12})`;
+  ctx.lineWidth = Math.max(2, ch * 0.095);
+  ctx.strokeRect(faceX + 0.5, faceY + 0.5, faceW - 1, faceH - 1);
+  ctx.strokeStyle = `rgba(12, 10, 8, ${0.75 + stress * 0.1})`;
+  ctx.lineWidth = Math.max(1.2, ch * 0.055);
+  ctx.strokeRect(px + 0.5, py + 0.5, cw - 1, ch - 1);
+
+  /* «Заклёпки» (металл) — только при полном HP */
+  if (wh >= 3) {
+    const rivet = Math.max(1.2, ch * 0.055);
+    ctx.fillStyle = "rgba(180, 175, 168, 0.9)";
+    for (const [rx, ry] of [
+      [faceX + faceW * 0.12, faceY + faceH * 0.2],
+      [faceX + faceW * 0.88, faceY + faceH * 0.2],
+      [faceX + faceW * 0.12, faceY + faceH * 0.8],
+      [faceX + faceW * 0.88, faceY + faceH * 0.8],
+    ]) {
+      ctx.beginPath();
+      ctx.arc(rx, ry, rivet * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  /* Трещины по урону */
+  if (wh <= 2) {
+    ctx.strokeStyle = `rgba(18, 14, 12, ${0.75 + pulse * 0.15})`;
+    ctx.lineWidth = Math.max(1.1, ch * 0.055);
+    ctx.beginPath();
+    ctx.moveTo(faceX + faceW * 0.1, faceY + faceH * 0.38);
+    ctx.lineTo(faceX + faceW * 0.82, faceY + faceH * 0.72);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(18, 14, 12, ${0.45 + pulse * 0.1})`;
+    ctx.lineWidth = Math.max(0.6, ch * 0.032);
+    ctx.beginPath();
+    ctx.moveTo(faceX + faceW * 0.72, faceY + faceH * 0.28);
+    ctx.lineTo(faceX + faceW * 0.45, faceY + faceH * 0.55);
     ctx.stroke();
   }
   if (wh <= 1) {
-    ctx.strokeStyle = `rgba(110,48,28,${0.72 + pulse * 0.18})`;
+    ctx.strokeStyle = `rgba(110, 48, 28, ${0.85 + pulse * 0.1})`;
     ctx.lineWidth = Math.max(1.15, ch * 0.065);
     ctx.beginPath();
-    ctx.moveTo(px + cw * 0.84, py + ch * 0.2);
-    ctx.lineTo(px + cw * 0.2, py + ch * 0.9);
-    ctx.moveTo(px + cw * 0.74, py + ch * 0.14);
-    ctx.lineTo(px + cw * 0.12, py + ch * 0.64);
+    ctx.moveTo(faceX + faceW * 0.88, faceY + faceH * 0.18);
+    ctx.lineTo(faceX + faceW * 0.18, faceY + faceH * 0.92);
+    ctx.moveTo(faceX + faceW * 0.78, faceY + faceH * 0.12);
+    ctx.lineTo(faceX + faceW * 0.08, faceY + faceH * 0.62);
     ctx.stroke();
+    ctx.fillStyle = `rgba(255, 90, 40, ${0.12 + pulse * 0.06})`;
+    ctx.fillRect(faceX, faceY, faceW, faceH);
   }
-  ctx.fillStyle = "rgba(0,0,0,0.28)";
-  ctx.font = `800 ${Math.max(7, ch * 0.3)}px system-ui,Segoe UI,sans-serif`;
+
+  /* HP-бейдж */
+  const badgeW = Math.max(10, cw * 0.34);
+  const badgeH = Math.max(8, ch * 0.22);
+  const bx = px + cw * 0.5 - badgeW * 0.5;
+  const by = py + ch - badgeH - pad * 0.8;
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(bx, by, badgeW, badgeH);
+  ctx.strokeStyle = `rgba(${r},${g},${b},0.85)`;
+  ctx.lineWidth = Math.max(1, ch * 0.04);
+  ctx.strokeRect(bx + 0.5, by + 0.5, badgeW - 1, badgeH - 1);
+  ctx.fillStyle = `rgba(255, 250, 240, 0.95)`;
+  ctx.font = `800 ${Math.max(7, ch * 0.26)}px system-ui,Segoe UI,sans-serif`;
   ctx.textAlign = "center";
-  ctx.textBaseline = "bottom";
-  ctx.fillText(String(wh), px + cw * 0.5, py + ch - ch * 0.08);
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(wh), bx + badgeW * 0.5, by + badgeH * 0.52);
   ctx.restore();
 }
 
@@ -9459,7 +9810,7 @@ function draw(time = performance.now(), drawOpts = {}) {
               }
             }
             const wHp = typeof owner === "object" && owner ? normalizeWallHp(owner.wallHp) : 0;
-            if (wHp > 0 && cell >= 2.2) {
+            if (wHp > 0 && cell >= 1.6) {
               drawGreatWallStoneDecor(ctx, px, py, cw, ch, tc, wHp, time);
             }
           }
@@ -10614,6 +10965,7 @@ function draw(time = performance.now(), drawOpts = {}) {
   } else if (teamBadge) {
     teamBadge.classList.remove("team-badge--last-cell", "team-badge--danger");
   }
+  syncQuantumFarmPanelLayoutIfOpen();
   if (perfDebug) perfRecordDraw(performance.now() - _perf0, lite);
 }
 
@@ -10628,14 +10980,6 @@ function placePixel(gx, gy) {
   }
 
   const online = wantOnline && getWsUrl();
-  if (online && gamePausedMeta) {
-    notifyReject("paused");
-    return;
-  }
-  if (online && spectatorMode) {
-    notifyReject("spectator");
-    return;
-  }
   if (online) {
     if (myTeamId == null) {
       notifyReject("no_team");
@@ -10648,17 +10992,33 @@ function placePixel(gx, gy) {
   const onEnemyFlag =
     Boolean(online && myTeamId != null && clientIsEnemyBaseFlagCellCoords(gx, gy));
 
-  if (online && isClientWarmupPhase() && !onEnemyFlag) {
-    notifyReject("warmup");
-    return;
-  }
-
-  if (online && !onEnemyFlag && !pendingMapAction) {
+  /* Тап по квантоферме: панель улучшения — до паузы/наблюдателя/разминки и даже при активном «оружии» из магазина (раньше warmup/pending блокировали открытие). */
+  if (online && myTeamId != null && !onEnemyFlag) {
     const qFarmCell = findQuantumFarmCoveringCell(gx, gy);
     if (qFarmCell) {
+      if (pendingMapAction) {
+        pendingMapAction = null;
+        setPendingHint();
+      }
       openQuantumFarmPanel(qFarmCell);
       return;
     }
+  }
+
+  if (quantumFarmPanelEl && !quantumFarmPanelEl.hidden) closeQuantumFarmPanel();
+
+  if (online && gamePausedMeta) {
+    notifyReject("paused");
+    return;
+  }
+  if (online && spectatorMode) {
+    notifyReject("spectator");
+    return;
+  }
+
+  if (online && isClientWarmupPhase() && !onEnemyFlag) {
+    notifyReject("warmup");
+    return;
   }
 
   if (online && pendingMapAction && !onEnemyFlag) {
@@ -11107,6 +11467,7 @@ async function bootstrap() {
   setupWelcomeUi();
   setupTeamSettingsUi();
   setupCreateTeamUi();
+  setupLeaderboardPanelUi();
   setupToolbarSession();
   setupGestures();
   setupEconomyUi();

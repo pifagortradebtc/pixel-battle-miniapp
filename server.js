@@ -26,9 +26,10 @@ import {
   PRICES_QUANT,
   RECOVERY_BUFF_DURATION_MS,
   REFERRAL_JOIN_INVITER_QUANT,
-  getCurrentCooldownMs,
   getEffectiveRecoverySec,
   quantToUsdt,
+  resolveAuthoritativePixelCooldownMs,
+  resolveAuthoritativeRecoverySec,
   stageAllows,
   stageAllowsRecoveryPurchases,
   tournamentStage,
@@ -691,7 +692,7 @@ let roundStartMs = Date.now();
 let playStartMs = Date.now();
 /** «Мстим за Альт Сезон»: глобально пиксель раз в 1 с для всех (бот: speed). */
 const MSTIM_ALT_SEASON_DURATION_MS = 5 * 60 * 1000;
-const MSTIM_PIXEL_COOLDOWN_MS = 1000;
+const DEBUG_MSTIM_COOLDOWN = /^true$/i.test(String(process.env.DEBUG_MSTIM_COOLDOWN || "").trim());
 /** До какого момента (epoch ms) действует режим; 0 — выкл. */
 let mstimAltSeasonBurstUntilMs = 0;
 
@@ -2272,13 +2273,11 @@ function isMstimAltSeasonBurstActive() {
 }
 
 function effectivePixelCooldownMs(u, teamFx, st, now) {
-  if (isMstimAltSeasonBurstActive()) return MSTIM_PIXEL_COOLDOWN_MS;
-  return getCurrentCooldownMs(u, teamFx, st, now);
+  return resolveAuthoritativePixelCooldownMs(isMstimAltSeasonBurstActive(), u, teamFx, st, now);
 }
 
 function effectiveRecoverySecForWallet(u, teamFx, now) {
-  if (isMstimAltSeasonBurstActive()) return 1;
-  return getEffectiveRecoverySec(u, teamFx, now);
+  return resolveAuthoritativeRecoverySec(isMstimAltSeasonBurstActive(), u, teamFx, now);
 }
 
 function getWarmupDurationMs() {
@@ -3423,8 +3422,25 @@ function applyClusterGameReplication(msg) {
       return;
     case "seismicPreview":
       return;
-    case "roundEvent":
+    case "roundEvent": {
+      /**
+       * Кластер: надёжная синхронизация mstim с roundEvent (speed шлёт и mstimAltSeasonSync, и roundEvent).
+       * Если sync-пакет не дошёл до инстанса, раньше здесь был «return» — оставались until=0 и кулдаун 15 с при живом HUD.
+       */
+      if (msg.phase === "start" && String(msg.eventType || "") === "alt_season_revenge") {
+        const u = Number(msg.untilMs);
+        if (Number.isFinite(u) && u > 0) {
+          const next = u | 0;
+          if ((mstimAltSeasonBurstUntilMs | 0) !== next) {
+            mstimAltSeasonBurstUntilMs = next;
+            if (DEBUG_MSTIM_COOLDOWN) {
+              console.log(`[mstim] cluster roundEvent hydrate untilMs=${next} leader=${isClusterLeader()}`);
+            }
+          }
+        }
+      }
       return;
+    }
     case "seismicImpact": {
       const list = Array.isArray(msg.cells) ? msg.cells : [];
       for (let i = 0; i < list.length; i++) {
@@ -3730,6 +3746,11 @@ function applyClusterGameReplication(msg) {
     case "mstimAltSeasonSync": {
       const u = Number(msg.untilMs);
       mstimAltSeasonBurstUntilMs = Number.isFinite(u) && u > 0 ? u | 0 : 0;
+      if (DEBUG_MSTIM_COOLDOWN) {
+        console.log(
+          `[mstim] cluster sync untilMs=${mstimAltSeasonBurstUntilMs} active=${isMstimAltSeasonBurstActive()} leader=${isClusterLeader()}`
+        );
+      }
       return;
     }
     case "quantumFarmsInit": {
@@ -3874,9 +3895,8 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
     addBfsSeedsFromRectInVertices(vertices, o.x0, o.y0, TEAM_SPAWN_SIZE, out, stack);
   }
-  if (!stack.length) {
-    addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, TEAM_SPAWN_SIZE, out, stack);
-  }
+  /* Всегда touch-seeds от всех баз (как в computeSupplyReachableFromTeamBases), иначе FOB без связи с семенами главной не стартует BFS. */
+  addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, TEAM_SPAWN_SIZE, out, stack);
   if (!stack.length) {
     baseConnectedPixelsCacheByTeam.set(tid, out);
     return out;
@@ -4601,17 +4621,23 @@ function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
   }
 }
 
-function paintTeamSpawnArea(teamId, x0, y0, ownerPk) {
-  invalidateTeamScoresAggCache();
+/** Закрасить 6×6 без afterTerritoryMutation (пакетное восстановление плацдармов). */
+function paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk) {
   const opk = String(ownerPk || "").slice(0, 128);
+  const tid = teamId | 0;
   for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
     for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
       if (!cellAllowsPixelPlacement(x, y)) continue;
       const k = `${x},${y}`;
-      pixels.set(k, { teamId, ownerPlayerKey: opk, shieldedUntil: 0 });
-      queuePixelBroadcast(x, y, teamId, opk, 0);
+      pixels.set(k, { teamId: tid, ownerPlayerKey: opk, shieldedUntil: 0 });
+      queuePixelBroadcast(x, y, tid, opk, 0);
     }
   }
+}
+
+function paintTeamSpawnArea(teamId, x0, y0, ownerPk) {
+  invalidateTeamScoresAggCache();
+  paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk);
   afterTerritoryMutation();
 }
 
@@ -4652,8 +4678,34 @@ function ensureAllTeamSpawnsAfterLoad() {
   afterTerritoryMutation();
 }
 
-/** Зарезервировано под миграции; плацдарм не снимается таймером «пустой 6×6». */
-function ensureMilitaryOutpostPixelsAfterLoad() {}
+/** После рестарта сервера: заново закрасить 6×6 купленных плацдармов (мета уже в dynamic-teams.json). */
+function ensureMilitaryOutpostPixelsAfterLoad() {
+  let any = false;
+  for (const t of dynamicTeams) {
+    if (t.solo || t.eliminated) continue;
+    const tid = t.id | 0;
+    for (const o of getTeamMilitaryOutposts(t)) {
+      if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
+      const x0 = o.x0 | 0;
+      const y0 = o.y0 | 0;
+      let need = false;
+      for (let y = y0; y < y0 + TEAM_SPAWN_SIZE && !need; y++) {
+        for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
+          const p = pixels.get(`${x},${y}`);
+          if (!p || pixelTeam(p) !== tid) {
+            need = true;
+            break;
+          }
+        }
+      }
+      if (need) {
+        any = true;
+        paintTeamSpawnCellsOnly(tid, x0, y0, "");
+      }
+    }
+  }
+  if (any) invalidateTeamScoresAggCache();
+}
 
 /** Подсчёт пикселей по teamId на суше (как в stats). */
 function computeTeamTerritoryCounts() {
@@ -6986,6 +7038,8 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "nuke_no_effect" });
         return;
       }
+      const nowNuke = Date.now();
+      const aidNuke = ws.teamId | 0;
       /** Клетки, которые станут нейтральными (удаление). Стены: −1 HP за бомбу; при 0 HP — сюда же. */
       /** @type {[number, number][]} */
       const deleteTargets = [];
@@ -6999,6 +7053,7 @@ wss.on("connection", (ws, req) => {
         const v = pixels.get(key);
         if (v == null) continue;
         if ((pixelTeam(v) | 0) === 0) continue;
+        if ((pixelTeam(v) | 0) === aidNuke) continue;
         const wh = pixelWallHp(v);
         if (wh > 0) {
           const pEx = normalizePixel(v);
@@ -7012,8 +7067,6 @@ wss.on("connection", (ws, req) => {
           deleteTargets.push([x | 0, y | 0]);
         }
       }
-      const nowNuke = Date.now();
-      const aidNuke = ws.teamId | 0;
       let nukeDidFlagDamage = false;
       for (const t of dynamicTeams) {
         if (t.solo || t.eliminated) continue;
@@ -7508,6 +7561,12 @@ wss.on("connection", (ws, req) => {
       const now = Date.now();
       const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
       if (now < u.lastActionAt + cd) {
+        if (DEBUG_MSTIM_COOLDOWN) {
+          const mA = isMstimAltSeasonBurstActive();
+          console.log(
+            `[mstim] pixel cooldown reject pk=${String(pk).slice(0, 16)} cd=${cd} needWait=${u.lastActionAt + cd - now}ms mstimUntil=${mstimAltSeasonBurstUntilMs} active=${mA}`
+          );
+        }
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "cooldown not ready" });
         safeSend(ws, { type: "pixelReject", reason: "cooldown not ready" });
         return;
@@ -8496,6 +8555,9 @@ async function telegramPollLoop() {
           }
           mstimAltSeasonBurstUntilMs = Date.now() + MSTIM_ALT_SEASON_DURATION_MS;
           saveRoundState();
+          if (DEBUG_MSTIM_COOLDOWN) {
+            console.log(`[mstim] speed ON until=${mstimAltSeasonBurstUntilMs} (effective cd 1000 ms for all players)`);
+          }
           broadcast({ type: "mstimAltSeasonSync", untilMs: mstimAltSeasonBurstUntilMs });
           broadcast({
             type: "roundEvent",
