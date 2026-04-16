@@ -59,9 +59,11 @@ import {
 import { computeNukeBombBlastCells } from "../lib/nuke-bomb-shape.js";
 import {
   flagCellFromSpawn,
+  flagCellFromMilitaryOutpost,
   FLAG_BASE_MAX_HP,
   FLAG_MAIN_BASE_MAX_HP,
   FLAG_SPAWN_SIZE,
+  MILITARY_OUTPOST_SIZE,
   FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
   FLAG_REGEN_DURATION_MS,
   FLAG_REGEN_IDLE_MS,
@@ -78,6 +80,10 @@ import {
   QUANTUM_FARM_MAX_LEVEL,
   quantumFarmTierMeta,
 } from "../lib/quantum-farm-upgrades.js";
+import {
+  getMstimAltSeasonClientBurstUntilMs,
+  setMstimAltSeasonClientBurstUntilMs,
+} from "./mstim-alt-season-client.js";
 import { GREAT_WALL_MAX_HP, normalizeWallHp } from "../lib/great-wall.js";
 import { isUsdtDepositsEnabled } from "../lib/usdt-deposits-enabled.js";
 
@@ -729,8 +735,8 @@ function addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, default
     rects.push({
       x0: r.x0 | 0,
       y0: r.y0 | 0,
-      w: typeof r.w === "number" ? r.w | 0 : S,
-      h: typeof r.h === "number" ? r.h | 0 : S,
+      w: typeof r.w === "number" ? r.w | 0 : MILITARY_OUTPOST_SIZE,
+      h: typeof r.h === "number" ? r.h | 0 : MILITARY_OUTPOST_SIZE,
     });
   }
   for (let ri = 0; ri < rects.length; ri++) {
@@ -893,7 +899,7 @@ let optimisticWeaponPending = null;
 /** Антиспам: повторный purchaseVfx плацдарма своей команды (сетевой дубль / гонка). */
 let lastMyTeamMilitaryPurchaseVfxAtMs = 0;
 
-/** Повторный звук military_base для того же квадрата 6×6 (дубль сообщения / репликация). */
+/** Повторный звук military_base для того же якоря 2×2 (дубль сообщения / репликация). */
 let lastMilitaryDeploySoundKey = "";
 let lastMilitaryDeploySoundAtMs = 0;
 
@@ -1083,7 +1089,7 @@ function clientMainFlagKey(teamId) {
 function clientMilitaryFlagKey(teamId, x0, y0) {
   return `m:${teamId | 0}:${x0 | 0}:${y0 | 0}`;
 }
-/** Сообщения flag* с опциональным militaryAnchor для передовой 6×6. */
+/** Сообщения flag* с опциональным militaryAnchor для плацдарма 2×2 (левый верх). */
 function clientFlagKeyFromServerMsg(msg) {
   if (
     msg.militaryAnchor &&
@@ -1247,7 +1253,7 @@ function clientCellInsideSpawnRect(x, y, sp) {
   return x >= sp.x0 && x < sp.x0 + sp.w && y >= sp.y0 && y < sp.y0 + sp.h;
 }
 
-/** Прямоугольники передовых баз команды из meta (как на сервере 6×6). */
+/** Прямоугольники передовых баз команды из meta (плацдарм 2×2, якорь — левый верх). */
 function clientMilitaryOutpostRects(teamId) {
   if (teamId == null || !teamsMeta) return [];
   const t = teamsMeta.find((x) => (x.id | 0) === (teamId | 0));
@@ -1258,8 +1264,8 @@ function clientMilitaryOutpostRects(teamId) {
   for (let i = 0; i < arr.length; i++) {
     const r = arr[i];
     if (!r || typeof r.x0 !== "number" || typeof r.y0 !== "number") continue;
-    const w = typeof r.w === "number" ? r.w : FLAG_SPAWN_SIZE;
-    const h = typeof r.h === "number" ? r.h : FLAG_SPAWN_SIZE;
+    const w = typeof r.w === "number" ? r.w : MILITARY_OUTPOST_SIZE;
+    const h = typeof r.h === "number" ? r.h : MILITARY_OUTPOST_SIZE;
     out.push({ x0: r.x0 | 0, y0: r.y0 | 0, w, h });
   }
   return out;
@@ -1274,8 +1280,8 @@ function clientCellInsideAnyMilitaryOutpost(x, y, teamId) {
 }
 
 /**
- * 8-соседство: своя закрашенная клетка только если в компоненте, снабжаемом с любой активной базы 6×6;
- * иначе — пустые клетки внутри 6×6 главной базы / плацдарма.
+ * 8-соседство: своя закрашенная клетка только если в компоненте, снабжаемом с любой активной базы (главная 6×6 или плацдарм 2×2);
+ * иначе — пустые клетки внутри прямоугольника главной базы / плацдарма.
  * `baseConnOverride` — свежий BFS при клике; иначе кэш на кадр (отрисовка зоны расширения).
  * Совпадает с cellTouchesTeamTerritory на сервере.
  */
@@ -2566,7 +2572,7 @@ const TOURNAMENT_ROUND_COPY = [
     title: "РАУНД 1 — МАССОВАЯ БИТВА",
     splashKicker: "МАССОВАЯ БИТВА",
     splashTitle: "РАУНД 1 СТАРТОВАЛ",
-    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li><strong>Чужая главная база</strong>: удары по <strong>клетке флага</strong> — до <strong>50</strong> HP + добивание; <strong>плацдарм</strong> (магазин) — <strong>20</strong> HP; обычным пикселем базу не перекрасить; захват главной — вся команда</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
+    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li><strong>Чужая главная база</strong>: удары по <strong>клетке флага</strong> — до <strong>50</strong> HP + добивание; <strong>плацдарм</strong> 2×2 (магазин) — <strong>20</strong> HP на весь блок; удар по любой клетке плацдарма; обычным пикселем базу не перекрасить; захват главной — вся команда</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
   },
   {
     title: "РАУНД 2 — КОМАНДНЫЙ БОЙ",
@@ -2984,8 +2990,25 @@ function renderLeaderboardImmediate(msg) {
   if (!onlineCountEl || !leaderboardListEl) return;
   lastStatsPayload = msg;
   if (msg.globalEvent) {
-    lastStatsGlobalEvent = msg.globalEvent;
-    if (walletState) walletState.globalEvent = msg.globalEvent;
+    const incAlt0 = Number(msg.globalEvent.altSeasonRevengeUntilMs) || 0;
+    if (incAlt0 > Date.now()) setMstimAltSeasonClientBurstUntilMs(incAlt0);
+    const syncAlt = getMstimAltSeasonClientBurstUntilMs();
+    const incAlt = Number(msg.globalEvent.altSeasonRevengeUntilMs) || 0;
+    const ge =
+      syncAlt > incAlt
+        ? {
+            ...msg.globalEvent,
+            active: true,
+            kind: "alt_season_revenge",
+            title: msg.globalEvent.title || "Мстим за Альт Сезон",
+            subtitle: msg.globalEvent.subtitle || "Пиксель раз в 1 с для всех",
+            until: syncAlt,
+            altSeasonRevengeUntilMs: syncAlt,
+          }
+        : msg.globalEvent;
+    lastStatsGlobalEvent = ge;
+    if (walletState) walletState.globalEvent = ge;
+    syncClientCooldownFromWalletFields();
   }
   const rows = Array.isArray(msg.rows) ? msg.rows : [];
   lastLeaderboardRows = rows;
@@ -3001,7 +3024,7 @@ function renderLeaderboardImmediate(msg) {
   for (let i = 0; i < slice.length; i++) {
     const row = slice[i];
     const li = document.createElement("li");
-    li.className = "lb-row";
+    li.className = "lb-row" + (i >= 3 ? " lb-row--past-top3" : "");
     li.style.setProperty("--lb-accent", row.color || "#64748b");
     if ((row.rank | 0) === 1) li.classList.add("lb-row--leader");
     if (myTeamId != null && (row.teamId | 0) === (myTeamId | 0)) li.classList.add("lb-row--mine");
@@ -3045,11 +3068,11 @@ function renderLeaderboardImmediate(msg) {
 
   if (myRow && !myInSlice && !spectatorMode && myTeamId != null && !gameFinishedMeta) {
     const sep = document.createElement("li");
-    sep.className = "lb-row lb-row--sep";
+    sep.className = "lb-row lb-row--sep lb-row--past-top3";
     sep.textContent = "···";
     leaderboardListEl.appendChild(sep);
     const yours = document.createElement("li");
-    yours.className = "lb-row lb-row--mine lb-row--yours";
+    yours.className = "lb-row lb-row--mine lb-row--yours lb-row--past-top3";
     yours.style.setProperty("--lb-accent", myRow.color || "#5288c1");
     const yMain = document.createElement("div");
     yMain.className = "lb-row__main";
@@ -4495,9 +4518,9 @@ function notifyPurchaseError(reason) {
     nuke_no_effect:
       "Бомба не дала эффекта: в кратере нет закраски для сброса и не задета чужая главная база 6×6.",
     military_cooldown: "Перед следующим развёртыванием подождите (~2 мин).",
-    military_occupied: "Нужна полностью свободная суша 6×6 без чужих пикселей.",
+    military_occupied: "Нужен полностью свободный блок суши 2×2 без чужих пикселей.",
     military_water: "Нельзя разместить на воде.",
-    military_bounds: "Слишком близко к краю карты (нужен полный квадрат 6×6).",
+    military_bounds: "Слишком близко к краю карты (нужен полный квадрат 2×2).",
     military_conflict: "Пересечение с базой, передовой базой или запретной зоной.",
     military_too_close_own_main: "Слишком близко к вашей главной базе.",
     military_too_close_enemy_main: "Слишком близко к чужой главной базе.",
@@ -5303,6 +5326,8 @@ function syncToolbarQuantumObjective() {
 }
 
 function applyWalletFromServer(msg) {
+  const altW = Number(msg?.globalEvent?.altSeasonRevengeUntilMs) || 0;
+  if (altW > Date.now()) setMstimAltSeasonClientBurstUntilMs(altW);
   walletState = msg;
   syncClientCooldownFromWalletFields();
   updateWalletBar();
@@ -5875,7 +5900,7 @@ function applyGlobalPurchaseVfx(msg) {
       lastMyTeamMilitaryPurchaseVfxAtMs = nowMs;
     }
     const col = teamColor(msg.teamId | 0);
-    enqueueTerritoryCapturePresentation("militaryBase", teamNameForPresentation(msg.teamId), FLAG_SPAWN_SIZE, {
+    enqueueTerritoryCapturePresentation("militaryBase", teamNameForPresentation(msg.teamId), MILITARY_OUTPOST_SIZE, {
       scope: /** @type {const} */ ("global"),
       weight: 1,
     });
@@ -5890,7 +5915,12 @@ function applyGlobalPurchaseVfx(msg) {
       });
     }
     scheduleDraw({
-      dirty: { gx0: gxi, gy0: gyi, gx1: gxi + FLAG_SPAWN_SIZE - 1, gy1: gyi + FLAG_SPAWN_SIZE - 1 },
+      dirty: {
+        gx0: gxi,
+        gy0: gyi,
+        gx1: gxi + MILITARY_OUTPOST_SIZE - 1,
+        gy1: gyi + MILITARY_OUTPOST_SIZE - 1,
+      },
     });
     return;
   }
@@ -7134,7 +7164,7 @@ function setPendingHint() {
     if (pendingMapAction.type === "nukeBomb")
       return "Бомба: тап по эпицентру — взрыв ~12×12; чужие клетки снимаются, свои не страдают";
     if (pendingMapAction.type === "militaryBase")
-      return "Передовая база 6×6 — второй активный корень команды: снабжение и изоляция считаются от главной И от неё. Тап по центру на чистой суше";
+      return "Плацдарм 2×2 — второй корень команды для расширения и снабжения. Тап по левому верхнему углу блока на чистой суше";
     if (pendingMapAction.type === "greatWall")
       return "Великая стена: тап по своей обычной клетке (не якорь флага). Укрепление до 3 HP без восстановления.";
     return "";
@@ -7146,7 +7176,7 @@ function setPendingHint() {
     if (pendingMapAction.type === "massCapture") return "6×6 · тап по центру";
     if (pendingMapAction.type === "zone12Capture") return "12×12 · тап по центру";
     if (pendingMapAction.type === "nukeBomb") return "☢ бомба · ~12×12, край неровный · тап";
-    if (pendingMapAction.type === "militaryBase") return "Плацдарм 6×6 · превью";
+    if (pendingMapAction.type === "militaryBase") return "Плацдарм 2×2 · превью";
     if (pendingMapAction.type === "greatWall") return "Стена · тап по своей клетке";
     return "";
   })();
@@ -7476,6 +7506,15 @@ function connectWs() {
       if (msg.phase === "start" && typeof window !== "undefined" && window.console?.debug) {
         console.debug("[roundEvent]", msg.phase, msg.eventId, msg.title);
       }
+      if (
+        msg.phase === "start" &&
+        String(msg.eventType || "") === "alt_season_revenge" &&
+        typeof msg.untilMs === "number" &&
+        Number.isFinite(msg.untilMs) &&
+        (msg.untilMs | 0) > Date.now()
+      ) {
+        setMstimAltSeasonClientBurstUntilMs(msg.untilMs | 0);
+      }
       notifyRoundEventFromServer(msg);
       syncClientCooldownFromWalletFields();
       syncEventBanner();
@@ -7493,6 +7532,8 @@ function connectWs() {
     }
     if (msg.type === "globalEvent") {
       if (msg.globalEvent && typeof msg.globalEvent === "object") {
+        const altG = Number(msg.globalEvent.altSeasonRevengeUntilMs) || 0;
+        if (altG > Date.now()) setMstimAltSeasonClientBurstUntilMs(altG);
         if (walletState) walletState.globalEvent = msg.globalEvent;
         lastStatsGlobalEvent = msg.globalEvent;
         syncClientCooldownFromWalletFields();
@@ -7505,6 +7546,7 @@ function connectWs() {
     if (msg.type === "mstimAltSeasonSync") {
       const u = Number(msg.untilMs) || 0;
       const until = u > 0 ? u : 0;
+      setMstimAltSeasonClientBurstUntilMs(until);
       const patch = { altSeasonRevengeUntilMs: until };
       if (walletState) {
         walletState.globalEvent = { ...(walletState.globalEvent || {}), ...patch };
@@ -7693,9 +7735,10 @@ function connectWs() {
               typeof msg.militaryAnchor.x0 === "number" &&
               typeof msg.militaryAnchor.y0 === "number"
             ) {
-              const a = flagCellFromSpawn(msg.militaryAnchor.x0 | 0, msg.militaryAnchor.y0 | 0);
-              fgx = a.x;
-              fgy = a.y;
+              const a = flagCellFromMilitaryOutpost(msg.militaryAnchor.x0 | 0, msg.militaryAnchor.y0 | 0);
+              /* Эпицентр VFX — центр блока 2×2 (якорь HP — левый верх). */
+              fgx = a.x + MILITARY_OUTPOST_SIZE * 0.5;
+              fgy = a.y + MILITARY_OUTPOST_SIZE * 0.5;
             } else {
               const def = teamsMeta.find((x) => (Number(x.id) | 0) === did);
               if (def?.spawn) {
@@ -7785,9 +7828,9 @@ function connectWs() {
       const x0 = msg.x0 | 0;
       const y0 = msg.y0 | 0;
       flagCaptureClientState.delete(clientMilitaryFlagKey(did, x0, y0));
-      const S = FLAG_SPAWN_SIZE;
-      for (let yy = y0; yy < y0 + S; yy++) {
-        for (let xx = x0; xx < x0 + S; xx++) {
+      const Mcap = MILITARY_OUTPOST_SIZE;
+      for (let yy = y0; yy < y0 + Mcap; yy++) {
+        for (let xx = x0; xx < x0 + Mcap; xx++) {
           pixels.set(`${xx},${yy}`, { teamId: aid, ownerPlayerKey: "", shieldedUntil: 0 });
         }
       }
@@ -7806,7 +7849,7 @@ function connectWs() {
       const an = teamsMeta?.find((x) => (Number(x.id) | 0) === aid)?.name || "атакующие";
       const dn = teamsMeta?.find((x) => (Number(x.id) | 0) === did)?.name || "защита";
       showPlacementFeedback(
-        `Передовая база захвачена: плацдарм 6×6 у «${an}» (команда «${dn}» не выбыла).`,
+        `Передовая база захвачена: плацдарм 2×2 у «${an}» (команда «${dn}» не выбыла).`,
         "warn",
         { telegramAlert: false }
       );
@@ -9032,8 +9075,7 @@ function isClientEnemyOwnedFlagAnchor(attackerTeamId, gx, gy) {
     const mos = clientMilitaryOutpostRects(tid);
     for (let mi = 0; mi < mos.length; mi++) {
       const r = mos[mi];
-      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
-      if (fx !== gx || fy !== gy) continue;
+      if (!clientCellInsideSpawnRect(gx, gy, r)) continue;
       const owner = clientPixelOwnerTeamAt(gx, gy);
       return owner === tid;
     }
@@ -9053,8 +9095,7 @@ function clientCellIsAnyFlagAnchor(gx, gy) {
     const mos = clientMilitaryOutpostRects(t.id | 0);
     for (let mi = 0; mi < mos.length; mi++) {
       const r = mos[mi];
-      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
-      if (fx === gx && fy === gy) return true;
+      if (clientCellInsideSpawnRect(gx, gy, r)) return true;
     }
   }
   return false;
@@ -9075,8 +9116,7 @@ function clientIsEnemyBaseFlagCellCoords(gx, gy) {
     const mos = clientMilitaryOutpostRects(tid);
     for (let mi = 0; mi < mos.length; mi++) {
       const r = mos[mi];
-      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
-      if (fx === gx && fy === gy) return true;
+      if (clientCellInsideSpawnRect(gx, gy, r)) return true;
     }
   }
   return false;
@@ -9099,8 +9139,7 @@ function clientShouldIgnoreTerritoryPixelOnEnemyFlagAnchor(x, y, newTeamId) {
     const mos = clientMilitaryOutpostRects(tid);
     for (let mi = 0; mi < mos.length; mi++) {
       const r = mos[mi];
-      const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
-      if (fx === x && fy === y) return tid !== nid;
+      if (clientCellInsideSpawnRect(x, y, r)) return tid !== nid;
     }
   }
   return false;
@@ -9151,30 +9190,46 @@ function clientRectChebyshevEdgeGap(x0, y0, w, h, ox0, oy0, ow, oh) {
 
 function clientAllSpawnLikeRectsForMilitaryPreview() {
   if (!teamsMeta) return [];
-  /** @type {{ x0: number, y0: number }[]} */
+  /** @type {{ x0: number, y0: number, w: number, h: number }[]} */
   const out = [];
   for (const t of teamsMeta) {
     if (t.solo || t.eliminated) continue;
     if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
-      out.push({ x0: t.spawn.x0 | 0, y0: t.spawn.y0 | 0 });
+      const sp = t.spawn;
+      const w = typeof sp.w === "number" ? sp.w | 0 : FLAG_SPAWN_SIZE;
+      const h = typeof sp.h === "number" ? sp.h | 0 : FLAG_SPAWN_SIZE;
+      out.push({ x0: sp.x0 | 0, y0: sp.y0 | 0, w, h });
     }
     for (const r of clientMilitaryOutpostRects(t.id)) {
-      out.push({ x0: r.x0, y0: r.y0 });
+      out.push({ x0: r.x0, y0: r.y0, w: r.w | 0, h: r.h | 0 });
     }
   }
   return out;
 }
 
+function clientSpawnRectsConflictSized(ax0, ay0, aw, ah, bx0, by0, bw, bh) {
+  const g = CLIENT_SPAWN_RECT_GAP;
+  const aL = ax0 - g;
+  const aT = ay0 - g;
+  const aR = ax0 + aw + g - 1;
+  const aB = ay0 + ah + g - 1;
+  const bL = bx0 - g;
+  const bT = by0 - g;
+  const bR = bx0 + bw + g - 1;
+  const bB = by0 + bh + g - 1;
+  return !(aR < bL || bR < aL || aB < bT || bB < aT);
+}
+
 /**
- * Клиентская проверка 6×6 для превью (центр клика cx,cy как у масс-захвата).
+ * Клиентская проверка плацдарма 2×2 для превью (клик = левый верх блока).
  * @returns {{ ok: true } | { ok: false, reason: string }}
  */
 function validateClientMilitaryBasePreview(cx, cy) {
   if (myTeamId == null) return { ok: false, reason: "no_team" };
   const tid = myTeamId | 0;
-  const x0 = (cx | 0) - 2;
-  const y0 = (cy | 0) - 2;
-  const S = FLAG_SPAWN_SIZE;
+  const x0 = cx | 0;
+  const y0 = cy | 0;
+  const S = MILITARY_OUTPOST_SIZE;
   if (x0 < 0 || y0 < 0 || x0 + S > gridW || y0 + S > gridH) {
     return { ok: false, reason: "military_bounds" };
   }
@@ -9187,7 +9242,7 @@ function validateClientMilitaryBasePreview(cx, cy) {
   const reserved = clientAllSpawnLikeRectsForMilitaryPreview();
   for (let i = 0; i < reserved.length; i++) {
     const o = reserved[i];
-    if (clientSpawnRectsConflict(x0, y0, o.x0, o.y0)) {
+    if (clientSpawnRectsConflictSized(x0, y0, S, S, o.x0, o.y0, o.w, o.h)) {
       return { ok: false, reason: "military_conflict" };
     }
   }
@@ -9202,8 +9257,8 @@ function validateClientMilitaryBasePreview(cx, cy) {
       if ((t.id | 0) === tid) continue;
       const sp = t.spawn;
       if (!sp || typeof sp.x0 !== "number" || typeof sp.y0 !== "number") continue;
-      const w = typeof sp.w === "number" ? sp.w : S;
-      const h = typeof sp.h === "number" ? sp.h : S;
+      const w = typeof sp.w === "number" ? sp.w : FLAG_SPAWN_SIZE;
+      const h = typeof sp.h === "number" ? sp.h : FLAG_SPAWN_SIZE;
       const g1 = clientRectChebyshevEdgeGap(x0, y0, S, S, sp.x0 | 0, sp.y0 | 0, w, h);
       if (g1 < CLIENT_MILITARY_GAP_ENEMY_MAIN) return { ok: false, reason: "military_too_close_enemy_main" };
     }
@@ -10269,12 +10324,12 @@ function draw(time = performance.now(), drawOpts = {}) {
   if (drawMilitaryPlacePreview) {
     const cx = mapHoverGx | 0;
     const cy = mapHoverGy | 0;
-    const bx0 = cx - 2;
-    const by0 = cy - 2;
+    const bx0 = cx;
+    const by0 = cy;
     const sx0 = offsetX + bx0 * cell;
     const sy0 = offsetY + by0 * cell;
-    const sw = FLAG_SPAWN_SIZE * cell;
-    const sh = FLAG_SPAWN_SIZE * cell;
+    const sw = MILITARY_OUTPOST_SIZE * cell;
+    const sh = MILITARY_OUTPOST_SIZE * cell;
     const v = validateClientMilitaryBasePreview(cx, cy);
     const ok = v.ok;
     const pulse = ok ? 0.5 + 0.5 * Math.sin(time * 0.007) : 1;
@@ -10553,7 +10608,17 @@ function draw(time = performance.now(), drawOpts = {}) {
   if (!lite && online && teamsMeta && cell >= 1.5) {
     const shNowF = Date.now();
     /** Главная база и FOB — одна логика HP (`flagCaptureClientState` по clientKey). */
-    const drawClientFlagBaseHpUi = (fgx, fgy, tidFlag, stateKey, teamHex, compact, teamDisplayName, teamEmoji) => {
+    const drawClientFlagBaseHpUi = (
+      fgx,
+      fgy,
+      tidFlag,
+      stateKey,
+      teamHex,
+      compact,
+      teamDisplayName,
+      teamEmoji,
+      compactFootprintCells = 1
+    ) => {
       const maxHpFallback = compact ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
       const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
       if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) return;
@@ -10706,7 +10771,8 @@ function draw(time = performance.now(), drawOpts = {}) {
         }
         let fs = Math.max(8, Math.min(15, cell * (compact ? 0.34 : 0.4)));
         ctx.font = `700 ${fs}px system-ui,sans-serif`;
-        if (ctx.measureText(hpLabel).width > cw * 4.2) {
+        const labelCap = compact ? Math.max(cw * 4.2, compactFootprintCells * cell * 0.92) : cw * 4.2;
+        if (ctx.measureText(hpLabel).width > labelCap) {
           fs = Math.max(7, fs * 0.88);
           ctx.font = `700 ${fs}px system-ui,sans-serif`;
         }
@@ -10768,7 +10834,8 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.lineWidth = Math.max(1, cell * 0.055);
         ctx.strokeRect(obx0 + cell * 0.18, oby0 + cell * 0.18, osw - cell * 0.36, osh - cell * 0.36);
         ctx.restore();
-        const { x: fgx, y: fgy } = flagCellFromSpawn(gx00, gy00);
+        const fgx = gx00 + gw * 0.5 - 0.5;
+        const fgy = gy00 + gh * 0.5 - 0.5;
         drawClientFlagBaseHpUi(
           fgx,
           fgy,
@@ -10777,7 +10844,8 @@ function draw(time = performance.now(), drawOpts = {}) {
           teamHex,
           true,
           typeof tm.name === "string" ? tm.name : "",
-          tm.emoji
+          tm.emoji,
+          Math.max(gw, gh)
         );
       }
     }

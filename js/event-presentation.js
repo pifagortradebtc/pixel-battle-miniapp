@@ -4,6 +4,7 @@
  */
 
 import { playPresentationSting } from "./game-audio.js";
+import { getMstimAltSeasonClientBurstUntilMs } from "./mstim-alt-season-client.js";
 
 /** @type {HTMLElement | null} */
 let cinematicRoot = null;
@@ -520,7 +521,7 @@ export function enqueueTerritoryCapturePresentation(kind, teamName, size, spatia
     subtitle = `«${name}» забирает крупный сектор`;
   } else if (kind === "militaryBase") {
     title = "ПЕРЕДОВАЯ БАЗА";
-    subtitle = `«${name}» — стратегический плацдарм 6×6. Новый фронт на карте.`;
+    subtitle = `«${name}» — стратегический плацдарм 2×2. Новый фронт на карте.`;
     holdMs = 2800;
   }
   const spatialFinal =
@@ -639,6 +640,8 @@ export function getEffectiveAltSeasonRevengeUntilMs(ge) {
   if (u <= 0 && re && String(re.eventType || "") === "alt_season_revenge" && typeof re.untilMs === "number") {
     u = re.untilMs | 0;
   }
+  const sync = getMstimAltSeasonClientBurstUntilMs();
+  if (sync > u) u = sync;
   return u;
 }
 

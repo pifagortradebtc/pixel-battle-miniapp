@@ -79,7 +79,9 @@ import {
   FLAG_REGEN_IDLE_MS,
   FLAG_WARN_THRESHOLDS,
   FLAG_WARN_THRESHOLDS_MAIN,
+  MILITARY_OUTPOST_SIZE,
   computeEffectiveBaseHp,
+  flagCellFromMilitaryOutpost,
   flagCellFromSpawn,
   toEpochMsSafe,
 } from "./lib/flag-capture.js";
@@ -172,6 +174,13 @@ const SAY_PROMPT_TTL_MS = 3 * 60 * 1000;
 const SERVER_ANNOUNCEMENT_MAX_LEN = 240;
 /** @type {Map<number, number>} админский Telegram uid → срок ожидания второго сообщения для say */
 const telegramAdminSayPromptUntil = new Map();
+const TELEGRAM_ADMIN_QUANT_FLOW_TTL_MS = 5 * 60 * 1000;
+/** Ожидание ввода суммы для «Выдать всем кванты». */
+/** @type {Map<number, { step: 'all_amount'; until: number }>} */
+const telegramAdminQuantGrantFlow = new Map();
+/** Подтверждение массовой выдачи после ввода числа. */
+/** @type {Map<number, { kind: 'all_grant'; amount: number; until: number }>} */
+const telegramAdminBulkQuantConfirm = new Map();
 
 function sanitizeServerAnnouncementText(raw) {
   let s = String(raw || "").replace(/\r\n/g, "\n");
@@ -205,6 +214,7 @@ function shouldInterruptPendingSayPrompt(raw, restartNorm) {
   if (fw === "paint" && parts.length === 1) return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
   if (fw === "quant") return true;
+  if (fw === "teamquant") return true;
   if (fw === "restart" || fw === "рестарт") return true;
   if (restartNorm === "новая игра" || restartNorm === "newgame" || restartNorm === "wipe" || restartNorm === "с нуля")
     return true;
@@ -649,6 +659,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (norm === "новая игра" || norm === "newgame" || norm === "wipe" || norm === "с нуля") return true;
   if (fw === "quant") return true;
   if (fw === "quantlist") return true;
+  if (fw === "teamquant") return true;
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
@@ -1319,8 +1330,8 @@ function buildBattleProtectedMask() {
       }
     }
     for (const o of getTeamMilitaryOutposts(t)) {
-      for (let yy = o.y0; yy < o.y0 + TEAM_SPAWN_SIZE; yy++) {
-        for (let xx = o.x0; xx < o.x0 + TEAM_SPAWN_SIZE; xx++) {
+      for (let yy = o.y0; yy < o.y0 + MILITARY_OUTPOST_SIZE; yy++) {
+        for (let xx = o.x0; xx < o.x0 + MILITARY_OUTPOST_SIZE; xx++) {
           if (xx >= 0 && xx < gridW && yy >= 0 && yy < gridH) mask[yy * gridW + xx] = 1;
         }
       }
@@ -1485,7 +1496,7 @@ function resetBattleEventsStateForNewBattleRound() {
   clearPendingManualSeismicSchedule();
 }
 
-/** Нормализованный список передовых баз 6×6 команды (из `dynamicTeams`). */
+/** Нормализованный список передовых баз 2×2 команды (из `dynamicTeams`). */
 function getTeamMilitaryOutposts(t) {
   if (!t || !Array.isArray(t.militaryOutposts)) return [];
   const out = [];
@@ -1499,7 +1510,7 @@ function getTeamMilitaryOutposts(t) {
 }
 
 /**
- * Хотя бы одна «настоящая» база 6×6: главная и/или купленный плацдарм.
+ * Хотя бы одна активная база: главная 6×6 и/или купленный плацдарм 2×2.
  * Связность и изоляция считаются от всех таких корней одинаково.
  */
 function teamHasActiveBaseAnchors(t) {
@@ -1508,17 +1519,17 @@ function teamHasActiveBaseAnchors(t) {
   return getTeamMilitaryOutposts(t).length > 0;
 }
 
-/** Углы 6×6 всех главных баз и передовых баз (для коллизий при спавне и размещении). */
+/** Прямоугольники главных баз 6×6 и плацдармов 2×2 (для коллизий при спавне и размещении). */
 function allSpawnLikeRectsForConflict() {
-  /** @type {{ x0: number, y0: number }[]} */
+  /** @type {{ x0: number, y0: number, w: number, h: number }[]} */
   const out = [];
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-      out.push({ x0: t.spawnX0, y0: t.spawnY0 });
+      out.push({ x0: t.spawnX0, y0: t.spawnY0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE });
     }
     for (const o of getTeamMilitaryOutposts(t)) {
-      out.push({ x0: o.x0, y0: o.y0 });
+      out.push({ x0: o.x0, y0: o.y0, w: MILITARY_OUTPOST_SIZE, h: MILITARY_OUTPOST_SIZE });
     }
   }
   return out;
@@ -1540,8 +1551,8 @@ function teamsForMeta() {
       ? getTeamMilitaryOutposts(t).map((o) => ({
           x0: o.x0,
           y0: o.y0,
-          w: TEAM_SPAWN_SIZE,
-          h: TEAM_SPAWN_SIZE,
+          w: MILITARY_OUTPOST_SIZE,
+          h: MILITARY_OUTPOST_SIZE,
         }))
       : [],
     /* Для кластера Redis: вторичный инстанс восстанавливает кулдаун плацдарма из того же teamsFull. */
@@ -1995,7 +2006,7 @@ const teamFirstHitPeakAt = new Map();
  */
 const flagCaptureByDefender = new Map();
 /**
- * HP флага передовой базы: ключ `${defenderId}:${x0}:${y0}` (левый верх 6×6).
+ * HP флага передовой базы: ключ `${defenderId}:${x0}:${y0}` (левый верх 2×2).
  * @type {Map<string, { hp: number, lastHitAt: number, attackerTeamId: number, _lastRegenBroadcastHp?: number, _flagRegenBroadcastPhase?: boolean, _lastRegenBroadcastAt?: number }>}
  */
 const militaryFlagCaptureByKey = new Map();
@@ -2111,8 +2122,8 @@ function rebuildLandFromRound(ri) {
   const quantumFarmAvoidRects = allSpawnLikeRectsForConflict().map((r) => ({
     x0: r.x0 | 0,
     y0: r.y0 | 0,
-    w: TEAM_SPAWN_SIZE,
-    h: TEAM_SPAWN_SIZE,
+    w: r.w | 0,
+    h: r.h | 0,
   }));
   quantumFarmLayouts = computeQuantumFarmLayouts(playableGrid, gridW, gridH, ri, quantumFarmAvoidRects);
   quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
@@ -2534,8 +2545,8 @@ function pixelTeam(val) {
 }
 
 /**
- * Все известные playerKey победившей команды для уведомления админам.
- * В дуэли 1×1 teamMemberKeys иногда пуст — добираем из создателя команды, клеток pixels и открытых WS.
+ * Все известные playerKey команды: teamMemberKeys + создатель + владельцы клеток с teamId + онлайн WS с этим teamId.
+ * Используется для дуэли, админских уведомлений и `teamquant` (личное начисление каждому ключу).
  * @param {number} winnerTeamId
  * @returns {Set<string>}
  */
@@ -3673,8 +3684,9 @@ function applyClusterGameReplication(msg) {
         if (idx >= 0) dt.militaryOutposts.splice(idx, 1);
       }
       clearMilitaryFlagStateForOutpost(did, x0, y0);
-      for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE; yy++) {
-        for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
+      const Mrep = MILITARY_OUTPOST_SIZE;
+      for (let yy = y0; yy < y0 + Mrep; yy++) {
+        for (let xx = x0; xx < x0 + Mrep; xx++) {
           pixels.set(`${xx},${yy}`, { teamId: aid, ownerPlayerKey: "", shieldedUntil: 0 });
         }
       }
@@ -3868,22 +3880,24 @@ function addBfsSeedsFromRectInVertices(vertices, x0, y0, size, out, stack) {
   }
 }
 
-/** Если внутри 6×6 базы ещё нет своих пикселей — BFS стартует от любых клеток V, 8-соседних с прямоугольником базы (плацдарм / вода в квадрате). */
-function addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, size, out, stack) {
-  const S = size | 0;
-  if (!t || S < 1) return;
-  /** @type {[number, number][]} */
-  const corners = [];
+/** Touch-seeds: главная 6×6 и каждый плацдарм 2×2 со своей стороной. */
+function addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, out, stack) {
+  if (!t) return;
+  /** @type {{ ox0: number, oy0: number, S: number }[]} */
+  const rects = [];
   if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-    corners.push([t.spawnX0 | 0, t.spawnY0 | 0]);
+    rects.push({ ox0: t.spawnX0 | 0, oy0: t.spawnY0 | 0, S: TEAM_SPAWN_SIZE });
   }
   for (const o of getTeamMilitaryOutposts(t)) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
-    corners.push([o.x0 | 0, o.y0 | 0]);
+    rects.push({ ox0: o.x0 | 0, oy0: o.y0 | 0, S: MILITARY_OUTPOST_SIZE });
   }
-  for (const [ox0, oy0] of corners) {
-    for (let y = oy0; y < oy0 + S; y++) {
-      for (let x = ox0; x < ox0 + S; x++) {
+  for (let r = 0; r < rects.length; r++) {
+    const { ox0, oy0, S } = rects[r];
+    const side = S | 0;
+    if (side < 1) continue;
+    for (let y = oy0; y < oy0 + side; y++) {
+      for (let x = ox0; x < ox0 + side; x++) {
         for (let i = 0; i < GRID8_DELTAS.length; i++) {
           const nk = makeGridCellKey(x + GRID8_DELTAS[i][0], y + GRID8_DELTAS[i][1]);
           if (vertices.has(nk) && !out.has(nk)) {
@@ -3898,7 +3912,7 @@ function addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, size, out, stac
 
 /**
  * Все закрашенные клетки команды, 8-достижимые от любой активной базы (главная + плацдармы):
- * корни — любые клетки V внутри соответствующего 6×6 (не только центр флага).
+ * корни — любые клетки V внутри главной 6×6 или плацдарма 2×2 (не только клетка флага).
  */
 function computeBaseConnectedPixelKeysForTeam(teamId) {
   const tid = teamId | 0;
@@ -3924,10 +3938,10 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
   }
   for (const o of getTeamMilitaryOutposts(t)) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
-    addBfsSeedsFromRectInVertices(vertices, o.x0, o.y0, TEAM_SPAWN_SIZE, out, stack);
+    addBfsSeedsFromRectInVertices(vertices, o.x0, o.y0, MILITARY_OUTPOST_SIZE, out, stack);
   }
   /* Всегда touch-seeds от всех баз (как в computeSupplyReachableFromTeamBases), иначе FOB без связи с семенами главной не стартует BFS. */
-  addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, TEAM_SPAWN_SIZE, out, stack);
+  addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, out, stack);
   if (!stack.length) {
     baseConnectedPixelsCacheByTeam.set(tid, out);
     return out;
@@ -3947,8 +3961,8 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
 }
 
 /**
- * 8-соседство: своя закрашенная клетка только если она в компоненте, снабжаемом с любой активной базы 6×6;
- * иначе — только пустые клетки внутри 6×6 главной базы / плацдарма.
+ * 8-соседство: своя закрашенная клетка только если она в компоненте, снабжаемом с любой активной базы (главная 6×6 или плацдарм 2×2);
+ * иначе — только пустые клетки внутри прямоугольника главной базы / любого плацдарма (весь 2×2 считается одной базой).
  * Отрезанный «мигающий» карман не даёт строить дальше от себя.
  */
 function cellTouchesTeamTerritory(x, y, teamId) {
@@ -3974,18 +3988,14 @@ function cellTouchesTeamTerritory(x, y, teamId) {
   return false;
 }
 
-/** Клетка внутри прямоугольника передовой базы команды (6×6). */
+/** Клетка внутри прямоугольника передовой базы команды (2×2). */
 function cellInsideAnyMilitaryOutpostRect(x, y, teamId) {
   const tid = teamId | 0;
   const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
   if (!t) return false;
+  const M = MILITARY_OUTPOST_SIZE;
   for (const o of getTeamMilitaryOutposts(t)) {
-    if (
-      x >= o.x0 &&
-      x < o.x0 + TEAM_SPAWN_SIZE &&
-      y >= o.y0 &&
-      y < o.y0 + TEAM_SPAWN_SIZE
-    ) {
+    if (x >= o.x0 && x < o.x0 + M && y >= o.y0 && y < o.y0 + M) {
       return true;
     }
   }
@@ -4007,12 +4017,13 @@ function canPlaceForTeam(x, y, teamId) {
 }
 
 /**
- * Якорь флага главной базы или передовой 6×6.
+ * Якорь флага главной базы (центр 6×6) или любая клетка плацдарма 2×2 (общий пул HP).
  * @returns {{ kind: "main", team: object } | { kind: "military", team: object, outpost: { x0: number, y0: number } } | null}
  */
 function resolveFlagBaseAtCell(x, y) {
   const xi = x | 0;
   const yi = y | 0;
+  const M = MILITARY_OUTPOST_SIZE;
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
@@ -4020,8 +4031,11 @@ function resolveFlagBaseAtCell(x, y) {
       if (fc.x === xi && fc.y === yi) return { kind: "main", team: t };
     }
     for (const o of getTeamMilitaryOutposts(t)) {
-      const fc = flagCellFromSpawn(o.x0, o.y0);
-      if (fc.x === xi && fc.y === yi) return { kind: "military", team: t, outpost: { x0: o.x0 | 0, y0: o.y0 | 0 } };
+      const ox0 = o.x0 | 0;
+      const oy0 = o.y0 | 0;
+      if (xi >= ox0 && xi < ox0 + M && yi >= oy0 && yi < oy0 + M) {
+        return { kind: "military", team: t, outpost: { x0: ox0, y0: oy0 } };
+      }
     }
   }
   return null;
@@ -4107,7 +4121,7 @@ function buildFlagsSnapshot() {
       const oy0 = o.y0 | 0;
       const mk = militaryOutpostFlagStateKey(tid, ox0, oy0);
       const stM = militaryFlagCaptureByKey.get(mk);
-      const { x, y } = flagCellFromSpawn(ox0, oy0);
+      const { x, y } = flagCellFromMilitaryOutpost(ox0, oy0);
       pushOneFlagSnapshotRow(out, now, tid, x, y, stM, `m:${tid}:${ox0}:${oy0}`, { x0: ox0, y0: oy0 });
     }
   }
@@ -4414,7 +4428,7 @@ function scanMilitaryOutpostsVacancyAndExpire(_now) {
   /* no-op: плацдарм из магазина не снимается по таймеру «пустой 6×6» */
 }
 
-/** Захват передовой базы: снять узел с защитника, перекрасить 6×6 атакующему (команда защитника не выбывает). */
+/** Захват передовой базы: снять узел с защитника, перекрасить 2×2 атакующему (команда защитника не выбывает). */
 function executeMilitaryOutpostCaptureSuccess(attackerId, defenderId, ox0, oy0) {
   const dtDef = dynamicTeams.find((t) => t.id === defenderId);
   const dtAtk = dynamicTeams.find((t) => t.id === attackerId);
@@ -4430,9 +4444,10 @@ function executeMilitaryOutpostCaptureSuccess(attackerId, defenderId, ox0, oy0) 
   clearMilitaryFlagStateForOutpost(defenderId, x0, y0);
   dtDef.militaryOutposts.splice(idx, 1);
 
-  const { x: fgx, y: fgy } = flagCellFromSpawn(x0, y0);
-  for (let yy = y0; yy < y0 + TEAM_SPAWN_SIZE; yy++) {
-    for (let xx = x0; xx < x0 + TEAM_SPAWN_SIZE; xx++) {
+  const M = MILITARY_OUTPOST_SIZE;
+  const { x: fgx, y: fgy } = flagCellFromMilitaryOutpost(x0, y0);
+  for (let yy = y0; yy < y0 + M; yy++) {
+    for (let xx = x0; xx < x0 + M; xx++) {
       pixels.set(`${xx},${yy}`, { teamId: attackerId, ownerPlayerKey: "", shieldedUntil: 0 });
       queuePixelBroadcast(xx, yy, attackerId, "", 0);
     }
@@ -4489,17 +4504,31 @@ function filterPlannedReachableFromTeam(planned, teamId) {
   return out;
 }
 
-function spawnRectsConflict(x0, y0, ox0, oy0) {
+function spawnRectsConflictSized(ax0, ay0, aw, ah, bx0, by0, bw, bh) {
   const g = TEAM_SPAWN_GAP;
-  const ax0 = x0 - g;
-  const ay0 = y0 - g;
-  const ax1 = x0 + TEAM_SPAWN_SIZE + g - 1;
-  const ay1 = y0 + TEAM_SPAWN_SIZE + g - 1;
-  const bx0 = ox0 - g;
-  const by0 = oy0 - g;
-  const bx1 = ox0 + TEAM_SPAWN_SIZE + g - 1;
-  const by1 = oy0 + TEAM_SPAWN_SIZE + g - 1;
-  return !(ax1 < bx0 || bx1 < ax0 || ay1 < by0 || by1 < ay0);
+  const aL = ax0 - g;
+  const aT = ay0 - g;
+  const aR = ax0 + aw + g - 1;
+  const aB = ay0 + ah + g - 1;
+  const bL = bx0 - g;
+  const bT = by0 - g;
+  const bR = bx0 + bw + g - 1;
+  const bB = by0 + bh + g - 1;
+  return !(aR < bL || bR < aL || aB < bT || bB < aT);
+}
+
+/** Две стартовые базы 6×6 с зазором TEAM_SPAWN_GAP (legacy-имя). */
+function spawnRectsConflict(x0, y0, ox0, oy0) {
+  return spawnRectsConflictSized(
+    x0,
+    y0,
+    TEAM_SPAWN_SIZE,
+    TEAM_SPAWN_SIZE,
+    ox0,
+    oy0,
+    TEAM_SPAWN_SIZE,
+    TEAM_SPAWN_SIZE
+  );
 }
 
 /** Chebyshev-зазор между границами двух осевых прямоугольников (клетки между краями). */
@@ -4510,18 +4539,19 @@ function rectChebyshevEdgeGap(x0, y0, w, h, ox0, oy0, ow, oh) {
 }
 
 /**
- * Проверка размещения передовой базы (левый верх 6×6).
+ * Проверка размещения передовой базы (левый верх 2×2; клик = этот угол).
  * @returns {{ ok: true } | { ok: false, reason: string }}
  */
 function validateMilitaryBasePlacement(teamId, x0, y0) {
   const tid = teamId | 0;
-  if (x0 < 0 || y0 < 0 || x0 + TEAM_SPAWN_SIZE > gridW || y0 + TEAM_SPAWN_SIZE > gridH) {
+  const M = MILITARY_OUTPOST_SIZE;
+  if (x0 < 0 || y0 < 0 || x0 + M > gridW || y0 + M > gridH) {
     return { ok: false, reason: "military_bounds" };
   }
-  if (!rectAllLandSpan(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) {
+  if (!rectAllLandSpan(x0, y0, M, M)) {
     return { ok: false, reason: "military_water" };
   }
-  if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) {
+  if (!rectFreeOfPixels(x0, y0, M, M)) {
     return { ok: false, reason: "military_occupied" };
   }
   const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
@@ -4529,21 +4559,12 @@ function validateMilitaryBasePlacement(teamId, x0, y0) {
   const reserved = allSpawnLikeRectsForConflict();
   for (let i = 0; i < reserved.length; i++) {
     const o = reserved[i];
-    if (spawnRectsConflict(x0, y0, o.x0, o.y0)) {
+    if (spawnRectsConflictSized(x0, y0, M, M, o.x0, o.y0, o.w, o.h)) {
       return { ok: false, reason: "military_conflict" };
     }
   }
   if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-    const gOwn = rectChebyshevEdgeGap(
-      x0,
-      y0,
-      TEAM_SPAWN_SIZE,
-      TEAM_SPAWN_SIZE,
-      t.spawnX0,
-      t.spawnY0,
-      TEAM_SPAWN_SIZE,
-      TEAM_SPAWN_SIZE
-    );
+    const gOwn = rectChebyshevEdgeGap(x0, y0, M, M, t.spawnX0, t.spawnY0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE);
     if (gOwn < MILITARY_MIN_EDGE_GAP_OWN_MAIN) {
       return { ok: false, reason: "military_too_close_own_main" };
     }
@@ -4552,16 +4573,7 @@ function validateMilitaryBasePlacement(teamId, x0, y0) {
     if (ot.solo || ot.eliminated) continue;
     if ((ot.id | 0) === tid) continue;
     if (typeof ot.spawnX0 !== "number" || typeof ot.spawnY0 !== "number") continue;
-    const gEn = rectChebyshevEdgeGap(
-      x0,
-      y0,
-      TEAM_SPAWN_SIZE,
-      TEAM_SPAWN_SIZE,
-      ot.spawnX0,
-      ot.spawnY0,
-      TEAM_SPAWN_SIZE,
-      TEAM_SPAWN_SIZE
-    );
+    const gEn = rectChebyshevEdgeGap(x0, y0, M, M, ot.spawnX0, ot.spawnY0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE);
     if (gEn < MILITARY_MIN_EDGE_GAP_ENEMY_MAIN) {
       return { ok: false, reason: "military_too_close_enemy_main" };
     }
@@ -4616,7 +4628,7 @@ function findValidSpawnRect6() {
     if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) continue;
     let clash = false;
     for (const o of others) {
-      if (spawnRectsConflict(x0, y0, o.x0, o.y0)) {
+      if (spawnRectsConflictSized(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, o.x0, o.y0, o.w, o.h)) {
         clash = true;
         break;
       }
@@ -4629,7 +4641,7 @@ function findValidSpawnRect6() {
       if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) continue;
       let clash = false;
       for (const o of others) {
-        if (spawnRectsConflict(x0, y0, o.x0, o.y0)) {
+        if (spawnRectsConflictSized(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, o.x0, o.y0, o.w, o.h)) {
           clash = true;
           break;
         }
@@ -4654,10 +4666,17 @@ function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
 
 /** Закрасить 6×6 без afterTerritoryMutation (пакетное восстановление плацдармов). */
 function paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk) {
+  paintRectTeamPixels(teamId, x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, ownerPk);
+}
+
+/** Закрасить прямоугольник w×h (плацдарм 2×2 и т.п.). */
+function paintRectTeamPixels(teamId, x0, y0, w, h, ownerPk) {
   const opk = String(ownerPk || "").slice(0, 128);
   const tid = teamId | 0;
-  for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
-    for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
+  const ww = w | 0;
+  const hh = h | 0;
+  for (let y = y0; y < y0 + hh; y++) {
+    for (let x = x0; x < x0 + ww; x++) {
       if (!cellAllowsPixelPlacement(x, y)) continue;
       const k = `${x},${y}`;
       pixels.set(k, { teamId: tid, ownerPlayerKey: opk, shieldedUntil: 0 });
@@ -4709,7 +4728,7 @@ function ensureAllTeamSpawnsAfterLoad() {
   afterTerritoryMutation();
 }
 
-/** После рестарта сервера: заново закрасить 6×6 купленных плацдармов (мета уже в dynamic-teams.json). */
+/** После рестарта сервера: заново закрасить 2×2 купленных плацдармов (мета уже в dynamic-teams.json). */
 function ensureMilitaryOutpostPixelsAfterLoad() {
   let any = false;
   for (const t of dynamicTeams) {
@@ -4720,8 +4739,9 @@ function ensureMilitaryOutpostPixelsAfterLoad() {
       const x0 = o.x0 | 0;
       const y0 = o.y0 | 0;
       let need = false;
-      for (let y = y0; y < y0 + TEAM_SPAWN_SIZE && !need; y++) {
-        for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
+      const Mo = MILITARY_OUTPOST_SIZE;
+      for (let y = y0; y < y0 + Mo && !need; y++) {
+        for (let x = x0; x < x0 + Mo; x++) {
           const p = pixels.get(`${x},${y}`);
           if (!p || pixelTeam(p) !== tid) {
             need = true;
@@ -5546,6 +5566,31 @@ function parseTelegramAdminQuantCommand(normRaw) {
 }
 
 /**
+ * @param {string} normRaw
+ * @returns {{ ok: true, teamNameQuery: string, amount: number } | { ok: false }}
+ */
+function parseTeamquantTelegramCommand(normRaw) {
+  const s = String(normRaw || "")
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\s+/g, " ");
+  const m = /^teamquant\s+(.+?)\s*\+\s*(\d{1,12})\s*$/i.exec(s);
+  if (!m) return { ok: false };
+  let namePart = m[1].trim();
+  if (
+    (namePart.startsWith('"') && namePart.endsWith('"') && namePart.length >= 2) ||
+    (namePart.startsWith("'") && namePart.endsWith("'") && namePart.length >= 2)
+  ) {
+    namePart = namePart.slice(1, -1).trim();
+  }
+  const amount = parseInt(m[2], 10);
+  if (!namePart || !Number.isFinite(amount) || amount < 1 || amount > ADMIN_QUANT_SINGLE_OP_MAX) {
+    return { ok: false };
+  }
+  return { ok: true, teamNameQuery: namePart, amount };
+}
+
+/**
  * @param {number} chatId
  * @param {number} adminTelegramUid
  * @param {{ ok: true, tgId: number, op: "+" | "-" | "=", amount: number }} parsed
@@ -5733,6 +5778,81 @@ async function applyAdminQuantlistTelegramCommand(chatId, adminTelegramUid, pars
   await telegramSendMessage(chatId, msg);
 }
 
+async function adminRefreshWalletsAfterBulkEconomy() {
+  await broadcastWalletPayloadToAllClients();
+  if (wss) {
+    await Promise.all(
+      [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
+    );
+  }
+}
+
+/** @param {string[]} playerKeys */
+async function adminPushWalletUpdateToOnlinePlayerKeys(playerKeys) {
+  if (!wss || !playerKeys.length) return;
+  const want = new Set(playerKeys.map((p) => sanitizePlayerKey(p)).filter(Boolean));
+  const tasks = [];
+  for (const c of wss.clients) {
+    if (c.readyState !== 1) continue;
+    const pk = sanitizePlayerKey(c.playerKey);
+    if (!want.has(pk)) continue;
+    tasks.push(
+      buildWalletPayload(c).then((pl) => {
+        safeSend(c, pl);
+        return sendConnectionMeta(c);
+      })
+    );
+  }
+  await Promise.all(tasks);
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} adminTelegramUid
+ * @param {string} teamNameQuery
+ * @param {number} amount
+ */
+async function applyAdminTeamQuantTelegramCommand(chatId, adminTelegramUid, teamNameQuery, amount) {
+  const resolved = resolveTeamForAdminQuantGrant(teamNameQuery);
+  if (resolved.kind !== "one") {
+    await telegramSendMessage(chatId, resolved.message);
+    return;
+  }
+  const team = resolved.team;
+  const tid = team.id | 0;
+  const keySet = collectWinnerTeamPlayerKeys(tid);
+  const keys = [...keySet].map((k) => sanitizePlayerKey(k)).filter(Boolean);
+  if (!keys.length) {
+    await telegramSendMessage(
+      chatId,
+      `Не найдено ни одного playerKey для команды «${sanitizeTeamName(team.name)}» (состав, клетки, онлайн).`
+    );
+    return;
+  }
+  const addUsdt = quantToUsdt(amount);
+  for (const pk of keys) {
+    const u = await walletStore.getOrCreateUser(pk);
+    const oldB = roundEconomyUsdt(Number(u.balanceUSDT) || 0);
+    u.balanceUSDT = roundEconomyUsdt(Math.max(0, oldB + addUsdt));
+  }
+  await walletStore.flushUsersEconomy(keys);
+  const affected = keys.length;
+  logAdminAction({
+    command: "teamquant",
+    byTelegramId: adminTelegramUid,
+    target: "team_members",
+    teamId: tid,
+    teamName: sanitizeTeamName(team.name),
+    perPlayerQuantGrant: amount,
+    playersAffected: affected,
+  });
+  await adminPushWalletUpdateToOnlinePlayerKeys(keys);
+  await telegramSendMessage(
+    chatId,
+    `Каждому из ${affected} игроков команды «${sanitizeTeamName(team.name)}» лично начислено +${amount} квантов (общий кошелёк команды не используется).`
+  );
+}
+
 function broadcastTeamManualScoreBonusSync() {
   broadcast({
     type: "teamManualScoreBonusSync",
@@ -5761,6 +5881,41 @@ function resolveTeamForAdminBonus(needleRaw) {
   if (partial.length === 1) return { kind: "one", team: partial[0] };
   if (partial.length > 1) return { kind: "many", names: partial.map((t) => t.name) };
   return { kind: "none" };
+}
+
+/**
+ * Точное имя (без учёта регистра, trim) или ровно одно частичное совпадение; иначе понятная ошибка.
+ * @returns {{ kind: "one"; team: (typeof dynamicTeams)[0] } | { kind: "error"; message: string }}
+ */
+function resolveTeamForAdminQuantGrant(needleRaw) {
+  let name = String(needleRaw || "").trim();
+  if (
+    (name.startsWith('"') && name.endsWith('"') && name.length >= 2) ||
+    (name.startsWith("'") && name.endsWith("'") && name.length >= 2)
+  ) {
+    name = name.slice(1, -1).trim();
+  }
+  const normNeedle = normTeamAdminQuery(name);
+  if (!normNeedle) return { kind: "error", message: "Укажите имя команды." };
+  const candidates = dynamicTeams.filter((t) => !t.solo && !t.eliminated);
+  const exact = candidates.filter((t) => normTeamAdminQuery(t.name) === normNeedle);
+  if (exact.length === 1) return { kind: "one", team: exact[0] };
+  if (exact.length > 1) {
+    return {
+      kind: "error",
+      message: "Неоднозначно: несколько команд с одинаковым нормализованным именем.",
+    };
+  }
+  const partial = candidates.filter((t) => normTeamAdminQuery(t.name).includes(normNeedle));
+  if (partial.length === 1) return { kind: "one", team: partial[0] };
+  if (partial.length === 0) {
+    return { kind: "error", message: `Команда не найдена по запросу «${name}».` };
+  }
+  const names = partial.map((t) => `"${t.name}"`).slice(0, 15);
+  return {
+    kind: "error",
+    message: `Несколько совпадений для «${name}»: ${names.join(", ")}. Укажите точное имя в кавычках.`,
+  };
 }
 
 /**
@@ -7245,8 +7400,9 @@ wss.on("connection", (ws, req) => {
       }
       const cx = msg.x | 0;
       const cy = msg.y | 0;
-      const x0 = cx - 2;
-      const y0 = cy - 2;
+      /* Левый верх плацдарма 2×2 = клетка клика. */
+      const x0 = cx;
+      const y0 = cy;
       const val = validateMilitaryBasePlacement(tid, x0, y0);
       if (!val.ok) {
         safeSend(ws, { type: "purchaseError", reason: val.reason || "military_invalid" });
@@ -7263,16 +7419,18 @@ wss.on("connection", (ws, req) => {
       dt.lastMilitaryBaseAt = now;
       saveDynamicTeams();
       if (!devUnl) await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "military_base", { deferSave: true });
-      /* Сначала meta с плацдармом — иначе клиенты получают пиксели 6×6 раньше teamsFull и отклоняют ходы как «не рядом». */
+      /* Сначала meta с плацдармом — иначе клиенты получают пиксели 2×2 раньше teamsFull и отклоняют ходы как «не рядом». */
       broadcast({ type: "teamsFull", teams: teamsForMeta() });
-      paintTeamSpawnArea(tid, x0, y0, pk);
+      invalidateTeamScoresAggCache();
+      paintRectTeamPixels(tid, x0, y0, MILITARY_OUTPOST_SIZE, MILITARY_OUTPOST_SIZE, pk);
+      afterTerritoryMutation();
       scheduleStatsBroadcast();
       safeSend(ws, {
         type: "purchaseOk",
         kind: "militaryBase",
         x0,
         y0,
-        size: TEAM_SPAWN_SIZE,
+        size: MILITARY_OUTPOST_SIZE,
         total: getTeamMilitaryOutposts(dt).length,
       });
       safeSend(ws, await buildWalletPayload(ws));
@@ -7282,7 +7440,7 @@ wss.on("connection", (ws, req) => {
         teamId: tid,
         gx: x0,
         gy: y0,
-        size: TEAM_SPAWN_SIZE,
+        size: MILITARY_OUTPOST_SIZE,
       });
       scheduleBroadcastWalletDebounced();
       queuePersistWalletPurchaseWrites(pk);
@@ -8411,6 +8569,112 @@ async function handleTelegramAdminCallbackQuery(cq) {
     return;
   }
 
+  if (data === "adm_qzero_a") {
+    await telegramAnswerCallbackQuery(cq.id);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        "Вы уверены? Это обнулит кванты у всех игроков.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "Да, обнулить", callback_data: "adm_qzero_y" },
+                { text: "Отмена", callback_data: "adm_qzero_n" },
+              ],
+            ],
+          },
+        }
+      );
+    }
+    return;
+  }
+  if (data === "adm_qzero_n") {
+    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
+    return;
+  }
+  if (data === "adm_qzero_y") {
+    if (!isClusterLeader()) {
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Только инстанс с CLUSTER_LEADER=true может менять балансы всем игрокам.",
+        show_alert: true,
+      });
+      return;
+    }
+    await telegramAnswerCallbackQuery(cq.id, { text: "Обнуляю кванты…" });
+    const r = await walletStore.adminZeroAllQuantBalancesOnly();
+    logAdminAction({
+      command: "zero_all_quants",
+      byTelegramId: uid,
+      target: "all_players",
+      playersAffected: r.affected ?? 0,
+    });
+    await adminRefreshWalletsAfterBulkEconomy();
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        `Готово: кванты обнулены у ${r.affected ?? 0} учётных записей. Команды, карта, раунд, фермы и покупки на карте не менялись.`
+      );
+    }
+    return;
+  }
+
+  if (data === "adm_qall_a") {
+    await telegramAnswerCallbackQuery(cq.id);
+    telegramAdminQuantGrantFlow.set(uid, {
+      step: "all_amount",
+      until: Date.now() + TELEGRAM_ADMIN_QUANT_FLOW_TTL_MS,
+    });
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        `Введите целое число квантов для начисления всем игрокам (1…${ADMIN_QUANT_SINGLE_OP_MAX}). Отмена: cancel`
+      );
+    }
+    return;
+  }
+  if (data === "adm_qall_n") {
+    telegramAdminBulkQuantConfirm.delete(uid);
+    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
+    return;
+  }
+  if (data === "adm_qall_y") {
+    if (!isClusterLeader()) {
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Только инстанс с CLUSTER_LEADER=true может менять балансы всем игрокам.",
+        show_alert: true,
+      });
+      return;
+    }
+    const p = telegramAdminBulkQuantConfirm.get(uid);
+    if (!p || p.kind !== "all_grant" || p.until <= Date.now()) {
+      telegramAdminBulkQuantConfirm.delete(uid);
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Подтверждение устарело. Нажмите «Выдать всем кванты» и введите сумму снова.",
+        show_alert: true,
+      });
+      return;
+    }
+    telegramAdminBulkQuantConfirm.delete(uid);
+    await telegramAnswerCallbackQuery(cq.id, { text: "Начисляю…" });
+    const r = await walletStore.adminAddQuantsToAllUsers(p.amount);
+    logAdminAction({
+      command: "grant_all_quants",
+      byTelegramId: uid,
+      target: "all_players",
+      quantGrant: p.amount,
+      playersAffected: r.affected ?? 0,
+    });
+    await adminRefreshWalletsAfterBulkEconomy();
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        `Готово: +${p.amount} квантов каждому из ${r.affected ?? 0} учётных записей.`
+      );
+    }
+    return;
+  }
+
   await telegramAnswerCallbackQuery(cq.id);
 }
 
@@ -8472,6 +8736,10 @@ async function telegramPollLoop() {
             if (startBtn) rows.push([startBtn]);
             if (TELEGRAM_ADMIN_IDS.has(uid)) {
               rows.push([{ text: "⚠️ Полный сброс игры", callback_data: "adm_full_a" }]);
+              rows.push([
+                { text: "Сбросить всем кванты", callback_data: "adm_qzero_a" },
+                { text: "Выдать всем кванты", callback_data: "adm_qall_a" },
+              ]);
             }
             await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
               reply_markup: { inline_keyboard: rows },
@@ -8508,6 +8776,53 @@ async function telegramPollLoop() {
           .toLowerCase()
           .replace(/^\/+/, "")
           .replace(/\s+/g, " ");
+
+        {
+          const qf = telegramAdminQuantGrantFlow.get(uid);
+          if (qf && qf.until <= Date.now()) {
+            telegramAdminQuantGrantFlow.delete(uid);
+          } else if (qf && qf.step === "all_amount") {
+            if (restartNorm === "cancel" || restartNorm === "отмена") {
+              telegramAdminQuantGrantFlow.delete(uid);
+              await telegramSendMessage(chatId, "Выдача всем отменена.");
+              continue;
+            }
+            if (shouldInterruptPendingSayPrompt(t, restartNorm)) {
+              telegramAdminQuantGrantFlow.delete(uid);
+              await telegramSendMessage(chatId, "Ввод суммы для выдачи всем сброшен — выполняю как команду.");
+            } else {
+              const amt = parseInt(String(t).trim(), 10);
+              if (!Number.isFinite(amt) || amt < 1 || amt > ADMIN_QUANT_SINGLE_OP_MAX) {
+                await telegramSendMessage(
+                  chatId,
+                  `Некорректное число. Введите целое от 1 до ${ADMIN_QUANT_SINGLE_OP_MAX}. Отмена: cancel`
+                );
+                continue;
+              }
+              telegramAdminQuantGrantFlow.delete(uid);
+              telegramAdminBulkQuantConfirm.set(uid, {
+                kind: "all_grant",
+                amount: amt,
+                until: Date.now() + TELEGRAM_ADMIN_QUANT_FLOW_TTL_MS,
+              });
+              await telegramSendMessage(
+                chatId,
+                `Выдать всем игрокам +${amt} квантов?`,
+                {
+                  reply_markup: {
+                    inline_keyboard: [
+                      [
+                        { text: "Да", callback_data: "adm_qall_y" },
+                        { text: "Отмена", callback_data: "adm_qall_n" },
+                      ],
+                    ],
+                  },
+                }
+              );
+              continue;
+            }
+          }
+        }
 
         const pendingSayUntil = telegramAdminSayPromptUntil.get(uid);
         if (pendingSayUntil != null) {
@@ -8688,6 +9003,29 @@ async function telegramPollLoop() {
               continue;
             }
             await applyAdminQuantlistTelegramCommand(chatId, uid, parsedQl);
+            continue;
+          }
+        }
+
+        {
+          const tqCmd = restartNorm.replace(/^\/teamquant\b/i, "teamquant").trim();
+          if (tqCmd === "teamquant" || tqCmd.startsWith("teamquant ")) {
+            if (!isClusterLeader()) {
+              await telegramSendMessage(
+                chatId,
+                "teamquant выполняет только инстанс с CLUSTER_LEADER=true (без дубля на воркерах)."
+              );
+              continue;
+            }
+            const parsedTq = parseTeamquantTelegramCommand(tqCmd);
+            if (!parsedTq.ok) {
+              await telegramSendMessage(
+                chatId,
+                'Формат: teamquant ИмяКоманды +N или teamquant "Имя с пробелами" +N\nПример: teamquant RedWolves +100'
+              );
+              continue;
+            }
+            await applyAdminTeamQuantTelegramCommand(chatId, uid, parsedTq.teamNameQuery, parsedTq.amount);
             continue;
           }
         }
@@ -8915,7 +9253,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start (полный сброс игры), go [часы], quant / quantlist <числовой Telegram id>, teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start (кнопки квантов всем), go, quant, quantlist, teamquant Имя +N, teams, pause, say, speed, evt help…"
             );
           }
           continue;

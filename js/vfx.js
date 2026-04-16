@@ -305,8 +305,8 @@ export function createBoardVfx(canvas) {
    * @param {[number, number][]} cells
    */
   /**
-   * Премиум-развёртывание передовой базы 6×6: удар с «орбиты», волны, периметр, трещины по клеткам.
-   * @param {number} gx0 левый верх 6×6
+   * Премиум-развёртывание передовой базы 2×2: удар с «орбиты», волны, периметр, трещины по клеткам.
+   * @param {number} gx0 левый верх блока (как клик размещения)
    * @param {number} gy0
    * @param {string} teamHex цвет команды #rrggbb
    * @param {*} transform
@@ -314,73 +314,74 @@ export function createBoardVfx(canvas) {
   function militaryBaseDeploy(gx0, gy0, teamHex, transform) {
     const x0 = gx0 | 0;
     const y0 = gy0 | 0;
+    const S = 2;
     const col = typeof teamHex === "string" && teamHex.startsWith("#") ? teamHex : "#a5b4fc";
     const t0 = performance.now();
-    const gcx = x0 + 3;
-    const gcy = y0 + 3;
+    const gcx = x0 + S * 0.5;
+    const gcy = y0 + S * 0.5;
     shockwaves.push({
       t0,
       gcx,
       gcy,
-      radiusCells: 2.4,
+      radiusCells: 0.95,
       color: "#fffbeb",
     });
     shockwaves.push({
       t0: t0 + 55,
       gcx,
       gcy,
-      radiusCells: 4.2,
+      radiusCells: 1.55,
       color: "#fde68a",
     });
     shockwaves.push({
       t0: t0 + 115,
       gcx,
       gcy,
-      radiusCells: 6.5,
+      radiusCells: 2.35,
       color: col,
     });
     shockwaves.push({
       t0: t0 + 190,
       gcx,
       gcy,
-      radiusCells: 9,
+      radiusCells: 3.2,
       color: "rgba(255,255,255,0.42)",
     });
     shockwaves.push({
       t0: t0 + 280,
       gcx,
       gcy,
-      radiusCells: 12,
+      radiusCells: 4.2,
       color: "rgba(129, 140, 248, 0.22)",
     });
-    zoneFlash(x0, y0, col, transform, 6);
-    burst(x0 + 2, y0 + 2, "#ffffff", transform, 22);
-    burst(x0 + 2, y0 + 2, "#fde68a", transform, 26);
-    burst(x0 + 2, y0 + 2, col, transform, 34);
+    zoneFlash(x0, y0, col, transform, S);
+    burst(x0 + 1, y0 + 1, "#ffffff", transform, 14);
+    burst(x0 + 1, y0 + 1, "#fde68a", transform, 16);
+    burst(x0 + 1, y0 + 1, col, transform, 20);
     const corners = [
       [x0, y0],
-      [x0 + 5, y0],
-      [x0, y0 + 5],
-      [x0 + 5, y0 + 5],
+      [x0 + S - 1, y0],
+      [x0, y0 + S - 1],
+      [x0 + S - 1, y0 + S - 1],
     ];
     for (let i = 0; i < corners.length; i++) {
-      burst(corners[i][0], corners[i][1], "#fff7d6", transform, 12);
-      burst(corners[i][0], corners[i][1], col, transform, 14);
+      burst(corners[i][0], corners[i][1], "#fff7d6", transform, 8);
+      burst(corners[i][0], corners[i][1], col, transform, 9);
     }
-    lineBeam(x0 + 2, y0 + 2, "up", "#fde68a", transform, 8);
+    lineBeam(x0 + 1, y0 + 1, "up", "#fde68a", transform, 4);
     for (let d = 1; d < 8; d += 2) {
-      lineBeam(x0 + 2, y0 + 2, d, col, transform, 5);
+      lineBeam(x0 + 1, y0 + 1, d, col, transform, 3);
     }
     /** @type {[number, number][]} */
-    const cells36 = [];
-    for (let yy = y0; yy < y0 + 6; yy++) {
-      for (let xx = x0; xx < x0 + 6; xx++) {
-        cells36.push([xx, yy]);
+    const cellsBlock = [];
+    for (let yy = y0; yy < y0 + S; yy++) {
+      for (let xx = x0; xx < x0 + S; xx++) {
+        cellsBlock.push([xx, yy]);
       }
     }
-    seismicCrackBurst(cells36);
-    for (let i = 0; i < cells36.length; i += 7) {
-      const c = cells36[i];
+    seismicCrackBurst(cellsBlock);
+    for (let i = 0; i < cellsBlock.length; i++) {
+      const c = cellsBlock[i];
       ripple(c[0], c[1], col, transform);
     }
   }

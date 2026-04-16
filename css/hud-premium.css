@@ -30,9 +30,13 @@
   position: absolute;
   /* Выше полосы .event-banner-stack (z-index 50), чтобы рейтинг не прятался под плашками */
   z-index: 60;
+  /* Вертикальный зазор под стек баннеров (.event-banner-stack): иначе виджет перекрывает всплывающие сообщения */
+  --lb-stack-gap: clamp(2.35rem, 12vmin, 4rem);
+  /* Ещё ~две строки текста плашек — весь блок рейтинга ниже */
+  --lb-extra-top: 2.55rem;
   /* Зазор от выреза и края WebView (Telegram iOS/Android) */
   left: max(4px, env(safe-area-inset-left, 0px));
-  top: calc(var(--safe-top) + var(--toolbar-h) + 4px);
+  top: calc(var(--safe-top) + var(--toolbar-h) + var(--lb-stack-gap) + var(--lb-extra-top));
   /* Уже к краю — меньше заходит к центру карты */
   max-width: min(
     122px,
@@ -41,7 +45,12 @@
   /* Шире, чтобы в строке помещались ранг + эмодзи + 5 букв названия + счёт */
   width: min(116px, 23vw);
   /* Топ-15 без прокрутки: высота под двухстрочные строки + блок «ваша команда» */
-  max-height: min(calc(100dvh - var(--safe-top, 0px) - var(--toolbar-h, 52px) - 16px), 620px);
+  max-height: min(
+    calc(
+      100dvh - var(--safe-top, 0px) - var(--toolbar-h, 52px) - var(--lb-stack-gap) - var(--lb-extra-top) - 12px
+    ),
+    620px
+  );
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -64,17 +73,26 @@
   will-change: width, max-height;
 }
 
-/* Свернутый HUD: только топ‑3, уже и ниже */
+/* Свернутый HUD: только топ‑3 команд (строки с .lb-row--past-top3 скрыты), уже и ниже */
 .lb-widget--collapsed {
   width: min(82px, 19vw);
   max-width: min(
     88px,
     calc(100vw - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px) - 10px)
   );
-  max-height: min(200px, calc(100dvh - var(--safe-top, 0px) - var(--toolbar-h, 52px) - 20px));
+  max-height: min(
+    220px,
+    calc(
+      100dvh - var(--safe-top, 0px) - var(--toolbar-h, 52px) - var(--lb-stack-gap) - var(--lb-extra-top) - 16px
+    )
+  );
   border-radius: 8px;
   box-shadow: 0 2px 14px rgba(0, 0, 0, 0.12);
   background: rgba(4, 8, 16, 0.048);
+}
+
+.lb-widget--collapsed .lb-row--past-top3 {
+  display: none !important;
 }
 
 .lb-widget--collapsed .lb-widget__list {
@@ -347,7 +365,7 @@
 @media (max-width: 420px) {
   .lb-widget {
     left: max(3px, env(safe-area-inset-left, 0px));
-    top: calc(var(--safe-top) + var(--toolbar-h) + 3px);
+    top: calc(var(--safe-top) + var(--toolbar-h) + var(--lb-stack-gap) + var(--lb-extra-top));
     width: min(112px, 22vw);
     max-width: min(
       118px,
@@ -391,7 +409,7 @@
     );
     max-height: min(80dvh, 560px);
     left: max(2px, env(safe-area-inset-left, 0px));
-    top: calc(var(--safe-top) + var(--toolbar-h) + 2px);
+    top: calc(var(--safe-top) + var(--toolbar-h) + var(--lb-stack-gap) + var(--lb-extra-top));
   }
 
   .lb-row__emoji {
