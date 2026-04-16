@@ -639,6 +639,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (fw === "restart" || fw === "рестарт") return true;
   if (norm === "новая игра" || norm === "newgame" || norm === "wipe" || norm === "с нуля") return true;
   if (fw === "quant") return true;
+  if (fw === "quantlist") return true;
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
@@ -5252,7 +5253,10 @@ async function applyAdminQuantTelegramCommand(chatId, adminTelegramUid, parsed) 
   const pk = sanitizePlayerKey(`tg_${parsed.tgId}`);
   const exists = await walletStore.hasEconomyUserRecord(pk);
   if (!exists) {
-    await telegramSendMessage(chatId, `User with Telegram ID ${parsed.tgId} not found.`);
+    await telegramSendMessage(
+      chatId,
+      `No economy record for numeric Telegram user ID ${parsed.tgId} (not @username / team name). Player must have logged in at least once.`
+    );
     return;
   }
   const u = await walletStore.getOrCreateUser(pk);
@@ -5311,6 +5315,121 @@ async function applyAdminQuantTelegramCommand(chatId, adminTelegramUid, parsed) 
       void sendConnectionMeta(c);
     }
   }
+}
+
+/** Максимум Telegram ID в одном сообщении quantlist (лимит длины ответа в Telegram). */
+const ADMIN_QUANTLIST_MAX_IDS = 20;
+
+/**
+ * @param {string} normRaw напр. "quantlist 123456789" или "quantlist 1 2 3"
+ * @returns {{ ok: true, tgIds: number[] } | { ok: false, reason: "usage" | "invalid" | "too_many" }}
+ */
+function parseTelegramAdminQuantlistCommand(normRaw) {
+  const s = String(normRaw || "")
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\s+/g, " ");
+  const m = /^quantlist(?:\s+(.*))?$/i.exec(s);
+  if (!m) return { ok: false, reason: "invalid" };
+  const rest = (m[1] || "").trim();
+  if (!rest) return { ok: false, reason: "usage" };
+  const parts = rest.split(/\s+/);
+  /** @type {number[]} */
+  const tgIds = [];
+  for (const p of parts) {
+    if (!/^\d{1,18}$/.test(p)) return { ok: false, reason: "invalid" };
+    const id = parseInt(p, 10);
+    if (!Number.isFinite(id) || id < 1) return { ok: false, reason: "invalid" };
+    tgIds.push(id);
+  }
+  if (tgIds.length > ADMIN_QUANTLIST_MAX_IDS) return { ok: false, reason: "too_many" };
+  return { ok: true, tgIds };
+}
+
+/** @returns {number} teamId или 0 */
+function resolveTeamIdForPlayerKey(pkRaw) {
+  const k = sanitizePlayerKey(pkRaw);
+  if (!k) return 0;
+  for (const [tid, set] of teamMemberKeys) {
+    if (set.has(k)) return tid | 0;
+  }
+  return 0;
+}
+
+/**
+ * Онлайн — кэш процесса (тот же объект, что у игры). Офлайн — перечитать из БД/файла, без устаревшего RAM.
+ * @returns {Promise<{ user: Awaited<ReturnType<typeof walletStore.getOrCreateUser>>; balanceSource: "live" | "persisted" }>}
+ */
+async function resolveQuantlistEconomyUser(pk) {
+  const online = isPlayerKeyOnline(pk);
+  if (online) {
+    const user = await walletStore.getOrCreateUser(pk);
+    return { user, balanceSource: "live" };
+  }
+  if (typeof walletStore.refreshEconomyUserFromPersistence === "function") {
+    const user = await walletStore.refreshEconomyUserFromPersistence(pk);
+    return { user, balanceSource: "persisted" };
+  }
+  const user = await walletStore.getOrCreateUser(pk);
+  return { user, balanceSource: "persisted" };
+}
+
+/**
+ * @param {number} tgId
+ * @returns {Promise<{ ok: true, text: string } | { ok: false, text: string }>}
+ */
+async function formatQuantlistEntryForTelegram(tgId) {
+  const pk = sanitizePlayerKey(`tg_${tgId}`);
+  const exists = await walletStore.hasEconomyUserRecord(pk);
+  if (!exists) {
+    return { ok: false, text: `User with Telegram ID ${tgId} not found.` };
+  }
+  const { user: u, balanceSource } = await resolveQuantlistEconomyUser(pk);
+  const meta = playerTelegramMeta.get(pk);
+  const username = meta?.username ? String(meta.username).trim() : "";
+  const userLine = username ? `@${username}` : "—";
+  const online = isPlayerKeyOnline(pk) ? "yes" : "no";
+  const tid = resolveTeamIdForPlayerKey(pk);
+  const teamRow = tid ? dynamicTeams.find((t) => (t.id | 0) === (tid | 0)) : null;
+  const teamName = teamRow?.name ? sanitizeTeamName(teamRow.name) : "—";
+  const devUnl = isDevUnlimitedWallet(pk);
+  const usdt = roundEconomyUsdt(Number(u.balanceUSDT) || 0);
+  const sourceTag = balanceSource === "live" ? "live" : "persisted";
+  const quantsLine = devUnl
+    ? `Quants: — (dev unlimited, ${sourceTag})`
+    : `Quants: ${quantsFromBalanceUsdt(usdt)} (${sourceTag})`;
+  const usdtLine = devUnl ? `Balance USDT: (dev unlimited)` : `Balance USDT: ${usdt}`;
+  const text = [
+    quantsLine,
+    `Telegram ID: ${tgId} (lookup by numeric ID only)`,
+    `User: ${userLine}`,
+    `Player key: ${pk}`,
+    usdtLine,
+    `Online: ${online}`,
+    `Team: ${teamName}`,
+  ].join("\n");
+  return { ok: true, text };
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} adminTelegramUid
+ * @param {{ ok: true, tgIds: number[] }} parsed
+ */
+async function applyAdminQuantlistTelegramCommand(chatId, adminTelegramUid, parsed) {
+  logAdminAction({
+    command: "quantlist",
+    byTelegramId: adminTelegramUid,
+    queriedTelegramIds: parsed.tgIds,
+  });
+  const blocks = [];
+  for (const tgId of parsed.tgIds) {
+    const entry = await formatQuantlistEntryForTelegram(tgId);
+    blocks.push(entry.text);
+  }
+  let msg = blocks.join("\n\n—\n\n");
+  if (msg.length > 4000) msg = `${msg.slice(0, 3997)}...`;
+  await telegramSendMessage(chatId, msg);
 }
 
 function broadcastTeamManualScoreBonusSync() {
@@ -7996,11 +8115,30 @@ async function telegramPollLoop() {
             if (!parsed.ok) {
               await telegramSendMessage(
                 chatId,
-                "Invalid command format. Use: quant <telegramId> +<amount> (also -<amount>, =<amount>)"
+                "Invalid format. Use numeric Telegram user ID only: quant <id> +<amount> (also -<amount>, =<amount>). Not @username or team name."
               );
               continue;
             }
             await applyAdminQuantTelegramCommand(chatId, uid, parsed);
+            continue;
+          }
+        }
+
+        {
+          const qlCmd = restartNorm.replace(/^\/quantlist\b/i, "quantlist").trim();
+          if (qlCmd === "quantlist" || qlCmd.startsWith("quantlist ")) {
+            const parsedQl = parseTelegramAdminQuantlistCommand(qlCmd);
+            if (!parsedQl.ok) {
+              const errMsg =
+                parsedQl.reason === "usage"
+                  ? "Invalid command format. Use: quantlist <telegramId> (optional: more numeric IDs separated by spaces)."
+                  : parsedQl.reason === "too_many"
+                    ? `Too many IDs at once (max ${ADMIN_QUANTLIST_MAX_IDS}).`
+                    : "Invalid command format. Use: quantlist <telegramId>";
+              await telegramSendMessage(chatId, errMsg);
+              continue;
+            }
+            await applyAdminQuantlistTelegramCommand(chatId, uid, parsedQl);
             continue;
           }
         }
@@ -8228,7 +8366,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start (сброс тренировки / новая игра), go [часы], quant <tgId> +N, teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
+              "Неизвестная команда. Админ: /start (сброс тренировки / новая игра), go [часы], quant / quantlist <числовой Telegram id>, teams, teams Имя +N, pause, unpause, test / test off, say, speed, paint, новая игра, restart, evt help, gold…"
             );
           }
           continue;
