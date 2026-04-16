@@ -3680,6 +3680,7 @@ function syncCreateTeamReferralHintVisibility() {
 }
 
 function openCreateTeamOverlay(fromWelcome) {
+  hideRoundEndedOverlay();
   createTeamFromWelcome = !!fromWelcome;
   if (createTeamNameInput) createTeamNameInput.value = "";
   if (createTeamEmojiInput) createTeamEmojiInput.value = EMOJI_PRESETS[0] || "🔥";
@@ -3752,6 +3753,7 @@ function submitCreateTeam() {
 }
 
 function showWelcomeOverlay() {
+  hideRoundEndedOverlay();
   if (welcomeOverlay) welcomeOverlay.hidden = false;
   syncWelcomeOnboardingLayout();
 }
@@ -3906,6 +3908,7 @@ function setupWelcomeUi() {
       return;
     }
     if (welcomeOverlay) welcomeOverlay.hidden = true;
+    hideRoundEndedOverlay();
     if (teamOverlay) teamOverlay.hidden = false;
   });
   btnTeamOverlayBack?.addEventListener("click", () => {
@@ -3997,6 +4000,7 @@ function setupCreateTeamUi() {
   defeatBtnJoin?.addEventListener("click", () => {
     playMenuChoiceSfx();
     hideDefeatOverlay();
+    hideRoundEndedOverlay();
     if (teamOverlay) teamOverlay.hidden = false;
   });
   defeatBtnDismiss?.addEventListener("click", hideDefeatOverlay);
@@ -4180,6 +4184,10 @@ function onMeta(msg) {
         ? msg.warmupEndsAt
         : null;
   const nextRi = typeof msg.roundIndex === "number" ? msg.roundIndex : 0;
+  /* Итог раунда (z-index 230) иначе перекрывает welcome/команду (100) — убираем при смене этапа по meta. */
+  if (typeof msg.roundIndex === "number" && nextRi !== roundIndexMeta) {
+    hideRoundEndedOverlay();
+  }
   if (nextRi !== lastRoundIndexForPresentation) {
     lastRoundIndexForPresentation = nextRi;
     resetEventPresentationForRound();
@@ -8243,6 +8251,7 @@ function connectWs() {
         myTeamId = null;
       }
       if (welcomeOverlay) welcomeOverlay.hidden = true;
+      hideRoundEndedOverlay();
       teamOverlay.hidden = false;
       rebuildTeamList();
       setFooterMode();
@@ -8267,6 +8276,7 @@ function connectWs() {
         openCreateTeamOverlay(true);
       } else if (openTeamList) {
         if (welcomeOverlay) welcomeOverlay.hidden = true;
+        hideRoundEndedOverlay();
         teamOverlay.hidden = false;
       } else {
         showWelcomeOverlay();
@@ -11256,6 +11266,7 @@ function setupToolbarSession() {
   btnToolbarSession.addEventListener("click", () => {
     const online = wantOnline && getWsUrl();
     if (online) {
+      hideRoundEndedOverlay();
       showWelcomeOverlay();
       if (teamOverlay) teamOverlay.hidden = true;
       return;
