@@ -2785,7 +2785,7 @@ const lastPlace = new WeakMap();
 /** @type {Map<number, number>} teamId -> число игроков */
 const teamPlayerCounts = new Map();
 
-/** Кэш «связь с снабжением» (8-связность от флагов главной базы и плацдармов). До loadRoundState/rebuildLandFromRound → afterTerritoryMutation. */
+/** Кэш «связь с снабжением»: 8-связность от **любой** активной базы 6×6 (главная + передовые). До loadRoundState/rebuildLandFromRound → afterTerritoryMutation. */
 let baseConnectedPixelsCacheGen = 0;
 /** @type {Map<number, Set<string>>} */
 const baseConnectedPixelsCacheByTeam = new Map();
