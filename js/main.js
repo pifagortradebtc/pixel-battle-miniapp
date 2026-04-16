@@ -669,6 +669,22 @@ let baseConnCachedTeam = 0;
 /** @type {Set<string>} */
 let baseConnCachedSet = new Set();
 
+function addClientBfsSeedsFromRectInVertices(vertices, x0, y0, w, h, out, stack) {
+  const ww = w | 0;
+  const hh = h | 0;
+  const ox = x0 | 0;
+  const oy = y0 | 0;
+  for (let y = oy; y < oy + hh; y++) {
+    for (let x = ox; x < ox + ww; x++) {
+      const k = makeGridCellKey(x, y);
+      if (vertices.has(k) && !out.has(k)) {
+        out.add(k);
+        stack.push(k);
+      }
+    }
+  }
+}
+
 function computeClientBaseConnectedPixelKeys(teamId) {
   const tid = teamId | 0;
   if (!tid) return new Set();
@@ -682,22 +698,14 @@ function computeClientBaseConnectedPixelKeys(teamId) {
   const neighBuf = [];
   const sp = clientTeamSpawnRect(tid);
   if (sp) {
-    const { x: bx, y: by } = flagCellFromSpawn(sp.x0, sp.y0);
-    const mainKey = makeGridCellKey(bx, by);
-    if (vertices.has(mainKey)) {
-      out.add(mainKey);
-      stack.push(mainKey);
-    }
+    const w = typeof sp.w === "number" ? sp.w : FLAG_SPAWN_SIZE;
+    const h = typeof sp.h === "number" ? sp.h : FLAG_SPAWN_SIZE;
+    addClientBfsSeedsFromRectInVertices(vertices, sp.x0, sp.y0, w, h, out, stack);
   }
   const mos = clientMilitaryOutpostRects(tid);
   for (let i = 0; i < mos.length; i++) {
     const r = mos[i];
-    const { x: fx, y: fy } = flagCellFromSpawn(r.x0, r.y0);
-    const fk = makeGridCellKey(fx, fy);
-    if (vertices.has(fk) && !out.has(fk)) {
-      out.add(fk);
-      stack.push(fk);
-    }
+    addClientBfsSeedsFromRectInVertices(vertices, r.x0, r.y0, r.w, r.h, out, stack);
   }
   if (!stack.length) return new Set();
   while (stack.length) {
@@ -1188,8 +1196,8 @@ function clientCellInsideAnyMilitaryOutpost(x, y, teamId) {
 }
 
 /**
- * 8-соседство: своя закрашенная клетка только если в компоненте с флагом главной базы или плацдарма;
- * иначе — пустые клетки внутри 6×6 базы / плацдарма.
+ * 8-соседство: своя закрашенная клетка только если в компоненте, снабжаемом с любой активной базы 6×6;
+ * иначе — пустые клетки внутри 6×6 главной базы / плацдарма.
  * `baseConnOverride` — свежий BFS при клике; иначе кэш на кадр (отрисовка зоны расширения).
  * Совпадает с cellTouchesTeamTerritory на сервере.
  */

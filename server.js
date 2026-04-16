@@ -2590,7 +2590,13 @@ function advanceTerritoryIsolationState() {
   let carry = territoryIsolationByGroupId;
   for (let iter = 0; iter < 96; iter++) {
     const now = Date.now();
-    const isolatedGroups = computeIsolatedTerritoryGroups(pixels, dynamicTeams, pixelTeam, flagCellFromSpawn);
+    const isolatedGroups = computeIsolatedTerritoryGroups(
+      pixels,
+      dynamicTeams,
+      pixelTeam,
+      flagCellFromSpawn,
+      TEAM_SPAWN_SIZE
+    );
     /** @type {{ groupId: string, teamId: number, cells: Set<string>, deadlineMs: number }[]} */
     const meta = [];
     for (let i = 0; i < isolatedGroups.length; i++) {
@@ -3637,9 +3643,25 @@ function cellInsideTeamSpawnRect(x, y, t) {
   );
 }
 
+/** Старт BFS «связь с базой»: все закрашенные клетки команды внутри прямоугольника базы 6×6. */
+function addBfsSeedsFromRectInVertices(vertices, x0, y0, size, out, stack) {
+  const ox = x0 | 0;
+  const oy = y0 | 0;
+  const S = size | 0;
+  for (let y = oy; y < oy + S; y++) {
+    for (let x = ox; x < ox + S; x++) {
+      const k = makeGridCellKey(x, y);
+      if (vertices.has(k) && !out.has(k)) {
+        out.add(k);
+        stack.push(k);
+      }
+    }
+  }
+}
+
 /**
- * Все закрашенные клетки команды, достижимые от флага главной базы или любого плацдарма 6×6
- * (те же якоря, что и для 20 с изоляции).
+ * Все закрашенные клетки команды, 8-достижимые от любой активной базы (главная + плацдармы):
+ * корни — любые клетки V внутри соответствующего 6×6 (не только центр флага).
  */
 function computeBaseConnectedPixelKeysForTeam(teamId) {
   const tid = teamId | 0;
@@ -3659,19 +3681,10 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
   }
   const stack = [];
   const neighBuf = [];
-  const { x: bx, y: by } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
-  const mainKey = makeGridCellKey(bx, by);
-  if (vertices.has(mainKey)) {
-    out.add(mainKey);
-    stack.push(mainKey);
-  }
+  addBfsSeedsFromRectInVertices(vertices, t.spawnX0, t.spawnY0, TEAM_SPAWN_SIZE, out, stack);
   for (const o of getTeamMilitaryOutposts(t)) {
-    const { x: fx, y: fy } = flagCellFromSpawn(o.x0, o.y0);
-    const fk = makeGridCellKey(fx, fy);
-    if (vertices.has(fk) && !out.has(fk)) {
-      out.add(fk);
-      stack.push(fk);
-    }
+    if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
+    addBfsSeedsFromRectInVertices(vertices, o.x0, o.y0, TEAM_SPAWN_SIZE, out, stack);
   }
   if (!stack.length) {
     baseConnectedPixelsCacheByTeam.set(tid, out);
@@ -3692,8 +3705,8 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
 }
 
 /**
- * 8-соседство: своя закрашенная клетка только если она в компоненте с якорем главной базы или плацдарма;
- * иначе — только пустые клетки внутри 6×6 базы / плацдарма.
+ * 8-соседство: своя закрашенная клетка только если она в компоненте, снабжаемом с любой активной базы 6×6;
+ * иначе — только пустые клетки внутри 6×6 главной базы / плацдарма.
  * Отрезанный «мигающий» карман не даёт строить дальше от себя.
  */
 function cellTouchesTeamTerritory(x, y, teamId) {
