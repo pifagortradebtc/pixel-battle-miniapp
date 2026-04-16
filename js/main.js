@@ -4148,6 +4148,7 @@ function onMeta(msg) {
   syncTreasureSpotsFromMeta(msg);
 
   teamsMeta = msg.teams || [];
+  baseConnCacheFrameId = -1;
   invalidateTeamColorByIdCache();
   syncFlagCaptureStateFromMeta(msg.flags);
   teamCounts = msg.teamCounts || {};
@@ -7930,6 +7931,7 @@ function connectWs() {
     }
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
+      baseConnCacheFrameId = -1;
       invalidateTeamColorByIdCache();
       const allowedKeys = new Set();
       for (const t of teamsMeta || []) {
@@ -7958,6 +7960,7 @@ function connectWs() {
     if (msg.type === "created") {
       endSessionRestore();
       teamsMeta = msg.teams || [];
+      baseConnCacheFrameId = -1;
       invalidateTeamColorByIdCache();
       teamCounts = msg.teamCounts || {};
       myTeamId = msg.teamId;

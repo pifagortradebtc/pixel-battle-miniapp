@@ -1498,6 +1498,16 @@ function getTeamMilitaryOutposts(t) {
   return out;
 }
 
+/**
+ * Хотя бы одна «настоящая» база 6×6: главная и/или купленный плацдарм.
+ * Связность и изоляция считаются от всех таких корней одинаково.
+ */
+function teamHasActiveBaseAnchors(t) {
+  if (!t || t.solo || t.eliminated) return false;
+  if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") return true;
+  return getTeamMilitaryOutposts(t).length > 0;
+}
+
 /** Углы 6×6 всех главных баз и передовых баз (для коллизий при спавне и размещении). */
 function allSpawnLikeRectsForConflict() {
   /** @type {{ x0: number, y0: number }[]} */
@@ -3902,13 +3912,16 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
   }
   const out = new Set();
   const t = dynamicTeams.find((dt) => !dt.solo && !dt.eliminated && (dt.id | 0) === tid);
-  if (!t || typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") {
+  if (!t || !teamHasActiveBaseAnchors(t)) {
     baseConnectedPixelsCacheByTeam.set(tid, out);
     return out;
   }
+  const hasMain = typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number";
   const stack = [];
   const neighBuf = [];
-  addBfsSeedsFromRectInVertices(vertices, t.spawnX0, t.spawnY0, TEAM_SPAWN_SIZE, out, stack);
+  if (hasMain) {
+    addBfsSeedsFromRectInVertices(vertices, t.spawnX0, t.spawnY0, TEAM_SPAWN_SIZE, out, stack);
+  }
   for (const o of getTeamMilitaryOutposts(t)) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
     addBfsSeedsFromRectInVertices(vertices, o.x0, o.y0, TEAM_SPAWN_SIZE, out, stack);
