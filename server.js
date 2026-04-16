@@ -8247,7 +8247,7 @@ async function notifyFinalWinnersTelegram(winnerPlayerKeys, teamName, winnerRow)
 }
 
 /**
- * @param {number} [durationHours] положительное число часов (0.01 = 36 с); без аргумента — 100 ч
+ * @param {number} [durationHours] положительное число часов (0.01 = 36 с); без аргумента — длительность раунда 0 из tournament-flow
  */
 async function startRoundOneTimer(durationHours) {
   if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
@@ -9520,7 +9520,7 @@ async function telegramPollLoop() {
           continue;
         }
         const rest = t.slice(2).trim();
-        let hours = 8;
+        let hours = battleDurationForRound(0) / 3600000;
         if (rest.length) {
           const n = parseFloat(rest.replace(",", "."));
           if (!Number.isFinite(n) || n <= 0) {
