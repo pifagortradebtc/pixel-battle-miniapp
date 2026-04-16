@@ -4690,15 +4690,34 @@ function spawnCandidatePassesConflict(x0, y0, others) {
   return true;
 }
 
-/** Внутренняя/внешняя граница кольца как доля геометрического «макс. радиуса» до углов сетки. */
-const TEAM_SPAWN_RING_R_INNER_FRAC = 0.75;
-const TEAM_SPAWN_RING_R_OUTER_FRAC = 0.9;
+/** Доли rMax: узкое периферийное кольцо (почти одинаковое r), без центра. Шаги расширения — только если нет места. */
+const TEAM_SPAWN_RING_PRESETS = [
+  { inner: 0.88, outer: 0.97 },
+  { inner: 0.84, outer: 0.98 },
+  { inner: 0.78, outer: 0.99 },
+  { inner: 0.72, outer: 0.996 },
+];
 /** Золотой угол — равномерное заполнение попыток по азимуту без кластеров. */
 const TEAM_SPAWN_GOLDEN_ANGLE_RAD = 2.39996322972865332;
 
+function teamSpawnRingRadii(rMaxGeom, presetIdx) {
+  const p = TEAM_SPAWN_RING_PRESETS[Math.min(presetIdx, TEAM_SPAWN_RING_PRESETS.length - 1)];
+  let rInner = rMaxGeom * p.inner;
+  let rOuter = rMaxGeom * p.outer;
+  if (rOuter - rInner < rMaxGeom * 0.03) {
+    rOuter = Math.min(rMaxGeom * 0.998, rInner + Math.max(rMaxGeom * 0.06, 2));
+  }
+  return { rInner, rOuter };
+}
+
+function teamSpawnCenterInRing(d, rInner, rOuter) {
+  const tol = 0.9;
+  return d + tol >= rInner && d - tol <= rOuter;
+}
+
 /**
- * Подобрать левый верх 6×6: периферийное кольцо (~75–90% радиуса), равные расстояния до центра,
- * распределение по углам; при неудаче — случайная карта и полный перебор (как раньше).
+ * Подобрать левый верх 6×6: только периферийное кольцо (не центр), ~равный r и раскладка по углам.
+ * Запасные проходы расширяют кольцо к краю карты, но не разрешают спавн в середине.
  */
 function findValidSpawnRect6() {
   if (!landGrid) return null;
@@ -4715,53 +4734,49 @@ function findValidSpawnRect6() {
   const { cx: mapCx, cy: mapCy } = mapCenterCellCoords();
   let rMaxGeom = maxTeamSpawnCenterRadiusFromMapCenter();
   if (!(rMaxGeom > 1e-6)) rMaxGeom = 1;
-  let rInner = rMaxGeom * TEAM_SPAWN_RING_R_INNER_FRAC;
-  let rOuter = rMaxGeom * TEAM_SPAWN_RING_R_OUTER_FRAC;
-  if (rOuter - rInner < rMaxGeom * 0.04) {
-    rInner = rMaxGeom * 0.55;
-    rOuter = rMaxGeom * 0.97;
-  }
 
   const baseAngle = pickBalancedTeamSpawnAngleRad(seed ^ 0xdeadbeef);
 
-  for (let attempt = 0; attempt < 520; attempt++) {
-    const theta =
-      baseAngle +
-      attempt * TEAM_SPAWN_GOLDEN_ANGLE_RAD +
-      (rand() - 0.5) * 0.35 +
-      (rand() - 0.5) * 0.35;
-    const r = rInner + rand() * (rOuter - rInner);
-    const tcx = mapCx + Math.cos(theta) * r;
-    const tcy = mapCy + Math.sin(theta) * r;
-    let x0 = Math.round(tcx - TEAM_SPAWN_SIZE / 2);
-    let y0 = Math.round(tcy - TEAM_SPAWN_SIZE / 2);
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x0 > maxX) x0 = maxX;
-    if (y0 > maxY) y0 = maxY;
-    const c = teamSpawnRectCenterXY(x0, y0);
-    const d = Math.hypot(c.x - mapCx, c.y - mapCy);
-    if (d + 0.85 < rInner || d - 0.85 > rOuter) continue;
-    if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+  for (let presetIdx = 0; presetIdx < TEAM_SPAWN_RING_PRESETS.length; presetIdx++) {
+    const { rInner, rOuter } = teamSpawnRingRadii(rMaxGeom, presetIdx);
+
+    for (let attempt = 0; attempt < 560; attempt++) {
+      const theta =
+        baseAngle +
+        attempt * TEAM_SPAWN_GOLDEN_ANGLE_RAD +
+        (rand() - 0.5) * 0.32 +
+        (rand() - 0.5) * 0.32;
+      const r = rInner + rand() * (rOuter - rInner);
+      const tcx = mapCx + Math.cos(theta) * r;
+      const tcy = mapCy + Math.sin(theta) * r;
+      let x0 = Math.round(tcx - TEAM_SPAWN_SIZE / 2);
+      let y0 = Math.round(tcy - TEAM_SPAWN_SIZE / 2);
+      if (x0 < 0) x0 = 0;
+      if (y0 < 0) y0 = 0;
+      if (x0 > maxX) x0 = maxX;
+      if (y0 > maxY) y0 = maxY;
+      const c = teamSpawnRectCenterXY(x0, y0);
+      const d = Math.hypot(c.x - mapCx, c.y - mapCy);
+      if (!teamSpawnCenterInRing(d, rInner, rOuter)) continue;
+      if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+    }
+
+    for (let attempt = 0; attempt < 480; attempt++) {
+      const x0 = (rand() * (maxX + 1)) | 0;
+      const y0 = (rand() * (maxY + 1)) | 0;
+      const c = teamSpawnRectCenterXY(x0, y0);
+      const d = Math.hypot(c.x - mapCx, c.y - mapCy);
+      if (!teamSpawnCenterInRing(d, rInner, rOuter)) continue;
+      if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+    }
   }
 
-  for (let attempt = 0; attempt < 420; attempt++) {
-    const x0 = (rand() * (maxX + 1)) | 0;
-    const y0 = (rand() * (maxY + 1)) | 0;
-    const c = teamSpawnRectCenterXY(x0, y0);
-    const d = Math.hypot(c.x - mapCx, c.y - mapCy);
-    if (d + 0.85 < rInner || d - 0.85 > rOuter) continue;
-    if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
-  }
-
-  for (let attempt = 0; attempt < 380; attempt++) {
-    const x0 = (rand() * (maxX + 1)) | 0;
-    const y0 = (rand() * (maxY + 1)) | 0;
-    if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
-  }
-
+  const { rInner: rInLast, rOuter: rOutLast } = teamSpawnRingRadii(rMaxGeom, TEAM_SPAWN_RING_PRESETS.length - 1);
   for (let y0 = 0; y0 <= maxY; y0++) {
     for (let x0 = 0; x0 <= maxX; x0++) {
+      const c = teamSpawnRectCenterXY(x0, y0);
+      const d = Math.hypot(c.x - mapCx, c.y - mapCy);
+      if (!teamSpawnCenterInRing(d, rInLast, rOutLast)) continue;
       if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
     }
   }
