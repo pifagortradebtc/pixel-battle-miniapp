@@ -4732,6 +4732,10 @@ function closeQuantumFarmPanel() {
 
 function openQuantumFarmPanel(f) {
   if (!quantumFarmPanelEl || !f) return;
+  const onlineQ = wantOnline && getWsUrl();
+  if ((onlineQ && myTeamId == null) || (welcomeOverlay && welcomeOverlay.hidden === false)) {
+    return;
+  }
   const lvl = normalizeQuantumFarmLevel(f.level);
   const scores = scoreTeamsAroundFarm(f.x0, f.y0, gridW, gridH, (key) => {
     const parts = key.split(",");
@@ -4850,6 +4854,7 @@ function initQuantumFarmPanel() {
     if (!Number.isFinite(id) || id < 1) return;
     wsSendJson({ type: "purchaseQuantumFarmUpgrade", farmId: id });
   });
+  closeQuantumFarmPanel();
 }
 
 const BATTLE_EVENT_ZONE_QUANT_PER_STACK = 5;

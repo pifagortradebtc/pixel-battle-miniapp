@@ -3163,6 +3163,12 @@ a.overlay__btn {
   padding: 16px;
   pointer-events: none;
 }
+/* Telegram WebView: авторский display:flex иначе может перебить UA [hidden] — панель «висит» при первом запуске. */
+.quantum-farm-panel[hidden] {
+  display: none !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
+}
 .quantum-farm-panel:not([hidden]) {
   pointer-events: auto;
 }
