@@ -287,6 +287,12 @@ const WS_PURCHASE_PER_10S = Math.min(40, Math.max(4, Number(process.env.WS_PURCH
 /** Лог таймлайна событий раунда (elapsed / активные / следующее). */
 const DEBUG_ROUND_EVENTS = /^true$/i.test(String(process.env.DEBUG_ROUND_EVENTS || "").trim());
 
+/**
+ * WS-сообщения `__testSetMstim` / `__testPixelCooldownProbe` для интеграционных тестов кулдауна (см. npm run test:mstim-cooldown).
+ * В продакшене не включать.
+ */
+const PIXEL_BATTLE_ENABLE_TEST_WS = /^true$/i.test(String(process.env.PIXEL_BATTLE_ENABLE_TEST_WS || "").trim());
+
 /** Redis Pub/Sub: общий канал для нескольких инстансов (Render scale). Пусто — режим один процесс. */
 const REDIS_URL = (process.env.REDIS_URL || "").trim();
 const REDIS_GAME_CHANNEL = (process.env.REDIS_GAME_CHANNEL || "pixel-battle:game").trim();
@@ -708,6 +714,13 @@ const MSTIM_ALT_SEASON_DURATION_MS = 5 * 60 * 1000;
 const DEBUG_MSTIM_COOLDOWN = /^true$/i.test(String(process.env.DEBUG_MSTIM_COOLDOWN || "").trim());
 /** До какого момента (epoch ms) действует режим; 0 — выкл. */
 let mstimAltSeasonBurstUntilMs = 0;
+
+/** Epoch ms из JSON/WS: не использовать `x|0` — обрезание до int32 ломает wall-time после ~2038 и даёт ложный «режим выкл». */
+function clampPositiveEpochMs(v) {
+  const n = Math.trunc(Number(v));
+  if (!Number.isFinite(n) || n < 1) return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, n);
+}
 
 /** Первый раунд: таймер не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO). До «go» — свободная игра на карте. */
 let roundTimerStarted = true;
@@ -1271,7 +1284,7 @@ function buildSynergyMultByTeamMap(snap) {
 }
 
 function getGlobalEventPayload(nowMs = Date.now()) {
-  const arUntil = isMstimAltSeasonBurstActive() ? (mstimAltSeasonBurstUntilMs | 0) : 0;
+  const arUntil = isMstimAltSeasonBurstActive() ? clampPositiveEpochMs(mstimAltSeasonBurstUntilMs) : 0;
   const ctx = getBattleEventsContext(nowMs);
   if (!ctx) {
     return {
@@ -1659,7 +1672,7 @@ function saveRoundState() {
         roundDurationMs,
         tournamentQuickTestMode,
         tournamentTimeScale: 1,
-        mstimAltSeasonBurstUntilMs: Math.max(0, mstimAltSeasonBurstUntilMs | 0),
+        mstimAltSeasonBurstUntilMs: Math.max(0, clampPositiveEpochMs(mstimAltSeasonBurstUntilMs)),
         round0WarmupMs,
         roundTimerStarted,
         eligibleTokens: [...eligibleTokenSet],
@@ -1808,7 +1821,7 @@ function loadRoundState() {
         roundDurationMs = effectiveBattleDurationForRound(roundIndex);
       }
       if (typeof j.mstimAltSeasonBurstUntilMs === "number" && Number.isFinite(j.mstimAltSeasonBurstUntilMs)) {
-        const u = j.mstimAltSeasonBurstUntilMs | 0;
+        const u = clampPositiveEpochMs(j.mstimAltSeasonBurstUntilMs);
         mstimAltSeasonBurstUntilMs = u > Date.now() ? u : 0;
       } else {
         mstimAltSeasonBurstUntilMs = 0;
@@ -2292,7 +2305,7 @@ function effectiveGameClockMs() {
 
 /** Окно «Мстим за Альт Сезон»: wall-clock, на паузе таймер замирает (until сдвигается при unpause). */
 function isMstimAltSeasonBurstActive() {
-  const until = mstimAltSeasonBurstUntilMs | 0;
+  const until = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
   if (until <= 0) return false;
   if (gamePaused && (pauseWallStartedAt | 0) > 0) {
     return until > (pauseWallStartedAt | 0);
@@ -3471,8 +3484,8 @@ function applyClusterGameReplication(msg) {
       if (msg.phase === "start" && String(msg.eventType || "") === "alt_season_revenge") {
         const u = Number(msg.untilMs);
         if (Number.isFinite(u) && u > 0) {
-          const next = u | 0;
-          if ((mstimAltSeasonBurstUntilMs | 0) !== next) {
+          const next = clampPositiveEpochMs(u);
+          if (clampPositiveEpochMs(mstimAltSeasonBurstUntilMs) !== next) {
             mstimAltSeasonBurstUntilMs = next;
             if (DEBUG_MSTIM_COOLDOWN) {
               console.log(`[mstim] cluster roundEvent hydrate untilMs=${next} leader=${isClusterLeader()}`);
@@ -3787,7 +3800,7 @@ function applyClusterGameReplication(msg) {
     }
     case "mstimAltSeasonSync": {
       const u = Number(msg.untilMs);
-      mstimAltSeasonBurstUntilMs = Number.isFinite(u) && u > 0 ? u | 0 : 0;
+      mstimAltSeasonBurstUntilMs = Number.isFinite(u) && u > 0 ? clampPositiveEpochMs(u) : 0;
       if (DEBUG_MSTIM_COOLDOWN) {
         console.log(
           `[mstim] cluster sync untilMs=${mstimAltSeasonBurstUntilMs} active=${isMstimAltSeasonBurstActive()} leader=${isClusterLeader()}`
@@ -6224,11 +6237,11 @@ function shiftManualBattleSlotsAfterPause(d, pauseStart) {
 }
 
 function shiftMstimAfterPause(d, pauseStart) {
-  const u = mstimAltSeasonBurstUntilMs | 0;
+  const u = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
   const ps = pauseStart | 0;
   const dd = d | 0;
   if (dd < 1 || !ps || u <= ps) return;
-  mstimAltSeasonBurstUntilMs = u + dd;
+  mstimAltSeasonBurstUntilMs = clampPositiveEpochMs(u + dd);
 }
 
 /**
@@ -6892,6 +6905,37 @@ wss.on("connection", (ws, req) => {
       return;
     }
     if (!msg || typeof msg !== "object") return;
+
+    if (PIXEL_BATTLE_ENABLE_TEST_WS) {
+      if (msg.type === "__testSetMstim") {
+        const u = Number(msg.untilMs);
+        mstimAltSeasonBurstUntilMs = Number.isFinite(u) && u > 0 ? clampPositiveEpochMs(u) : 0;
+        safeSend(ws, {
+          type: "__testSetMstimAck",
+          untilMs: mstimAltSeasonBurstUntilMs,
+          active: isMstimAltSeasonBurstActive(),
+        });
+        return;
+      }
+      if (msg.type === "__testPixelCooldownProbe") {
+        const rawPk = typeof msg.playerKey === "string" ? msg.playerKey : "";
+        const probePk = sanitizePlayerKey(rawPk) || sanitizePlayerKey("integration_mstim_pk");
+        const u = await walletStore.getOrCreateUser(probePk);
+        const tid = Number(msg.teamId) | 0;
+        const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
+        const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
+        const st = tournamentStage(roundIndex, gameFinished);
+        const now = effectiveGameClockMs();
+        const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
+        safeSend(ws, {
+          type: "__testPixelCooldownProbeAck",
+          cd,
+          mstimUntil: mstimAltSeasonBurstUntilMs,
+          mstimActive: isMstimAltSeasonBurstActive(),
+        });
+        return;
+      }
+    }
 
     maybeEndRound();
 
@@ -7995,7 +8039,7 @@ wss.on("connection", (ws, req) => {
       const st = tournamentStage(roundIndex, gameFinished);
       const fx = getTeamFx(teamId);
       const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
-      const now = Date.now();
+      const now = effectiveGameClockMs();
       const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
       if (now < u.lastActionAt + cd) {
         if (DEBUG_MSTIM_COOLDOWN) {

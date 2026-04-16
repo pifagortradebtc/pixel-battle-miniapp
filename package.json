@@ -12,7 +12,8 @@
     "downsample-regions": "node scripts/downsample-regions.mjs",
     "stress": "node scripts/stress-concurrency-sim.mjs",
     "copy-sfx": "node scripts/copy-sfx-from-downloads.mjs",
-    "verify:scores": "node scripts/verify-team-score-incremental.mjs"
+    "verify:scores": "node scripts/verify-team-score-incremental.mjs",
+    "test:mstim-cooldown": "node scripts/integration-mstim-cooldown.mjs"
   },
   "devDependencies": {
     "sharp": "^0.33.5"

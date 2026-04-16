@@ -626,19 +626,25 @@ function updateHudTimersFromDom() {
 
 /**
  * До какого wall-time (ms) действует «Мстим за Альт Сезон».
- * globalEvent иногда приходит без altSeasonRevengeUntilMs; тогда HUD берёт until из roundEvent (fallback).
- * Кулдаун пикселя должен использовать тот же источник, что и HUD.
+ * Если в snapshot есть числовой altSeasonRevengeUntilMs с сервера — оно авторитетно (0 = режим выкл., без fallback на roundEvent).
+ * Иначе — until из kind/roundEvent/burst (до прихода полного wallet).
  * @param {object | null | undefined} ge
  */
 export function getEffectiveAltSeasonRevengeUntilMs(ge) {
   const g = ge || null;
-  let u = typeof g?.altSeasonRevengeUntilMs === "number" ? g.altSeasonRevengeUntilMs | 0 : 0;
-  if (u <= 0 && typeof g?.until === "number") {
-    if (String(g.kind || "") === "alt_season_revenge") u = g.until | 0;
+  if (typeof g?.altSeasonRevengeUntilMs === "number") {
+    const serverU = Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(g.altSeasonRevengeUntilMs));
+    if (serverU <= 0) return 0;
+    const sync = getMstimAltSeasonClientBurstUntilMs();
+    return Math.max(serverU, sync);
+  }
+  let u = 0;
+  if (typeof g?.until === "number" && String(g.kind || "") === "alt_season_revenge") {
+    u = g.until | 0;
   }
   const re = lastRoundEventStartMsg;
   if (u <= 0 && re && String(re.eventType || "") === "alt_season_revenge" && typeof re.untilMs === "number") {
-    u = re.untilMs | 0;
+    u = Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(re.untilMs));
   }
   const sync = getMstimAltSeasonClientBurstUntilMs();
   if (sync > u) u = sync;

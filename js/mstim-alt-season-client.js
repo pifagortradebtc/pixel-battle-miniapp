@@ -6,19 +6,24 @@
 
 let burstUntilMs = 0;
 
+function clampEpochMs(n) {
+  const t = Math.trunc(Number(n));
+  if (!Number.isFinite(t) || t < 1) return 0;
+  return Math.min(Number.MAX_SAFE_INTEGER, t);
+}
+
 /**
  * @param {number} u until (мс) или 0 для сброса
  */
 export function setMstimAltSeasonClientBurstUntilMs(u) {
-  const n = Number(u) || 0;
-  burstUntilMs = n > 0 ? n | 0 : 0;
+  burstUntilMs = clampEpochMs(u);
 }
 
 /**
  * @returns {number} положительный until, если окно ещё активно; иначе 0
  */
 export function getMstimAltSeasonClientBurstUntilMs() {
-  const u = burstUntilMs | 0;
+  const u = clampEpochMs(burstUntilMs);
   if (u <= 0) return 0;
   if (u <= Date.now()) {
     burstUntilMs = 0;

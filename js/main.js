@@ -51,10 +51,10 @@ import {
 } from "./game-audio.js";
 import {
   BASE_ACTION_COOLDOWN_SEC,
-  getCurrentCooldownMs,
-  getEffectiveRecoverySec,
   PRICES_QUANT,
   REFERRAL_JOIN_INVITER_QUANT,
+  resolveAuthoritativePixelCooldownMs,
+  resolveAuthoritativeRecoverySec,
 } from "../lib/tournament-economy.js";
 import { computeNukeBombBlastCells } from "../lib/nuke-bomb-shape.js";
 import {
@@ -2992,22 +2992,9 @@ function renderLeaderboardImmediate(msg) {
   if (msg.globalEvent) {
     const incAlt0 = Number(msg.globalEvent.altSeasonRevengeUntilMs) || 0;
     if (incAlt0 > Date.now()) setMstimAltSeasonClientBurstUntilMs(incAlt0);
-    const syncAlt = getMstimAltSeasonClientBurstUntilMs();
-    const incAlt = Number(msg.globalEvent.altSeasonRevengeUntilMs) || 0;
-    const ge =
-      syncAlt > incAlt
-        ? {
-            ...msg.globalEvent,
-            active: true,
-            kind: "alt_season_revenge",
-            title: msg.globalEvent.title || "Мстим за Альт Сезон",
-            subtitle: msg.globalEvent.subtitle || "Пиксель раз в 1 с для всех",
-            until: syncAlt,
-            altSeasonRevengeUntilMs: syncAlt,
-          }
-        : msg.globalEvent;
-    lastStatsGlobalEvent = ge;
-    if (walletState) walletState.globalEvent = ge;
+    else setMstimAltSeasonClientBurstUntilMs(0);
+    lastStatsGlobalEvent = msg.globalEvent;
+    if (walletState) walletState.globalEvent = msg.globalEvent;
     syncClientCooldownFromWalletFields();
   }
   const rows = Array.isArray(msg.rows) ? msg.rows : [];
@@ -4794,13 +4781,9 @@ function isAltSeasonRevengeWallActive(arUntilRaw) {
 
 function syncClientCooldownFromWalletFields() {
   if (!walletState) return;
-  const ge = getClientGlobalEventSnapshot();
-  const altUntil = getEffectiveAltSeasonRevengeUntilMs(ge);
-  if (isAltSeasonRevengeWallActive(altUntil)) {
-    walletState.effectiveRecoverySec = 1;
-    walletState.cooldownMs = 1000;
-    return;
-  }
+  const ge = walletState.globalEvent;
+  const altUntil = Number(ge?.altSeasonRevengeUntilMs) || 0;
+  const globalAltSeasonActive = isAltSeasonRevengeWallActive(altUntil);
   const u = {
     personalRecoveryUntil: walletState.personalRecoveryUntil,
     personalRecoverySec: walletState.personalRecoverySec,
@@ -4810,8 +4793,9 @@ function syncClientCooldownFromWalletFields() {
     ? { teamRecoveryUntil: te.teamRecoveryUntil, teamRecoverySec: te.teamRecoverySec }
     : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const st = walletState.tournamentStage || "MASS_BATTLE";
-  walletState.effectiveRecoverySec = getEffectiveRecoverySec(u, teamFx);
-  walletState.cooldownMs = getCurrentCooldownMs(u, teamFx, st);
+  const now = Date.now();
+  walletState.effectiveRecoverySec = resolveAuthoritativeRecoverySec(globalAltSeasonActive, u, teamFx, now);
+  walletState.cooldownMs = resolveAuthoritativePixelCooldownMs(globalAltSeasonActive, u, teamFx, st, now);
 }
 
 /** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || fallback` (ломает 0 и баффы). */
@@ -5328,6 +5312,7 @@ function syncToolbarQuantumObjective() {
 function applyWalletFromServer(msg) {
   const altW = Number(msg?.globalEvent?.altSeasonRevengeUntilMs) || 0;
   if (altW > Date.now()) setMstimAltSeasonClientBurstUntilMs(altW);
+  else setMstimAltSeasonClientBurstUntilMs(0);
   walletState = msg;
   syncClientCooldownFromWalletFields();
   updateWalletBar();
@@ -7511,9 +7496,9 @@ function connectWs() {
         String(msg.eventType || "") === "alt_season_revenge" &&
         typeof msg.untilMs === "number" &&
         Number.isFinite(msg.untilMs) &&
-        (msg.untilMs | 0) > Date.now()
+        Number(msg.untilMs) > 0
       ) {
-        setMstimAltSeasonClientBurstUntilMs(msg.untilMs | 0);
+        setMstimAltSeasonClientBurstUntilMs(msg.untilMs);
       }
       notifyRoundEventFromServer(msg);
       syncClientCooldownFromWalletFields();
@@ -7534,6 +7519,7 @@ function connectWs() {
       if (msg.globalEvent && typeof msg.globalEvent === "object") {
         const altG = Number(msg.globalEvent.altSeasonRevengeUntilMs) || 0;
         if (altG > Date.now()) setMstimAltSeasonClientBurstUntilMs(altG);
+        else setMstimAltSeasonClientBurstUntilMs(0);
         if (walletState) walletState.globalEvent = msg.globalEvent;
         lastStatsGlobalEvent = msg.globalEvent;
         syncClientCooldownFromWalletFields();
