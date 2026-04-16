@@ -73,8 +73,10 @@ import {
   FLAG_BASE_MAX_HP,
   FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC,
   FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
+  FLAG_MAIN_BASE_MAX_HP,
   FLAG_REGEN_IDLE_MS,
   FLAG_WARN_THRESHOLDS,
+  FLAG_WARN_THRESHOLDS_MAIN,
   computeEffectiveBaseHp,
   flagCellFromSpawn,
   toEpochMsSafe,
@@ -3400,8 +3402,9 @@ function applyClusterGameReplication(msg) {
         const n = Number(rawHp);
         if (Number.isFinite(n)) hp = n | 0;
       }
-      if (hp === undefined) hp = Math.max(0, FLAG_BASE_MAX_HP - (msg.progress | 0));
-      if (hp >= FLAG_BASE_MAX_HP) {
+      const capHp = typeof msg.maxHp === "number" && Number.isFinite(msg.maxHp) ? msg.maxHp | 0 : mil ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
+      if (hp === undefined) hp = Math.max(0, capHp - (msg.progress | 0));
+      if (hp >= capHp) {
         if (mil) militaryFlagCaptureByKey.delete(stKey);
         else flagCaptureByDefender.delete(did);
         return;
@@ -3806,17 +3809,16 @@ function isEnemyOwnedFlagBaseCell(attackerTeamId, x, y) {
 }
 
 function pushOneFlagSnapshotRow(out, now, teamId, fx, fy, st, clientKey, militaryAnchor) {
+  const maxHp = militaryAnchor ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
   if (st) {
     const lh = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
       st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
     }
   }
-  const eff = computeEffectiveBaseHp(st, now);
-  const displayFloor = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(eff + 1e-9)));
-  const metaHp = st
-    ? Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0))
-    : displayFloor;
+  const eff = computeEffectiveBaseHp(st, now, maxHp);
+  const displayFloor = Math.min(maxHp, Math.max(0, Math.floor(eff + 1e-9)));
+  const metaHp = st ? Math.min(maxHp, Math.max(0, st.hp | 0)) : displayFloor;
   const attackerTeamId = (st?.attackerTeamId | 0) || 0;
   let lhMeta = now;
   if (st) {
@@ -3832,10 +3834,10 @@ function pushOneFlagSnapshotRow(out, now, teamId, fx, fy, st, clientKey, militar
     fx,
     fy,
     hp: metaHp,
-    maxHp: FLAG_BASE_MAX_HP,
+    maxHp,
     lastHitAt: lhMeta,
     attackerTeamId,
-    underAttack: displayFloor < FLAG_BASE_MAX_HP,
+    underAttack: displayFloor < maxHp,
     effectiveHp: eff,
     flagStateServerNow: now,
     clientKey,
@@ -3875,13 +3877,14 @@ function tickFlagBaseRegen(now) {
   for (const [did, st] of [...flagCaptureByDefender.entries()]) {
     const d = did | 0;
     if (!st) continue;
+    const maxHp = FLAG_MAIN_BASE_MAX_HP;
     /* Без валидного lastHitAt computeEffectiveBaseHp не даёт рост eff — регена нет (см. FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS). */
     const lh0 = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh0) || lh0 < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
       st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
     }
-    const eff = computeEffectiveBaseHp(st, now);
-    if (eff >= FLAG_BASE_MAX_HP - 1e-9) {
+    const eff = computeEffectiveBaseHp(st, now, maxHp);
+    if (eff >= maxHp - 1e-9) {
       flagCaptureByDefender.delete(d);
       broadcast({ type: "flagCaptureStopped", defenderTeamId: d, reason: "regen_full" });
       continue;
@@ -3895,7 +3898,7 @@ function tickFlagBaseRegen(now) {
       st._flagRegenBroadcastPhase = true;
       st._lastRegenBroadcastHp = -1;
     }
-    const curInt = Math.max(0, Math.min(FLAG_BASE_MAX_HP - 1, Math.floor(eff + 1e-9)));
+    const curInt = Math.max(0, Math.min(maxHp - 1, Math.floor(eff + 1e-9)));
     const needBroadcast =
       st._lastRegenBroadcastHp !== curInt ||
       !st._lastRegenBroadcastAt ||
@@ -3907,8 +3910,8 @@ function tickFlagBaseRegen(now) {
       type: "flagCaptureProgress",
       defenderTeamId: d,
       attackerTeamId: st.attackerTeamId | 0,
-      hp: Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0)),
-      maxHp: FLAG_BASE_MAX_HP,
+      hp: Math.min(maxHp, Math.max(0, st.hp | 0)),
+      maxHp,
       lastHitAt: st.lastHitAt,
       regen: true,
       effectiveHp: eff,
@@ -3920,12 +3923,13 @@ function tickFlagBaseRegen(now) {
     const parts = String(mkey).split(":");
     const d = (Number(parts[0]) | 0) || 0;
     if (!d) continue;
+    const maxHp = FLAG_BASE_MAX_HP;
     const lh0 = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh0) || lh0 < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
       st.lastHitAt = now - FLAG_REGEN_IDLE_MS;
     }
-    const eff = computeEffectiveBaseHp(st, now);
-    if (eff >= FLAG_BASE_MAX_HP - 1e-9) {
+    const eff = computeEffectiveBaseHp(st, now, maxHp);
+    if (eff >= maxHp - 1e-9) {
       militaryFlagCaptureByKey.delete(mkey);
       const ox0 = Number(parts[1]) | 0;
       const oy0 = Number(parts[2]) | 0;
@@ -3946,7 +3950,7 @@ function tickFlagBaseRegen(now) {
       st._flagRegenBroadcastPhase = true;
       st._lastRegenBroadcastHp = -1;
     }
-    const curInt = Math.max(0, Math.min(FLAG_BASE_MAX_HP - 1, Math.floor(eff + 1e-9)));
+    const curInt = Math.max(0, Math.min(maxHp - 1, Math.floor(eff + 1e-9)));
     const needBroadcast =
       st._lastRegenBroadcastHp !== curInt ||
       !st._lastRegenBroadcastAt ||
@@ -3960,8 +3964,8 @@ function tickFlagBaseRegen(now) {
       type: "flagCaptureProgress",
       defenderTeamId: d,
       attackerTeamId: st.attackerTeamId | 0,
-      hp: Math.min(FLAG_BASE_MAX_HP, Math.max(0, st.hp | 0)),
-      maxHp: FLAG_BASE_MAX_HP,
+      hp: Math.min(maxHp, Math.max(0, st.hp | 0)),
+      maxHp,
       lastHitAt: st.lastHitAt,
       regen: true,
       effectiveHp: eff,
@@ -4008,12 +4012,13 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now, opts) {
   }
 
   let st = isMil ? militaryFlagCaptureByKey.get(mk) : flagCaptureByDefender.get(did);
+  const maxHp = isMil ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
   if (st) {
     const lh = toEpochMsSafe(st.lastHitAt);
     if (!Number.isFinite(lh) || lh < FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) st.lastHitAt = now;
   }
-  const curHpFloat = computeEffectiveBaseHp(st, now);
-  const curHp = Math.min(FLAG_BASE_MAX_HP, Math.max(0, Math.floor(curHpFloat + 1e-9)));
+  const curHpFloat = computeEffectiveBaseHp(st, now, maxHp);
+  const curHp = Math.min(maxHp, Math.max(0, Math.floor(curHpFloat + 1e-9)));
 
   if (curHp <= 0) {
     if (isMil) executeMilitaryOutpostCaptureSuccess(aid, did, ox0, oy0);
@@ -4034,38 +4039,39 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now, opts) {
   st._lastRegenBroadcastHp = newHp;
   st._flagRegenBroadcastPhase = false;
 
-  if (curHp === FLAG_BASE_MAX_HP) {
+  if (curHp === maxHp) {
     broadcast({
       type: "flagUnderAttack",
       defenderTeamId: did,
       attackerTeamId: aid,
       hp: newHp,
-      maxHp: FLAG_BASE_MAX_HP,
+      maxHp,
       ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
     });
   }
 
-  const effAfterHit = computeEffectiveBaseHp(st, now);
+  const effAfterHit = computeEffectiveBaseHp(st, now, maxHp);
   broadcast({
     type: "flagCaptureProgress",
     defenderTeamId: did,
     attackerTeamId: aid,
     hp: newHp,
-    maxHp: FLAG_BASE_MAX_HP,
+    maxHp,
     lastHitAt: now,
     effectiveHp: effAfterHit,
     serverNow: now,
     ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
   });
 
-  for (const th of FLAG_WARN_THRESHOLDS) {
+  const warnLevels = isMil ? FLAG_WARN_THRESHOLDS : FLAG_WARN_THRESHOLDS_MAIN;
+  for (const th of warnLevels) {
     if (newHp === th) {
       broadcast({
         type: "flagDefendWarn",
         defenderTeamId: did,
         attackerTeamId: aid,
         hp: newHp,
-        maxHp: FLAG_BASE_MAX_HP,
+        maxHp,
         level: th,
         ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
       });
@@ -4077,7 +4083,7 @@ function tryFlagCaptureHit(attackerTeamId, x, y, now, opts) {
     hit: true,
     defenderTeamId: did,
     hp: newHp,
-    maxHp: FLAG_BASE_MAX_HP,
+    maxHp,
     ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
   };
 }
@@ -7097,7 +7103,7 @@ wss.on("connection", (ws, req) => {
             type: "flagHitAck",
             defenderTeamId: fc.defenderTeamId | 0,
             hp: fc.hp | 0,
-            maxHp: (fc.maxHp ?? FLAG_BASE_MAX_HP) | 0,
+            maxHp: (fc.maxHp ?? (fc.militaryAnchor ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP)) | 0,
             ...(fc.militaryAnchor ? { militaryAnchor: fc.militaryAnchor } : {}),
           });
         }

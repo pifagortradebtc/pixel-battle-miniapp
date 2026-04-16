@@ -56,6 +56,7 @@ import { computeNukeBombBlastCells } from "../lib/nuke-bomb-shape.js";
 import {
   flagCellFromSpawn,
   FLAG_BASE_MAX_HP,
+  FLAG_MAIN_BASE_MAX_HP,
   FLAG_SPAWN_SIZE,
   FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
   FLAG_REGEN_DURATION_MS,
@@ -2368,7 +2369,7 @@ const TOURNAMENT_ROUND_COPY = [
     title: "РАУНД 1 — МАССОВАЯ БИТВА",
     splashKicker: "МАССОВАЯ БИТВА",
     splashTitle: "РАУНД 1 СТАРТОВАЛ",
-    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li><strong>Чужая база</strong> с начала боя: бейте по <strong>клетке флага</strong> (центр базы 6×6) — снимаете HP; обычным пикселем базу не перекрасить; 20 попаданий + финальный удар — захват всей команды</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
+    bodyHtml: `<ul><li>До <strong>200</strong> игроков в команде, команд сколько угодно</li><li>Бой после разминки: <strong>8 ч</strong></li><li>Счёт = сумма весов захваченных клеток (суша = 1)</li><li>Пиксель только рядом с территорией (8 направлений), от базы 6×6</li><li><strong>Чужая главная база</strong>: удары по <strong>клетке флага</strong> — до <strong>50</strong> HP + добивание; <strong>плацдарм</strong> (магазин) — <strong>20</strong> HP; обычным пикселем базу не перекрасить; захват главной — вся команда</li><li>Победа: <strong>наибольший счёт</strong> к концу таймера</li></ul>`,
   },
   {
     title: "РАУНД 2 — КОМАНДНЫЙ БОЙ",
@@ -4096,14 +4097,23 @@ function notifyReject(reason) {
   playUiError();
 }
 
-/** HP полоски флага: якорь + lastHitAt и при наличии снимок effectiveHp с сервера (реген без рассинхрона). */
-function computeClientFlagDisplayEffHp(raw, nowMs) {
-  const maxH = FLAG_BASE_MAX_HP;
+/**
+ * HP полоски флага: якорь + lastHitAt и при наличии снимок effectiveHp с сервера (реген без рассинхрона).
+ * @param {number} [maxHpFallback] если нет записи в raw — главная {@link FLAG_MAIN_BASE_MAX_HP} или FOB {@link FLAG_BASE_MAX_HP}
+ */
+function computeClientFlagDisplayEffHp(raw, nowMs, maxHpFallback) {
+  let maxH =
+    typeof maxHpFallback === "number" && Number.isFinite(maxHpFallback) && maxHpFallback > 0
+      ? maxHpFallback | 0
+      : FLAG_BASE_MAX_HP;
+  if (raw && typeof raw.maxHp === "number" && Number.isFinite(raw.maxHp) && raw.maxHp > 0) {
+    maxH = raw.maxHp | 0;
+  }
   if (!raw || typeof raw.hp !== "number") return maxH;
   const h0 = Math.min(maxH, Math.max(0, raw.hp | 0));
   if (h0 >= maxH) return maxH;
   const tHit = toEpochMsSafe(raw.lastHitAt);
-  let eff = computeEffectiveBaseHp({ hp: h0, lastHitAt: tHit }, nowMs);
+  let eff = computeEffectiveBaseHp({ hp: h0, lastHitAt: tHit }, nowMs, maxH);
   const srv = raw.effectiveHp;
   const t0 = raw.flagStateServerNow;
   if (
@@ -4129,11 +4139,15 @@ function computeClientFlagDisplayEffHp(raw, nowMs) {
 function getClientMyMainBaseHpRatio01(nowMs = Date.now()) {
   if (myTeamId == null) return 1;
   const raw = flagCaptureClientState.get(clientMainFlagKey(myTeamId));
-  return computeClientFlagDisplayEffHp(raw, nowMs) / FLAG_BASE_MAX_HP;
+  const cap =
+    raw && typeof raw.maxHp === "number" && Number.isFinite(raw.maxHp) && raw.maxHp > 0
+      ? raw.maxHp | 0
+      : FLAG_MAIN_BASE_MAX_HP;
+  return computeClientFlagDisplayEffHp(raw, nowMs, FLAG_MAIN_BASE_MAX_HP) / Math.max(1, cap);
 }
 
 function syncFlagCaptureStateFromMeta(flags) {
-  /* Не очищаем карту до проверки: иначе при meta без flags вся карта «сбрасывается» в 20/20 для всех баз. */
+  /* Не очищаем карту до проверки: иначе при meta без flags вся карта «сбрасывается» в полный HP для всех баз. */
   if (!Array.isArray(flags)) return;
   const next = new Map();
   for (const f of flags) {
@@ -9501,24 +9515,30 @@ function draw(time = performance.now(), drawOpts = {}) {
     }
   }
 
-  /* Флаги баз: HP 0–20, реген на клиенте по lastHitAt; визуальные стадии опасности. */
+  /* Флаги баз: главная до 50 HP, плацдарм 20; реген по lastHitAt. */
   if (!lite && online && teamsMeta && cell >= 1.5) {
     const shNowF = Date.now();
-    const maxH = FLAG_BASE_MAX_HP;
     /** Главная база и FOB — одна логика HP (`flagCaptureClientState` по clientKey). */
-    const drawClientFlagBaseHpUi = (fgx, fgy, tidFlag, stateKey, teamHex, compact) => {
+    const drawClientFlagBaseHpUi = (fgx, fgy, tidFlag, stateKey, teamHex, compact, teamDisplayName) => {
+      const maxHpFallback = compact ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
       const visTop = fgy - FLAG_VISUAL_CELLS_ABOVE;
       if (fgx < x0 || fgx > x1 || fgy < y0 || visTop > y1) return;
       const raw = flagCaptureClientState.get(stateKey);
-      const effHpFloat = computeClientFlagDisplayEffHp(raw, shNowF);
+      const effHpFloat = computeClientFlagDisplayEffHp(raw, shNowF, maxHpFallback);
+      let maxH = maxHpFallback;
+      if (raw && typeof raw.maxHp === "number" && Number.isFinite(raw.maxHp) && raw.maxHp > 0) {
+        maxH = raw.maxHp | 0;
+      }
       const displayHp = Math.min(maxH, Math.max(0, Math.floor(effHpFloat + 1e-9)));
       const dmgTaken = maxH - displayHp;
       const px = offsetX + fgx * cell;
       const py = offsetY + fgy * cell;
       const cw = Math.ceil(cell);
       const ch = Math.ceil(cell);
-      const dangerLow = displayHp <= 10 && displayHp > 0;
-      const dangerMid = displayHp <= 5 && displayHp > 0;
+      const thrLow = Math.max(2, Math.floor(maxH * 0.22));
+      const thrMid = Math.max(1, Math.floor(maxH * 0.11));
+      const dangerLow = displayHp <= thrLow && displayHp > 0;
+      const dangerMid = displayHp <= thrMid && displayHp > 0;
       const dangerCrit = displayHp <= 1 && displayHp > 0;
       const dangerHpZero = displayHp <= 0 && raw != null;
       const pulseF = compact
@@ -9610,7 +9630,13 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.fillRect(bx, by, barW, barH);
       const hpFrac = Math.min(1, Math.max(0, effHpFloat / maxH));
       ctx.fillStyle =
-        displayHp <= 5 ? "#ff4444" : displayHp <= 10 ? "#ffaa33" : displayHp < maxH ? "#66dd88" : "rgba(100,220,130,0.85)";
+        displayHp <= thrMid
+          ? "#ff4444"
+          : displayHp <= thrLow
+            ? "#ffaa33"
+            : displayHp < maxH
+              ? "#66dd88"
+              : "rgba(100,220,130,0.85)";
       ctx.fillRect(bx, by, barW * hpFrac, barH);
       ctx.strokeStyle = "rgba(255,255,255,0.45)";
       ctx.lineWidth = Math.max(1, cell * 0.035);
@@ -9623,7 +9649,16 @@ function draw(time = performance.now(), drawOpts = {}) {
         ctx.textBaseline = "bottom";
         const tx = px + cw / 2;
         const ty = by - 3;
-        const hpLabel = displayHp <= 0 ? "FINISH!" : `${displayHp} / ${maxH} HP`;
+        const nameLbl = String(teamDisplayName || "")
+          .trim()
+          .slice(0, 28);
+        const hpLabel = compact
+          ? displayHp <= 0
+            ? "FINISH!"
+            : `${displayHp} / ${maxH} HP`
+          : displayHp <= 0
+            ? "FINISH!"
+            : nameLbl || "—";
         ctx.lineWidth = Math.max(2, fs * 0.18);
         ctx.strokeStyle = "rgba(0,0,0,0.8)";
         ctx.strokeText(hpLabel, tx, ty);
@@ -9637,7 +9672,15 @@ function draw(time = performance.now(), drawOpts = {}) {
       const sp = t.spawn;
       const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
       const tidFlag = Number(t.id) | 0;
-      drawClientFlagBaseHpUi(fgx, fgy, tidFlag, clientMainFlagKey(tidFlag), t.color || teamColor(t.id), false);
+      drawClientFlagBaseHpUi(
+        fgx,
+        fgy,
+        tidFlag,
+        clientMainFlagKey(tidFlag),
+        t.color || teamColor(t.id),
+        false,
+        typeof t.name === "string" ? t.name : ""
+      );
     }
     for (const tm of teamsMeta) {
       if (tm.solo || tm.eliminated) continue;
@@ -9674,7 +9717,8 @@ function draw(time = performance.now(), drawOpts = {}) {
           tidM,
           clientMilitaryFlagKey(tidM, gx00, gy00),
           teamHex,
-          true
+          true,
+          typeof tm.name === "string" ? tm.name : ""
         );
       }
     }
