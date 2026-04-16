@@ -214,6 +214,7 @@ function shouldInterruptPendingSayPrompt(raw, restartNorm) {
   if (fw === "paint" && parts.length === 1) return true;
   if (fw === "broadcast" || fw === "рассылка") return true;
   if (fw === "quant") return true;
+  if (fw === "allquants") return true;
   if (fw === "teamquant") return true;
   if (fw === "restart" || fw === "рестарт") return true;
   if (restartNorm === "новая игра" || restartNorm === "newgame" || restartNorm === "wipe" || restartNorm === "с нуля")
@@ -659,6 +660,7 @@ function telegramMessageLooksLikePrivilegedCommand(text) {
   if (norm === "новая игра" || norm === "newgame" || norm === "wipe" || norm === "с нуля") return true;
   if (fw === "quant") return true;
   if (fw === "quantlist") return true;
+  if (fw === "allquants") return true;
   if (fw === "teamquant") return true;
   if (fw === "paint") return true;
   if (fw === "evt" || fw === "event" || fw === "события" || fw === "событие") return true;
@@ -5534,6 +5536,8 @@ function logAdminAction(entry) {
 
 /** Максимум квантов за одну админ-операцию (+/-/=), защита от опечаток. */
 const ADMIN_QUANT_SINGLE_OP_MAX = 1_000_000_000;
+const ALLQUANTS_DEFAULT_TOP = 100;
+const ALLQUANTS_TELEGRAM_CHUNK = 3900;
 
 function quantsFromBalanceUsdt(usdt) {
   return Math.round(Number(usdt) * 7);
@@ -5588,6 +5592,122 @@ function parseTeamquantTelegramCommand(normRaw) {
     return { ok: false };
   }
   return { ok: true, teamNameQuery: namePart, amount };
+}
+
+/**
+ * @param {string} restartNorm уже lower-case, без ведущих /
+ * @returns {{ limit: number, minQuants: number, showAll: boolean } | null}
+ */
+function parseAllquantsTelegramCommand(restartNorm) {
+  const s = String(restartNorm || "").trim().replace(/\s+/g, " ");
+  if (s === "allquants") return { limit: ALLQUANTS_DEFAULT_TOP, minQuants: 0, showAll: false };
+  if (s === "allquants all") return { limit: 0, minQuants: 0, showAll: true };
+  const topM = /^allquants top (\d{1,5})$/.exec(s);
+  if (topM) {
+    const n = parseInt(topM[1], 10);
+    if (!Number.isFinite(n) || n < 1) return null;
+    return { limit: Math.min(10_000, n), minQuants: 0, showAll: false };
+  }
+  const minM = /^allquants min (\d{1,12})$/.exec(s);
+  if (minM) {
+    const n = parseInt(minM[1], 10);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return {
+      limit: ALLQUANTS_DEFAULT_TOP,
+      minQuants: Math.min(ADMIN_QUANT_SINGLE_OP_MAX, n),
+      showAll: false,
+    };
+  }
+  return null;
+}
+
+function splitTelegramTextChunks(text, maxLen = ALLQUANTS_TELEGRAM_CHUNK) {
+  if (text.length <= maxLen) return [text];
+  const parts = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxLen, text.length);
+    if (end < text.length) {
+      const slice = text.slice(start, end);
+      const li = slice.lastIndexOf("\n");
+      if (li > 120) end = start + li + 1;
+    }
+    parts.push(text.slice(start, end));
+    start = end;
+  }
+  return parts.length ? parts : [""];
+}
+
+/**
+ * @param {number} chatId
+ * @param {number} adminTelegramUid
+ * @param {{ limit: number, minQuants: number, showAll: boolean }} parsed
+ */
+async function applyAdminAllquantsTelegramCommand(chatId, adminTelegramUid, parsed) {
+  logAdminAction({
+    command: "allquants",
+    byTelegramId: adminTelegramUid,
+    limit: parsed.limit,
+    minQuants: parsed.minQuants,
+    showAll: parsed.showAll,
+  });
+  const snap = await walletStore.adminListAllEconomySnapshotsFromPersistence();
+  /** @type {{ pk: string, tgId: number | null, username: string, quants: number, devUnl: boolean, sortKey: number }[]} */
+  const rows = [];
+  for (const { playerKey, balanceUSDT } of snap) {
+    const pk = sanitizePlayerKey(playerKey);
+    if (!pk) continue;
+    const devUnl = isDevUnlimitedWallet(pk);
+    const usdt = Number(balanceUSDT) || 0;
+    const quants = quantsFromBalanceUsdt(usdt);
+    const m = /^tg_(\d+)$/.exec(pk);
+    const tgId = m ? parseInt(m[1], 10) : null;
+    const meta = playerTelegramMeta.get(pk);
+    const username = meta && typeof meta.username === "string" ? meta.username.trim() : "";
+    rows.push({
+      pk,
+      tgId,
+      username,
+      quants,
+      devUnl,
+      sortKey: devUnl ? Number.MAX_SAFE_INTEGER : quants,
+    });
+  }
+  rows.sort((a, b) => b.sortKey - a.sortKey);
+  let filtered = rows;
+  if (parsed.minQuants > 0) {
+    filtered = rows.filter((r) => r.devUnl || r.quants >= parsed.minQuants);
+  }
+  const totalPlayers = rows.length;
+  const totalMatching = filtered.length;
+  let toShow;
+  if (parsed.showAll) {
+    toShow = filtered;
+  } else {
+    const lim = (parsed.limit | 0) > 0 ? (parsed.limit | 0) : ALLQUANTS_DEFAULT_TOP;
+    toShow = filtered.slice(0, lim);
+  }
+  const lines = toShow.map((r, idx) => {
+    const idStr = r.tgId != null ? String(r.tgId) : r.pk.slice(0, 48);
+    const unStr = r.username ? `@${r.username}` : "—";
+    const qStr = r.devUnl ? "∞ quants (dev unlimited)" : `${r.quants} quants`;
+    return `${idx + 1}) ${idStr} — ${unStr} — ${qStr}`;
+  });
+  let header;
+  if (parsed.showAll) {
+    header = `allquants all: ${totalPlayers} записей, кванты ↓.`;
+  } else if (parsed.minQuants > 0) {
+    header = `Показано ${lines.length} из ${totalMatching} с ≥${parsed.minQuants} quants. Всего в экономике: ${totalPlayers}.`;
+  } else {
+    header = `Топ ${lines.length} из ${totalPlayers} игроков (кванты ↓).`;
+  }
+  const body = lines.length ? `${header}\n\n${lines.join("\n")}` : `${header}\n\n(нет строк)`;
+  const chunks = splitTelegramTextChunks(body);
+  for (let i = 0; i < chunks.length; i++) {
+    const prefix = chunks.length > 1 ? `[${i + 1}/${chunks.length}]\n` : "";
+    await telegramSendMessage(chatId, prefix + chunks[i]);
+    if (i < chunks.length - 1) await new Promise((r) => setTimeout(r, 55));
+  }
 }
 
 /**
@@ -9030,6 +9150,19 @@ async function telegramPollLoop() {
           }
         }
 
+        if ((restartNorm.split(/\s+/)[0] || "") === "allquants") {
+          const parsedAq = parseAllquantsTelegramCommand(restartNorm);
+          if (!parsedAq) {
+            await telegramSendMessage(
+              chatId,
+              "Формат: allquants | allquants top N | allquants min N | allquants all"
+            );
+            continue;
+          }
+          await applyAdminAllquantsTelegramCommand(chatId, uid, parsedAq);
+          continue;
+        }
+
         {
           let tn = restartNorm.trim().toLowerCase();
           if (tn.startsWith("/test")) tn = tn.slice(1).trim();
@@ -9253,7 +9386,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start (кнопки квантов всем), go, quant, quantlist, teamquant Имя +N, teams, pause, say, speed, evt help…"
+              "Неизвестная команда. Админ: /start, allquants, go, quant, quantlist, teamquant Имя +N, teams, say, speed, evt help…"
             );
           }
           continue;
