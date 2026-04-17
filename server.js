@@ -6280,10 +6280,19 @@ wss = new WebSocketServer({
   maxPayload: 131072,
   /** false → библиотека ws отвечает 401 (см. TRUST_PROXY и лимиты по IP). */
   verifyClient: (info) => {
-    const ip = getClientIpFromReq(info.req);
-    if ((activeWsByIp.get(ip) || 0) >= WS_MAX_CONN_PER_IP) return false;
-    return wsJoinLimiter.allow(`wsjoin:${ip}`, 90, 60_000);
+    try {
+      const ip = getClientIpFromReq(info.req);
+      if ((activeWsByIp.get(ip) || 0) >= WS_MAX_CONN_PER_IP) return false;
+      return wsJoinLimiter.allow(`wsjoin:${ip}`, 90, 60_000);
+    } catch (e) {
+      console.error("[ws verifyClient]", e?.message || e);
+      return false;
+    }
   },
+});
+
+wss.on("error", (err) => {
+  console.error("[wss error]", err?.message || err);
 });
 
 /** Пинг по WebSocket: прокси (Render, nginx) часто рвут «тихие» сокеты через 60–120 с. */
