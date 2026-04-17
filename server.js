@@ -32,6 +32,7 @@ import {
   quantToUsdt,
   resolveAuthoritativeRecoverySec,
   stageAllows,
+  stageAllowsQuantumFarmUpgrade,
   stageAllowsRecoveryPurchases,
   tournamentStage,
   quantumFarmUpgradePriceQuant,
@@ -730,6 +731,11 @@ function clampPositiveEpochMs(v) {
   return Math.min(Number.MAX_SAFE_INTEGER, n);
 }
 
+/** Старт паузы для WS/JSON: не `|0` — int32 ломает wall-time и пауза перестаёт замирать в 2026+. */
+function pauseWallStartedAtForWire() {
+  return gamePaused ? clampPositiveEpochMs(pauseWallStartedAt) : 0;
+}
+
 /** Первый раунд: таймер не идёт, пока админ не отправит «go» боту (если включён WAIT_FOR_TELEGRAM_GO). До «go» — свободная игра на карте. */
 let roundTimerStarted = true;
 /** Длительность паузы до боя в раунде 0 (мс). До «go» на таймлайн не влияет; после «go» = {@link ROUND_ZERO_POST_GO_WARMUP_MS} (или сохранённое). */
@@ -1201,8 +1207,8 @@ function pruneExpiredManualBattleSlots(nowMs = Date.now()) {
 
 function getActiveManualBattleSlots(nowMs = Date.now()) {
   pruneExpiredManualBattleSlots(nowMs);
-  const cmp =
-    gamePaused && (pauseWallStartedAt | 0) > 0 ? pauseWallStartedAt | 0 : nowMs | 0;
+  const pwe = clampPositiveEpochMs(pauseWallStartedAt);
+  const cmp = gamePaused && pwe > 0 ? pwe : nowMs;
   /** @type {{ cmd: string, untilMs: number }[]} */
   const out = [];
   for (const [cmd, untilMs] of manualBattleSlotsByCmd) {
@@ -1249,7 +1255,7 @@ function computeBattleScoringSnapshotWithManualBattle(nowMs, ctx) {
     ctx.gridW | 0,
     ctx.gridH | 0,
     gamePaused ? 1 : 0,
-    pauseWallStartedAt | 0,
+    clampPositiveEpochMs(pauseWallStartedAt),
     manualBattleSlotsCacheSignature(),
     timelineEventsCancelledSignature(),
   ].join("|");
@@ -1842,7 +1848,7 @@ function saveRoundState() {
         mapTreasures: Object.fromEntries(treasureQuantByCell),
         mapTreasureClaimed: [...treasureClaimedKeys],
         gamePaused: !!gamePaused,
-        pauseWallStartedAt: gamePaused ? pauseWallStartedAt | 0 : 0,
+        pauseWallStartedAt: pauseWallStartedAtForWire(),
         pauseCapturedWarmup: !!pauseCapturedWarmup,
         warmupPauseExtensionMs: Math.max(0, warmupPauseExtensionMs | 0),
         teamManualScoreBonus: Object.fromEntries(teamManualScoreBonus),
@@ -2057,7 +2063,7 @@ function loadRoundState() {
       if (typeof j.gamePaused === "boolean") gamePaused = j.gamePaused;
       else gamePaused = false;
       if (typeof j.pauseWallStartedAt === "number" && Number.isFinite(j.pauseWallStartedAt)) {
-        pauseWallStartedAt = Math.max(0, j.pauseWallStartedAt | 0);
+        pauseWallStartedAt = clampPositiveEpochMs(j.pauseWallStartedAt);
       } else {
         pauseWallStartedAt = 0;
       }
@@ -2094,6 +2100,9 @@ function loadRoundState() {
         gamePaused = false;
         pauseWallStartedAt = 0;
         pauseCapturedWarmup = false;
+      }
+      if (gamePaused && clampPositiveEpochMs(pauseWallStartedAt) <= 0) {
+        pauseWallStartedAt = Date.now();
       }
     } else {
       roundIndex = 0;
@@ -2465,7 +2474,8 @@ function getTournamentTimeScale() {
  * очки/события/кулдауны в payload не уезжают от реального wall-clock.
  */
 function effectiveGameClockMs() {
-  if (gamePaused && (pauseWallStartedAt | 0) > 0) return pauseWallStartedAt | 0;
+  const p = clampPositiveEpochMs(pauseWallStartedAt);
+  if (gamePaused && p > 0) return p;
   return Date.now();
 }
 
@@ -2502,7 +2512,7 @@ function globalSpeedMstimActive() {
   return isAltSeasonMstimBurstWallActive({
     mstimBurstUntilWallMs: mstimAltSeasonBurstUntilMs,
     gamePaused,
-    pauseWallStartedAtMs: pauseWallStartedAt | 0,
+    pauseWallStartedAtMs: clampPositiveEpochMs(pauseWallStartedAt),
     wallNowMs: Date.now(),
   });
 }
@@ -2526,7 +2536,7 @@ function effectivePixelCooldownMs(u, teamFx, st, wallNowMs) {
     wallNowMs: w,
     mstimBurstUntilWallMs: mstimAltSeasonBurstUntilMs,
     gamePaused,
-    pauseWallStartedAtMs: pauseWallStartedAt | 0,
+    pauseWallStartedAtMs: clampPositiveEpochMs(pauseWallStartedAt),
   });
 }
 
@@ -2536,7 +2546,7 @@ function effectiveRecoverySecForWallet(u, teamFx, wallNowMs) {
   const mstim = isAltSeasonMstimBurstWallActive({
     mstimBurstUntilWallMs: mstimAltSeasonBurstUntilMs,
     gamePaused,
-    pauseWallStartedAtMs: pauseWallStartedAt | 0,
+    pauseWallStartedAtMs: clampPositiveEpochMs(pauseWallStartedAt),
     wallNowMs: w,
   });
   return resolveAuthoritativeRecoverySec(mstim, u, teamFx, w);
@@ -3322,6 +3332,7 @@ async function buildWalletPayload(ws) {
   const zoneQ5 = tid ? getBattleEventZoneQuantumQuantsForTeam(tid, nowGame) : 0;
   return {
     type: "wallet",
+    serverWallMs: wallNow,
     balanceUSDT: devUnl ? 999999999 : u.balanceUSDT,
     quantFarmIncomeQuantsPer5s: farmQ5,
     battleEventZoneQuantsPer5s: zoneQ5,
@@ -4167,9 +4178,13 @@ function applyClusterGameReplication(msg) {
     case "gamePauseSync": {
       gamePaused = !!msg.paused;
       if (typeof msg.pauseCapturedWarmup === "boolean") pauseCapturedWarmup = msg.pauseCapturedWarmup;
-      if (gamePaused && typeof msg.pauseWallStartedAt === "number" && Number.isFinite(msg.pauseWallStartedAt)) {
-        const pw = msg.pauseWallStartedAt | 0;
+      if (gamePaused) {
+        let pw = 0;
+        if (typeof msg.pauseWallStartedAt === "number" && Number.isFinite(msg.pauseWallStartedAt)) {
+          pw = clampPositiveEpochMs(msg.pauseWallStartedAt);
+        }
         if (pw > 0) pauseWallStartedAt = pw;
+        else if (clampPositiveEpochMs(pauseWallStartedAt) <= 0) pauseWallStartedAt = Date.now();
       }
       if (typeof msg.round0WarmupMs === "number" && Number.isFinite(msg.round0WarmupMs)) {
         const w = Math.round(msg.round0WarmupMs);
@@ -6726,7 +6741,7 @@ function parseTeamsTelegramAddPoints(body) {
  * Если pauseWallStartedAt потерян (0), раньше получалось d ≈ Date.now() и roundDurationMs упиралось в 8760ч.
  */
 function msElapsedSincePauseWallOrZero() {
-  const start = pauseWallStartedAt | 0;
+  const start = clampPositiveEpochMs(pauseWallStartedAt);
   const nowWall = Date.now();
   const MIN_START = 946684800000; /* 2000-01-01 UTC — отсекаем мусор и start=0 */
   if (!start || start > nowWall || start < MIN_START) {
@@ -6742,8 +6757,8 @@ function msElapsedSincePauseWallOrZero() {
 }
 
 function shiftManualBattleSlotsAfterPause(d, pauseStart) {
-  const ps = pauseStart | 0;
-  const dd = d | 0;
+  const ps = clampPositiveEpochMs(pauseStart);
+  const dd = Math.trunc(Number(d)) | 0;
   if (dd < 1 || !ps) return;
   for (const [k, u] of [...manualBattleSlotsByCmd]) {
     if (typeof u === "number" && u > ps) {
@@ -6754,8 +6769,8 @@ function shiftManualBattleSlotsAfterPause(d, pauseStart) {
 
 function shiftMstimAfterPause(d, pauseStart) {
   const u = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
-  const ps = pauseStart | 0;
-  const dd = d | 0;
+  const ps = clampPositiveEpochMs(pauseStart);
+  const dd = Math.trunc(Number(d)) | 0;
   if (dd < 1 || !ps || u <= ps) return;
   mstimAltSeasonBurstUntilMs = clampPositiveEpochMs(u + dd);
 }
@@ -6765,8 +6780,8 @@ function shiftMstimAfterPause(d, pauseStart) {
  * Чтобы после unpause кулдауны, регент баз, изоляция и баффы не «прожглись» за время паузы.
  */
 async function shiftGameWorldAfterUnpause(d, pauseStart) {
-  const ps = pauseStart | 0;
-  const dd = d | 0;
+  const ps = clampPositiveEpochMs(pauseStart);
+  const dd = Math.trunc(Number(d)) | 0;
   const MIN_START = 946684800000;
   if (dd < 1 || ps < MIN_START) return;
 
@@ -6846,7 +6861,7 @@ function applyAdminPause(telegramUserId) {
   broadcast({
     type: "gamePauseSync",
     paused: true,
-    pauseWallStartedAt: pauseWallStartedAt | 0,
+    pauseWallStartedAt: pauseWallStartedAtForWire(),
     pauseCapturedWarmup: wasWarmup,
     round0WarmupMs,
     roundDurationMs,
@@ -6871,7 +6886,7 @@ function applyAdminPause(telegramUserId) {
 async function applyAdminUnpause(telegramUserId) {
   if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
   if (!gamePaused) return { ok: false, reason: "not_paused" };
-  const start = pauseWallStartedAt | 0;
+  const start = clampPositiveEpochMs(pauseWallStartedAt);
   const d = msElapsedSincePauseWallOrZero();
   if (pauseCapturedWarmup) {
     if (roundIndex === 0) {
@@ -6930,7 +6945,7 @@ function assertCanPlay(ws) {
     safeSend(ws, {
       type: "playRejected",
       reason: "paused",
-      pauseWallStartedAt: pauseWallStartedAt | 0,
+      pauseWallStartedAt: pauseWallStartedAtForWire(),
       pauseCapturedWarmup: !!pauseCapturedWarmup,
     });
     return false;
@@ -6971,6 +6986,7 @@ async function sendConnectionMeta(ws) {
   const isoNow = effectiveGameClockMs();
   safeSend(ws, {
     type: "meta",
+    serverWallMs: Date.now(),
     teams: teamsForMeta(),
     teamCounts: teamCountsObj,
     maxPerTeam: getMaxPerTeam(),
@@ -6981,7 +6997,7 @@ async function sendConnectionMeta(ws) {
     playStartsAt: warmupEndsAt,
     warmupMs: getWarmupDurationMs(),
     gamePaused: !!gamePaused,
-    pauseWallStartedAt: gamePaused ? pauseWallStartedAt | 0 : 0,
+    pauseWallStartedAt: pauseWallStartedAtForWire(),
     pauseCapturedWarmup: gamePaused ? !!pauseCapturedWarmup : false,
     lobbyBeforeGo: !!(WAIT_FOR_TELEGRAM_GO && roundIndex === 0 && !roundTimerStarted),
     eligible: !!ws.eligible,
@@ -8588,7 +8604,7 @@ wss.on("connection", (ws, req) => {
       }
       const devUnl = isDevUnlimitedWallet(pk);
       const st = tournamentStage(roundIndex, gameFinished);
-      if (!stageAllows(st)) {
+      if (!stageAllowsQuantumFarmUpgrade(st)) {
         safeSend(ws, { type: "purchaseError", reason: "not available" });
         return;
       }

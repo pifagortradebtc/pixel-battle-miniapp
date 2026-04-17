@@ -656,7 +656,7 @@ export function getEffectiveAltSeasonRevengeUntilMs(ge) {
   }
   let u = 0;
   if (typeof g?.until === "number" && String(g.kind || "") === "alt_season_revenge") {
-    u = g.until | 0;
+    u = Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(g.until));
   }
   const re = lastRoundEventStartMsg;
   if (u <= 0 && re && String(re.eventType || "") === "alt_season_revenge" && typeof re.untilMs === "number") {

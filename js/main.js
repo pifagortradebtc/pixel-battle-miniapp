@@ -1051,11 +1051,37 @@ let gamePausedMeta = false;
 let pauseWallStartedAtMeta = 0;
 /** С сервера: в момент паузы шла разминка (для подписи таймера). */
 let pauseCapturedWarmupMeta = false;
+/**
+ * Если пауза пришла без валидного pauseWallStartedAt (meta без поля и т.п.), иначе таймер раунда
+ * считает на живом Date.now() и «уезжает» за время паузы.
+ */
+let pauseUiFreezeWallMs = 0;
+/** serverWallMs − Date.now() при последнем meta/wallet: lastActionAt и until с сервера в том же epoch (иначе «+N с» при рассинхроне часов). */
+let walletServerSkewMs = 0;
 
-/** UI «сейчас»: при паузе — момент начала паузы (синхронно с серверным effectiveGameClockMs). */
+/** Epoch ms из WS/meta: не использовать `x|0` — int32 обрезает wall-time после ~2038 и даёт неверную паузу/таймеры. */
+function clampWsEpochMs(n) {
+  const t = Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(n)));
+  return Number.isFinite(t) && t > 0 ? t : 0;
+}
+
+function reconcilePausedUiFreezeClock() {
+  if (!gamePausedMeta) {
+    pauseUiFreezeWallMs = 0;
+    return;
+  }
+  if (pauseWallStartedAtMeta > 0) {
+    pauseUiFreezeWallMs = 0;
+    return;
+  }
+  if (pauseUiFreezeWallMs <= 0) pauseUiFreezeWallMs = Date.now();
+}
+
+/** UI «сейчас»: пауза — заморозка wall; иначе время, выровненное под сервер (serverWallMs из meta/wallet). */
 function effectiveClientUiNowMs() {
   if (gamePausedMeta && pauseWallStartedAtMeta > 0) return pauseWallStartedAtMeta;
-  return Date.now();
+  if (gamePausedMeta && pauseUiFreezeWallMs > 0) return pauseUiFreezeWallMs;
+  return Date.now() + walletServerSkewMs;
 }
 
 setMstimClientNowProvider(effectiveClientUiNowMs);
@@ -2627,7 +2653,7 @@ const TOURNAMENT_ROUND_COPY = [
     title: "ФИНАЛ — 1 НА 1",
     splashKicker: "ДУЭЛЬ",
     splashTitle: "ФИНАЛ СТАРТОВАЛ",
-    bodyHtml: `<ul><li><strong>2</strong> игрока — каждый создаёт <strong>свою</strong> команду из одного человека (в дуэль нельзя вступить чужой join)</li><li>Бой до <strong>2 ч</strong>: победа только <strong>захватом базы</strong> соперника <strong>или</strong> по <strong>большему счёту</strong>, когда истечёт время</li><li>В магазине — только ускорение пикселя (личное и командное); зоны, бомба и плацдарм отключены</li><li><strong>База</strong>: удары по клетке флага с начала боя</li></ul>`,
+    bodyHtml: `<ul><li><strong>2</strong> игрока — каждый создаёт <strong>свою</strong> команду из одного человека (в дуэль нельзя вступить чужой join)</li><li>Бой до <strong>2 ч</strong>: победа только <strong>захватом базы</strong> соперника <strong>или</strong> по <strong>большему счёту</strong>, когда истечёт время</li><li>В магазине — ускорение пикселя (личное и командное) и <strong>улучшение квантовых ферм</strong>; зоны, бомба и плацдарм отключены</li><li><strong>База</strong>: удары по клетке флага с начала боя</li></ul>`,
   },
 ];
 
@@ -2640,7 +2666,7 @@ function isClientWarmupPhase() {
   if (!wantOnline || !getWsUrl() || gameFinishedMeta || spectatorMode || gamePausedMeta) return false;
   if (playStartsAtMs == null || Number.isNaN(playStartsAtMs)) return false;
   if (roundIndexMeta === 0 && roundEndsAtMs == null) return false;
-  return Date.now() < playStartsAtMs;
+  return effectiveClientUiNowMs() < playStartsAtMs;
 }
 
 function syncAdminGamePauseOverlay() {
@@ -4306,6 +4332,9 @@ function syncTreasureSpotsFromMeta(msg) {
 }
 
 function onMeta(msg) {
+  if (typeof msg.serverWallMs === "number" && Number.isFinite(msg.serverWallMs) && msg.serverWallMs > 946684800000) {
+    walletServerSkewMs = msg.serverWallMs - Date.now();
+  }
   discussionChatUrl =
     typeof msg.discussionChatUrl === "string" && msg.discussionChatUrl.trim()
       ? msg.discussionChatUrl.trim()
@@ -4321,12 +4350,18 @@ function onMeta(msg) {
   maxPerTeam = msg.maxPerTeam ?? 200;
   gameFinishedMeta = !!msg.gameFinished;
   gamePausedMeta = !!msg.gamePaused;
-  pauseWallStartedAtMeta =
-    gamePausedMeta && typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
-      ? msg.pauseWallStartedAt | 0
-      : 0;
+  if (!gamePausedMeta) {
+    pauseWallStartedAtMeta = 0;
+  } else {
+    const pw =
+      typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
+        ? clampWsEpochMs(msg.pauseWallStartedAt)
+        : 0;
+    if (pw > 0) pauseWallStartedAtMeta = pw;
+  }
   pauseCapturedWarmupMeta =
     gamePausedMeta && typeof msg.pauseCapturedWarmup === "boolean" ? !!msg.pauseCapturedWarmup : false;
+  reconcilePausedUiFreezeClock();
   syncAdminGamePauseOverlay();
   syncClientCooldownFromWalletFields();
   roundEndsAtMs =
@@ -4938,8 +4973,8 @@ function syncEventBanner() {
 
 /** Согласовано с server: globalSpeedMstimActive → until (wall) > Date.now(). */
 function isAltSeasonRevengeWallActive(arUntilRaw) {
-  const u = arUntilRaw | 0;
-  if (u <= 0) return false;
+  const u = Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(Number(arUntilRaw)));
+  if (!Number.isFinite(u) || u < 1) return false;
   return u > effectiveClientUiNowMs();
 }
 
@@ -4959,8 +4994,8 @@ function syncClientCooldownFromWalletFields() {
     ? { teamRecoveryUntil: te.teamRecoveryUntil, teamRecoverySec: te.teamRecoverySec }
     : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const st = walletState.tournamentStage || "MASS_BATTLE";
-  /* Личные/командные until — wall-epoch; сравнение только с реальным временем (как на сервере после computeAuthoritativePixelPlacementCooldownMs). */
-  const recoveryNowMs = Date.now();
+  /* Личные/командные until — wall-epoch; одна шкала времени с тулбаром и handleMapClick (effectiveClientUiNowMs). */
+  const recoveryNowMs = effectiveClientUiNowMs();
   walletState.effectiveRecoverySec = resolveAuthoritativeRecoverySec(globalAltSeasonActive, u, teamFx, recoveryNowMs);
   walletState.cooldownMs = getAuthoritativePixelCooldownMs({
     globalSpeedActive: globalAltSeasonActive,
@@ -5045,6 +5080,19 @@ function findQuantumFarmCoveringCell(gx, gy) {
     if (x >= f.x0 && x < f.x0 + f.w && y >= f.y0 && y < f.y0 + f.h) return f;
   }
   return null;
+}
+
+/** Режимы «тап по карте»: не перехватывать квантофермой (иначе кирпич/зона/бомба «молча» не срабатывают). */
+function pendingMapActionTargetsMapCell(pm) {
+  const t = pm?.type;
+  return (
+    t === "greatWall" ||
+    t === "zoneCapture" ||
+    t === "massCapture" ||
+    t === "zone12Capture" ||
+    t === "nukeBomb" ||
+    t === "militaryBase"
+  );
 }
 
 /**
@@ -5538,8 +5586,11 @@ function syncToolbarQuantumObjective() {
 }
 
 function applyWalletFromServer(msg) {
+  if (typeof msg?.serverWallMs === "number" && Number.isFinite(msg.serverWallMs) && msg.serverWallMs > 946684800000) {
+    walletServerSkewMs = msg.serverWallMs - Date.now();
+  }
   const altW = Number(msg?.globalEvent?.altSeasonRevengeUntilMs) || 0;
-  if (altW > Date.now()) {
+  if (altW > effectiveClientUiNowMs()) {
     setMstimAltSeasonClientBurstUntilMs(Math.max(altW, getMstimAltSeasonClientBurstUntilStored()));
   }
   /* Не вызывать set(0) здесь: устаревший ответ wallet после пикселя затирал бы mstim, пришедший раньше по mstimAltSeasonSync. Сброс — sync(0) или истечение until. */
@@ -5732,7 +5783,7 @@ function updateToolbarPixelTimer() {
   const online = wantOnline && getWsUrl();
   if (!online) {
     if (COOLDOWN_MS > 0) {
-      const left = COOLDOWN_MS - (Date.now() - lastPlaceAt);
+      const left = COOLDOWN_MS - (effectiveClientUiNowMs() - lastPlaceAt);
       if (left > 500) {
         el.textContent = formatPixelCooldownLeft(left);
         el.classList.add("toolbar__pixel-timer--wait");
@@ -6904,7 +6955,7 @@ function syncQuickBuyRailMapPending() {
 function updateQuickBuyBuffRings() {
   const host = document.getElementById("quick-buy-list");
   if (!host) return;
-  const now = Date.now();
+  const now = effectiveClientUiNowMs();
   host.querySelectorAll(".quick-buy-rail__btn").forEach((btn) => {
     const action = btn.dataset.action;
     const tierRaw = btn.dataset.tierSec;
@@ -7022,7 +7073,8 @@ function updateShopAvailability() {
     MASS_BATTLE: "",
     SEMI_FINAL: "",
     FINAL: "",
-    DUEL: "Дуэль: только ускорение пикселя (личное и командное). Зоны и тактика отключены.",
+    DUEL:
+      "Дуэль: ускорение пикселя (личное и командное) и улучшение квантовых ферм. Зоны и тактика отключены.",
     GRAND_FINAL: "Наблюдение: покупки отключены.",
   };
   const msg = Object.prototype.hasOwnProperty.call(hints, st) ? hints[st] : st;
@@ -7040,7 +7092,7 @@ function updateShopAvailability() {
   });
   const effEl = document.getElementById("shop-effective-recovery-hint");
   if (effEl) {
-    const now = Date.now();
+    const now = effectiveClientUiNowMs();
     const sec = walletState.effectiveRecoverySec ?? BASE_ACTION_COOLDOWN_SEC;
     const pu = walletState.personalRecoveryUntil > now;
     const tu = walletState.teamEffects?.teamRecoveryUntil > now;
@@ -7054,7 +7106,7 @@ function updateShopAvailability() {
   }
   if (shopEffects) {
     const te = walletState.teamEffects;
-    const now = Date.now();
+    const now = effectiveClientUiNowMs();
     const parts = [];
     if (walletState.referralBonusActive) parts.push("Приглашённый онлайн");
     if (te && te.teamRecoveryUntil > now) {
@@ -7744,6 +7796,8 @@ function connectWs() {
       spectatorMode = true;
       gameFinishedMeta = true;
       gamePausedMeta = false;
+      pauseWallStartedAtMeta = 0;
+      pauseUiFreezeWallMs = 0;
       playFinalVictorySfx();
       syncAdminGamePauseOverlay();
       lastMyTeamScoreShare = null;
@@ -7844,12 +7898,13 @@ function connectWs() {
         gamePausedMeta = true;
         pauseWallStartedAtMeta =
           typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
-            ? Math.max(0, msg.pauseWallStartedAt | 0)
+            ? clampWsEpochMs(msg.pauseWallStartedAt)
             : pauseWallStartedAtMeta;
         pauseCapturedWarmupMeta =
           gamePausedMeta && typeof msg.pauseCapturedWarmup === "boolean"
             ? !!msg.pauseCapturedWarmup
             : pauseCapturedWarmupMeta;
+        reconcilePausedUiFreezeClock();
         syncAdminGamePauseOverlay();
         updateRoundTimer();
         syncTournamentWarmupOverlay();
@@ -7873,14 +7928,18 @@ function connectWs() {
 
     if (msg.type === "gamePauseSync") {
       gamePausedMeta = !!msg.paused;
-      pauseWallStartedAtMeta =
-        gamePausedMeta &&
-        typeof msg.pauseWallStartedAt === "number" &&
-        !Number.isNaN(msg.pauseWallStartedAt)
-          ? msg.pauseWallStartedAt | 0
-          : 0;
+      if (!gamePausedMeta) {
+        pauseWallStartedAtMeta = 0;
+      } else {
+        const pw =
+          typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
+            ? clampWsEpochMs(msg.pauseWallStartedAt)
+            : 0;
+        if (pw > 0) pauseWallStartedAtMeta = pw;
+      }
       pauseCapturedWarmupMeta =
         gamePausedMeta && typeof msg.pauseCapturedWarmup === "boolean" ? !!msg.pauseCapturedWarmup : false;
+      reconcilePausedUiFreezeClock();
       /* Один пакет с актуальными таймстампами — без гонки с отдельным tournamentTimeScale после unpause. */
       if ("roundEndsAt" in msg) {
         roundEndsAtMs =
@@ -9099,7 +9158,13 @@ function connectWs() {
         }
       }
       revertOptimisticPixel();
-      if (msg.reason !== "cooldown" && msg.reason !== "cooldown not ready") {
+      const r = typeof msg.reason === "string" ? msg.reason : "";
+      const cooldownRej = r === "cooldown" || r === "cooldown not ready";
+      if (cooldownRej) {
+        /* Иначе lastPlaceAt от неудачного клика сдвигает «готово» дальше серверного lastActionAt — баффы кажутся медленнее. */
+        const srv = Number(walletState?.lastActionAt) || 0;
+        lastPlaceAt = Number.isFinite(srv) && srv > 0 ? srv : 0;
+      } else {
         lastPlaceAt = 0;
       }
       notifyReject(msg.reason || "");
@@ -11622,12 +11687,14 @@ function placePixel(gx, gy) {
         notifyPurchaseError("base_repair_invalid_target");
         return;
       }
-      if (pendingMapAction) {
-        pendingMapAction = null;
-        setPendingHint();
+      if (!pendingMapActionTargetsMapCell(pendingMapAction)) {
+        if (pendingMapAction) {
+          pendingMapAction = null;
+          setPendingHint();
+        }
+        openQuantumFarmPanel(qFarmCell);
+        return;
       }
-      openQuantumFarmPanel(qFarmCell);
-      return;
     }
   }
 
@@ -11767,7 +11834,7 @@ function placePixel(gx, gy) {
     }
   }
 
-  const now = Date.now();
+  const now = effectiveClientUiNowMs();
   if (online && walletState) {
     const cd = getWalletActionCooldownMs();
     const la = getOnlineLastPixelActionAt();
