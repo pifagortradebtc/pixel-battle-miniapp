@@ -205,6 +205,27 @@ export function createBoardVfx(canvas) {
     burst(gxi, gyi, color, transform, 11);
   }
 
+  /** Магазин «Ремонт базы»: бирюзово-голубой импульс без «удара». */
+  function baseRepairHeal(gx, gy, teamColor, transform, mode) {
+    const gxi = gx | 0;
+    const gyi = gy | 0;
+    const col = typeof teamColor === "string" && teamColor.startsWith("#") ? teamColor : "#22d3ee";
+    ripple(gxi, gyi, "#5eead4", transform);
+    ripple(gxi, gyi, "#7dd3fc", transform);
+    burst(gxi, gyi, col, transform, mode === "military" ? 11 : 9);
+    if (mode === "military") {
+      ripple(gxi - 1, gyi - 1, "#38bdf8", transform);
+      ripple(gxi + 1, gyi + 1, "#67e8f9", transform);
+    }
+    shockwaves.push({
+      t0: performance.now(),
+      gcx: gxi + 0.5,
+      gcy: gyi + 0.5,
+      radiusCells: mode === "military" ? 5.5 : 4,
+      color: "rgba(94,234,212,0.42)",
+    });
+  }
+
   function flagCaptureExplosion(gx, gy, attackerColor, defenderColor, transform) {
     const gxi = gx | 0;
     const gyi = gy | 0;
@@ -836,6 +857,7 @@ export function createBoardVfx(canvas) {
     zoneFlash,
     defeatExplosion,
     flagBaseHitImpact,
+    baseRepairHeal,
     flagCaptureExplosion,
     seismicCrackBurst,
     nukeExplosion,

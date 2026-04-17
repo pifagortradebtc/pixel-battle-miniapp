@@ -31,3 +31,8 @@ export function getMstimAltSeasonClientBurstUntilMs() {
   }
   return u;
 }
+
+/** Сырое until в памяти (без авто-сброса по истечении) — для слияния со stats, чтобы старый пакет не обнулял mstim. */
+export function getMstimAltSeasonClientBurstUntilStored() {
+  return clampEpochMs(burstUntilMs);
+}

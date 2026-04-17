@@ -26,6 +26,7 @@ import {
   PRICES_QUANT,
   RECOVERY_BUFF_DURATION_MS,
   REFERRAL_JOIN_INVITER_QUANT,
+  REFERRAL_JOIN_PAYMENT_ID_PREFIX,
   getEffectiveRecoverySec,
   quantToUsdt,
   resolveAuthoritativePixelCooldownMs,
@@ -79,6 +80,7 @@ import {
   FLAG_BASE_MAX_HP,
   FLAG_CAPTURE_MAX_HITS_PER_TEAM_PER_SEC,
   FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS,
+  BASE_REPAIR_HP_DELTA,
   FLAG_MAIN_BASE_MAX_HP,
   FLAG_REGEN_IDLE_MS,
   FLAG_WARN_THRESHOLDS,
@@ -982,6 +984,7 @@ async function rememberPlayerProfile(ws, msg) {
     const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
     if (!pk) {
       applyEligibilityFromServerState(ws);
+      ensureWsTeamMemberKeyRegistered(ws);
       return;
     }
     const username = typeof tu.username === "string" ? tu.username.trim().slice(0, 64) : "";
@@ -992,6 +995,7 @@ async function rememberPlayerProfile(ws, msg) {
     });
   }
   applyEligibilityFromServerState(ws);
+  ensureWsTeamMemberKeyRegistered(ws);
   const pkInvite = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
   /** Реферал только при подтверждённом Telegram — иначе можно привязать чужой tg_<id> к своему кошельку. */
   if (pkInvite && ws.telegramVerified) {
@@ -1006,7 +1010,7 @@ async function rememberPlayerProfile(ws, msg) {
         if (!eu.invitedByPlayerKey) {
           eu.invitedByPlayerKey = refPk;
           await walletStore.save();
-          const refPayId = `referral_join_${pkInvite}`;
+          const refPayId = `${REFERRAL_JOIN_PAYMENT_ID_PREFIX}${pkInvite}`;
           const refAmt = quantToUsdt(REFERRAL_JOIN_INVITER_QUANT);
           const dep = await walletStore.finalizeDeposit(refPayId, refPk, refAmt, {});
           if (dep.ok && wss) {
@@ -1038,6 +1042,20 @@ function removeTeamMemberKey(teamId, playerKey) {
   teamMemberKeys.get(teamId).delete(pk);
   if (teamMemberKeys.get(teamId).size === 0) teamMemberKeys.delete(teamId);
   synergyOnlineEpoch++;
+}
+
+/**
+ * playerKey часто появляется только после clientProfile (tg_*), а join/create были раньше — без этого пассив ферм
+ * не попадает в teamMemberKeys и collectWinnerTeamPlayerKeys может опираться только на онлайн-обход (ненадёжно).
+ */
+function ensureWsTeamMemberKeyRegistered(ws) {
+  if (!ws || ws.teamId == null) return;
+  const tid = ws.teamId | 0;
+  const pk = sanitizePlayerKey(ws.playerKey);
+  if (!pk) return;
+  const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
+  if (!dt || dt.solo || dt.eliminated) return;
+  addTeamMemberKey(tid, pk);
 }
 
 /** Сбрасывает ws.teamId, если команда удалена или этот playerKey не в составе (после смены раунда / рассинхрона). */
@@ -1302,8 +1320,10 @@ function buildSynergyMultByTeamMap(snap) {
 }
 
 function getGlobalEventPayload(nowMs = Date.now()) {
-  const arUntil = isMstimAltSeasonBurstActive() ? clampPositiveEpochMs(mstimAltSeasonBurstUntilMs) : 0;
-  const ctx = getBattleEventsContext(nowMs);
+  const nowCmp = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const mstimOn = authoritativeMstimGlobalSpeedActiveAt(nowCmp);
+  const arUntil = mstimOn ? clampPositiveEpochMs(mstimAltSeasonBurstUntilMs) : 0;
+  const ctx = getBattleEventsContext(nowCmp);
   if (!ctx) {
     return {
       active: arUntil > 0,
@@ -1311,15 +1331,15 @@ function getGlobalEventPayload(nowMs = Date.now()) {
       title: arUntil > 0 ? "Мстим за Альт Сезон" : "",
       subtitle: arUntil > 0 ? "Пиксель раз в 1 с для всех" : "",
       until: arUntil,
-      battleEvents: { serverNow: nowMs, active: false, layers: [], primary: null, battleEndsAt: 0 },
+      battleEvents: { serverNow: nowCmp, active: false, layers: [], primary: null, battleEndsAt: 0 },
       altSeasonRevengeUntilMs: arUntil,
       debugRoundEvents: DEBUG_ROUND_EVENTS ? { note: "warmup_or_idle" } : undefined,
     };
   }
-  const snap = computeBattleScoringSnapshotWithManualBattle(nowMs, ctx);
+  const snap = computeBattleScoringSnapshotWithManualBattle(nowCmp, ctx);
   let be = battleClientPayloadCache;
   if (battleClientPayloadCacheKey !== battleSnapCacheKey || !be) {
-    be = buildBattleEventsClientPayload(snap, nowMs, ctx.battleEndMs);
+    be = buildBattleEventsClientPayload(snap, nowCmp, ctx.battleEndMs);
     battleClientPayloadCacheKey = battleSnapCacheKey;
     battleClientPayloadCache = be;
   }
@@ -1327,16 +1347,16 @@ function getGlobalEventPayload(nowMs = Date.now()) {
   /** @type {Record<string, unknown> | undefined} */
   let debugRoundEvents;
   if (DEBUG_ROUND_EVENTS) {
-    const elapsed = nowMs - ctx.playStartMs;
+    const elapsed = nowCmp - ctx.playStartMs;
     const manualActive = [];
     for (const [cmd, u] of manualBattleSlotsByCmd) {
-      if (typeof u === "number" && u > nowMs) manualActive.push(cmd);
+      if (typeof u === "number" && u > nowCmp) manualActive.push(cmd);
     }
     debugRoundEvents = {
       roundIndex,
       elapsedMs: elapsed,
       manualBattleActive: manualActive,
-      next: getNextTimelineEvent(nowMs, roundIndex, ctx.playStartMs, ctx.battleEndMs),
+      next: getNextTimelineEvent(nowCmp, roundIndex, ctx.playStartMs, ctx.battleEndMs),
     };
   }
   return {
@@ -2415,22 +2435,43 @@ function effectiveGameClockMs() {
   return Date.now();
 }
 
-/** Окно «Мстим за Альт Сезон»: wall-clock, на паузе таймер замирает (until сдвигается при unpause). */
-function isMstimAltSeasonBurstActive() {
+/**
+ * Единый авторитетный признак «Мстим / speed» для кулдауна пикселя.
+ * @param {number} effectiveNowMs тот же «игровой now», что и в проверке `lastActionAt + cd` (см. effectiveGameClockMs()).
+ */
+function authoritativeMstimGlobalSpeedActiveAt(effectiveNowMs) {
   const until = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
   if (until <= 0) return false;
   if (gamePaused && (pauseWallStartedAt | 0) > 0) {
     return until > (pauseWallStartedAt | 0);
   }
-  return until > Date.now();
+  const t = Number(effectiveNowMs);
+  const nowCmp = Number.isFinite(t) ? t : Date.now();
+  return until > nowCmp;
+}
+
+/** Окно «Мстим за Альт Сезон»: для подписей/HUD без явного now — текущие игровые часы. */
+function isMstimAltSeasonBurstActive() {
+  return authoritativeMstimGlobalSpeedActiveAt(effectiveGameClockMs());
 }
 
 function effectivePixelCooldownMs(u, teamFx, st, now) {
-  return resolveAuthoritativePixelCooldownMs(isMstimAltSeasonBurstActive(), u, teamFx, st, now);
+  return resolveAuthoritativePixelCooldownMs(authoritativeMstimGlobalSpeedActiveAt(now), u, teamFx, st, now);
+}
+
+/**
+ * Время для проверки `lastActionAt + cd` и записи `lastActionAt` после пикселя.
+ * Режим «Мстим/speed» задаётся в wall-clock (`untilMs`); при глобальной паузе
+ * `effectiveGameClockMs()` застывает — без Date.now() реальный серверный интервал 1 с не наступал бы.
+ */
+function pixelActionCooldownNowMs() {
+  const gameNow = effectiveGameClockMs();
+  if (authoritativeMstimGlobalSpeedActiveAt(gameNow)) return Date.now();
+  return gameNow;
 }
 
 function effectiveRecoverySecForWallet(u, teamFx, now) {
-  return resolveAuthoritativeRecoverySec(isMstimAltSeasonBurstActive(), u, teamFx, now);
+  return resolveAuthoritativeRecoverySec(authoritativeMstimGlobalSpeedActiveAt(now), u, teamFx, now);
 }
 
 function getWarmupDurationMs() {
@@ -2650,6 +2691,11 @@ let quantumFarmLayouts = [];
 /** @type {number[]} владельцы по индексу (для детекта смены и тика дохода). */
 let quantumFarmOwnerPrev = [];
 let quantumFarmIncomeTickSeq = 0;
+/** Планировщик тика дохода ферм: один таймер + срочный тик при смене контроля (без ожидания reload). */
+let quantumFarmIncomeTimer = null;
+let quantumFarmIncomeInFlight = false;
+let quantumFarmIncomeLastCompletedMs = 0;
+let quantumFarmIncomeForceTickPending = false;
 /** Уровни ферм 1..3 по индексу quantumFarmLayouts (доход = level кв. / 5 с при контроле). */
 let quantumFarmLevels = [];
 /** Из round-state до первого rebuildLandFromRound (длина должна совпасть с layouts). */
@@ -3165,18 +3211,19 @@ async function broadcastWalletPayloadToAllClients() {
 async function buildWalletPayload(ws) {
   const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
   const u = await walletStore.getOrCreateUser(pk);
-  const now = effectiveGameClockMs();
+  const nowGame = effectiveGameClockMs();
+  const nowCd = pixelActionCooldownNowMs();
   const st = tournamentStage(roundIndex, gameFinished);
   const tid = ws.teamId | 0;
   const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const devUnl = pk && isDevUnlimitedWallet(pk);
   const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
   /* Безлимит только баланс/списания — интервал пикселя и баффы как у всех */
-  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, now) : BASE_ACTION_COOLDOWN_SEC * 1000;
+  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, nowCd) : BASE_ACTION_COOLDOWN_SEC * 1000;
   const ref = u.invitedByPlayerKey ? sanitizePlayerKey(u.invitedByPlayerKey) : "";
-  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, now) : BASE_ACTION_COOLDOWN_SEC;
+  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, nowCd) : BASE_ACTION_COOLDOWN_SEC;
   const farmQ5 = tid && quantumFarmLayouts.length ? getQuantumFarmIncomeQuantsForTeam(tid) : 0;
-  const zoneQ5 = tid ? getBattleEventZoneQuantumQuantsForTeam(tid, now) : 0;
+  const zoneQ5 = tid ? getBattleEventZoneQuantumQuantsForTeam(tid, nowGame) : 0;
   return {
     type: "wallet",
     balanceUSDT: devUnl ? 999999999 : u.balanceUSDT,
@@ -3191,7 +3238,7 @@ async function buildWalletPayload(ws) {
     lastMassCaptureAt: u.lastMassCaptureAt ?? 0,
     lastZone12CaptureAt: u.lastZone12CaptureAt ?? 0,
     referralBonusActive: !!(ref && isPlayerKeyOnline(ref)),
-    globalEvent: getGlobalEventPayload(now),
+    globalEvent: getGlobalEventPayload(nowGame),
     tournamentStage: st,
     roundIndex,
     devUnlimited: !!devUnl,
@@ -3341,12 +3388,16 @@ function syncQuantumFarmStateAfterTerritoryChange() {
   const next = computeQuantumFarmOwnersNow();
   if (quantumFarmOwnerPrev.length !== next.length) {
     quantumFarmOwnerPrev = next;
+    void broadcastWalletToAll();
+    requestQuantumFarmIncomeTickSoon();
     return;
   }
+  let ownersChanged = false;
   for (let i = 0; i < next.length; i++) {
     const a = quantumFarmOwnerPrev[i] | 0;
     const b = next[i] | 0;
     if (a === b) continue;
+    ownersChanged = true;
     const farmId = quantumFarmLayouts[i].id;
     if (a && !b) {
       broadcastQuantumFarmTeamNotice(a, { type: "quantumFarmNotice", kind: "disconnected", farmId });
@@ -3376,6 +3427,10 @@ function syncQuantumFarmStateAfterTerritoryChange() {
     }
   }
   quantumFarmOwnerPrev = next;
+  if (ownersChanged) {
+    void broadcastWalletToAll();
+    requestQuantumFarmIncomeTickSoon();
+  }
 }
 
 async function tickQuantumFarmIncome() {
@@ -3459,6 +3514,78 @@ async function tickQuantumFarmIncome() {
       eventZoneQuants: nZone > 0 ? nZone : undefined,
     });
   }
+}
+
+function clearQuantumFarmIncomeTimer() {
+  if (quantumFarmIncomeTimer) {
+    clearTimeout(quantumFarmIncomeTimer);
+    quantumFarmIncomeTimer = null;
+  }
+}
+
+function scheduleQuantumFarmIncomeDelayed(ms) {
+  clearQuantumFarmIncomeTimer();
+  quantumFarmIncomeTimer = setTimeout(() => {
+    quantumFarmIncomeTimer = null;
+    void runQuantumFarmIncomeScheduledPass();
+  }, ms);
+}
+
+/**
+ * Один проход таймера: обычно раз в QUANTUM_FARM_TICK_MS; при quantumFarmIncomeForceTickPending — сразу после смены контроля/апгрейда.
+ */
+async function runQuantumFarmIncomeScheduledPass() {
+  if (REDIS_URL && !isClusterLeader()) return;
+  if (quantumFarmIncomeInFlight) {
+    scheduleQuantumFarmIncomeDelayed(80);
+    return;
+  }
+  if (gamePaused || gameFinished) {
+    scheduleQuantumFarmIncomeDelayed(QUANTUM_FARM_TICK_MS);
+    return;
+  }
+  const now = Date.now();
+  const force = quantumFarmIncomeForceTickPending;
+  const dueByTime = now - quantumFarmIncomeLastCompletedMs >= QUANTUM_FARM_TICK_MS - 50;
+  const due = force || dueByTime;
+  if (!due) {
+    scheduleQuantumFarmIncomeDelayed(Math.max(0, QUANTUM_FARM_TICK_MS - (now - quantumFarmIncomeLastCompletedMs)));
+    return;
+  }
+  if (force) quantumFarmIncomeForceTickPending = false;
+
+  quantumFarmIncomeInFlight = true;
+  try {
+    await tickQuantumFarmIncome();
+    quantumFarmIncomeLastCompletedMs = Date.now();
+  } finally {
+    quantumFarmIncomeInFlight = false;
+  }
+
+  if (quantumFarmIncomeForceTickPending) {
+    scheduleQuantumFarmIncomeDelayed(0);
+  } else {
+    scheduleQuantumFarmIncomeDelayed(QUANTUM_FARM_TICK_MS);
+  }
+}
+
+function requestQuantumFarmIncomeTickSoon() {
+  if (REDIS_URL && !isClusterLeader()) return;
+  quantumFarmIncomeForceTickPending = true;
+  if (!quantumFarmIncomeInFlight) {
+    clearQuantumFarmIncomeTimer();
+    quantumFarmIncomeTimer = setTimeout(() => {
+      quantumFarmIncomeTimer = null;
+      void runQuantumFarmIncomeScheduledPass();
+    }, 0);
+  }
+}
+
+function startQuantumFarmIncomeLoop() {
+  quantumFarmIncomeLastCompletedMs = Date.now();
+  quantumFarmIncomeForceTickPending = false;
+  clearQuantumFarmIncomeTimer();
+  scheduleQuantumFarmIncomeDelayed(QUANTUM_FARM_TICK_MS);
 }
 
 function applyFullMessageToPixelsCluster(msg) {
@@ -4359,6 +4486,108 @@ function tickFlagBaseRegen(now) {
       militaryAnchor: { x0: ox0, y0: oy0 },
     });
   }
+}
+
+/**
+ * Предпросмотр ремонта базы (без мутации): валидация цели и расчёт HP.
+ * @returns {{ ok: true, did: number, isMil: boolean, mk: string | null, milAnchor?: { x0: number, y0: number }, maxHp: number, newHp: number, applied: number, becomesFull: boolean } | { ok: false, reason: string }}
+ */
+function computeBaseRepairPreview(teamId, x, y, now) {
+  const tid = teamId | 0;
+  const resolved = resolveFlagBaseAtCell(x | 0, y | 0);
+  if (!resolved || (resolved.team.id | 0) !== tid) {
+    return { ok: false, reason: "base_repair_invalid_target" };
+  }
+  const isMil = resolved.kind === "military";
+  const did = tid;
+  const ox0 = isMil ? resolved.outpost.x0 | 0 : 0;
+  const oy0 = isMil ? resolved.outpost.y0 | 0 : 0;
+  const mk = isMil ? militaryOutpostFlagStateKey(did, ox0, oy0) : null;
+  /** @type {{ x0: number, y0: number } | undefined} */
+  const milAnchor = isMil ? { x0: ox0, y0: oy0 } : undefined;
+  const maxHp = isMil ? FLAG_BASE_MAX_HP : FLAG_MAIN_BASE_MAX_HP;
+  const st = isMil ? militaryFlagCaptureByKey.get(mk) : flagCaptureByDefender.get(did);
+  const eff = computeEffectiveBaseHp(st, now, maxHp);
+  const curFloor = Math.min(maxHp, Math.max(0, Math.floor(eff + 1e-9)));
+  if (curFloor >= maxHp) {
+    return { ok: false, reason: "base_repair_full" };
+  }
+  const newHp = Math.min(maxHp, curFloor + (BASE_REPAIR_HP_DELTA | 0));
+  const applied = newHp - curFloor;
+  if (applied < 1) {
+    return { ok: false, reason: "base_repair_full" };
+  }
+  const xi = x | 0;
+  const yi = y | 0;
+  /** Центр подсветки VFX: главная — клетка флага; плацдарм — центр 2×2. */
+  const vfxGx = isMil ? ox0 + 1 : xi;
+  const vfxGy = isMil ? oy0 + 1 : yi;
+  const vfxMode = isMil ? "military" : "main";
+  return {
+    ok: true,
+    did,
+    isMil,
+    mk,
+    milAnchor,
+    maxHp,
+    newHp,
+    applied,
+    becomesFull: newHp >= maxHp,
+    vfxGx,
+    vfxGy,
+    vfxMode,
+  };
+}
+
+/**
+ * Применить ремонт после успешного списания квантов.
+ * @param {Exclude<ReturnType<typeof computeBaseRepairPreview>, { ok: false }> & { ok: true }} prev
+ */
+function commitBaseRepairPreview(prev, now) {
+  const did = prev.did | 0;
+  const isMil = prev.isMil;
+  const mk = prev.mk;
+  const maxHp = prev.maxHp | 0;
+  const newHp = prev.newHp | 0;
+  const milAnchor = prev.milAnchor;
+  if (prev.becomesFull) {
+    if (isMil && mk) militaryFlagCaptureByKey.delete(mk);
+    else flagCaptureByDefender.delete(did);
+    broadcast({
+      type: "flagCaptureStopped",
+      defenderTeamId: did,
+      reason: "regen_full",
+      ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
+    });
+    return;
+  }
+  /** @type {{ hp: number, lastHitAt: number, attackerTeamId: number } | undefined} */
+  let st = isMil && mk ? militaryFlagCaptureByKey.get(mk) : flagCaptureByDefender.get(did);
+  if (!st) {
+    st = { hp: newHp, lastHitAt: now, attackerTeamId: 0 };
+    if (isMil && mk) militaryFlagCaptureByKey.set(mk, st);
+    else flagCaptureByDefender.set(did, st);
+  } else {
+    st.hp = newHp;
+    st.lastHitAt = now;
+    st.attackerTeamId = 0;
+  }
+  st._lastRegenBroadcastHp = newHp;
+  st._flagRegenBroadcastPhase = false;
+  const effAfter = computeEffectiveBaseHp(st, now, maxHp);
+  broadcast({
+    type: "flagCaptureProgress",
+    defenderTeamId: did,
+    attackerTeamId: 0,
+    hp: newHp,
+    maxHp,
+    lastHitAt: now,
+    effectiveHp: effAfter,
+    serverNow: now,
+    repair: true,
+    repairDelta: prev.applied | 0,
+    ...(milAnchor ? { militaryAnchor: milAnchor } : {}),
+  });
 }
 
 /**
@@ -7037,7 +7266,7 @@ wss.on("connection", (ws, req) => {
         const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
         const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
         const st = tournamentStage(roundIndex, gameFinished);
-        const now = effectiveGameClockMs();
+        const now = pixelActionCooldownNowMs();
         const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
         safeSend(ws, {
           type: "__testPixelCooldownProbeAck",
@@ -7939,6 +8168,82 @@ wss.on("connection", (ws, req) => {
       return;
     }
 
+    /** Таргет: клиент сначала входит в режим выбора, затем шлёт координаты своей базы. Кванты — только после валидного preview. */
+    if (msg.type === "purchaseBaseRepair") {
+      if (!assertCanPlay(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      if (isTeamEliminated(ws.teamId)) {
+        safeSend(ws, { type: "purchaseError", reason: "team_eliminated" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const devUnl = isDevUnlimitedWallet(pk);
+      const stg = tournamentStage(roundIndex, gameFinished);
+      if (!stageAllows(stg)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      if (isWarmupPhaseNow()) {
+        safeSend(ws, { type: "purchaseError", reason: "warmup" });
+        return;
+      }
+      const tid = ws.teamId | 0;
+      const cx = msg.x | 0;
+      const cy = msg.y | 0;
+      if (cx < 0 || cx >= gridW || cy < 0 || cy >= gridH) {
+        safeSend(ws, { type: "purchaseError", reason: "out_of_bounds" });
+        return;
+      }
+      const now = Date.now();
+      const preview = computeBaseRepairPreview(tid, cx, cy, now);
+      if (!preview.ok) {
+        safeSend(ws, { type: "purchaseError", reason: preview.reason });
+        return;
+      }
+      const priceQuant = PRICES_QUANT.baseRepair;
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      if (!devUnl) {
+        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "base_repair", { deferSave: true });
+      }
+      commitBaseRepairPreview(preview, now);
+      safeSend(ws, {
+        type: "purchaseOk",
+        kind: "baseRepair",
+        x: cx,
+        y: cy,
+        deltaHp: preview.applied,
+        maxHp: preview.maxHp,
+        mode: preview.vfxMode,
+      });
+      safeSend(ws, await buildWalletPayload(ws));
+      broadcast({
+        type: "purchaseVfx",
+        kind: "baseRepair",
+        teamId: tid,
+        gx: preview.vfxGx,
+        gy: preview.vfxGy,
+        mode: preview.vfxMode,
+        delta: preview.applied,
+      });
+      scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
+      return;
+    }
+
     if (msg.type === "purchaseQuantumFarmUpgrade") {
       if (!assertCanPlay(ws)) return;
       if (blockPrePlayPurchases(ws)) return;
@@ -8020,7 +8325,8 @@ wss.on("connection", (ws, req) => {
         farmId,
         level: quantumFarmLevels[idx],
       });
-      scheduleBroadcastWalletDebounced();
+      void broadcastWalletToAll();
+      requestQuantumFarmIncomeTickSoon();
       queuePersistWalletPurchaseWrites(pk);
       return;
     }
@@ -8151,13 +8457,17 @@ wss.on("connection", (ws, req) => {
       const st = tournamentStage(roundIndex, gameFinished);
       const fx = getTeamFx(teamId);
       const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
-      const now = effectiveGameClockMs();
-      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
-      if (now < u.lastActionAt + cd) {
+      const nowGame = effectiveGameClockMs();
+      const nowCd = pixelActionCooldownNowMs();
+      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, nowCd);
+      /* После mstim lastActionAt мог быть записан в wall-clock во время паузы; для обычного режима снова game-clock — иначе lastAt > nowCd и пиксель навсегда «не готов». */
+      let lastAtForCd = u.lastActionAt;
+      if (nowCd === nowGame && lastAtForCd > nowGame) lastAtForCd = nowGame;
+      if (nowCd < lastAtForCd + cd) {
         if (DEBUG_MSTIM_COOLDOWN) {
-          const mA = isMstimAltSeasonBurstActive();
-          console.log(
-            `[mstim] pixel cooldown reject pk=${String(pk).slice(0, 16)} cd=${cd} needWait=${u.lastActionAt + cd - now}ms mstimUntil=${mstimAltSeasonBurstUntilMs} active=${mA}`
+          const mA = authoritativeMstimGlobalSpeedActiveAt(nowCd);
+          console.warn(
+            `[mstim] pixel cooldown reject pk=${String(pk).slice(0, 16)} cd=${cd} needWait=${lastAtForCd + cd - nowCd}ms wallNow=${Date.now()} gameNow=${nowGame} pixelCdNow=${nowCd} mstimUntil=${mstimAltSeasonBurstUntilMs} mstimActiveAtPixelCdNow=${mA}`
           );
         }
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "cooldown not ready" });
@@ -8165,13 +8475,13 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      const fc = tryFlagCaptureHit(teamId, x, y, now);
+      const fc = tryFlagCaptureHit(teamId, x, y, nowGame);
       if (fc && fc.rateLimited) {
         safeSend(ws, { type: "pixelReject", reason: "flag_rate" });
         return;
       }
       if (fc && (fc.hit || fc.captured)) {
-        u.lastActionAt = now;
+        u.lastActionAt = nowCd;
         scheduleEconomyFlushForPlayer(pk);
         if (!fc.captured) {
           scheduleStatsBroadcast();
@@ -8192,7 +8502,7 @@ wss.on("connection", (ws, req) => {
       if (!enemyFlagDef) {
         const wallRes = tryApplyGreatWallSiegeHit(x, y, teamId, pk);
         if (wallRes.handled) {
-          u.lastActionAt = now;
+          u.lastActionAt = nowCd;
           scheduleEconomyFlushForPlayer(pk);
           scheduleStatsBroadcast();
           afterTerritoryMutation();
@@ -8213,7 +8523,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      u.lastActionAt = now;
+      u.lastActionAt = nowCd;
       scheduleEconomyFlushForPlayer(pk);
 
       /* Обычная покраска: не якорь чужой базы (это только tryFlagCaptureHit / executeFlagCaptureSuccess). */
@@ -8731,6 +9041,36 @@ async function applyAdminTrainingScoreReset(telegramUserId) {
 }
 
 /**
+ * Только реферальная система: связи приглашённого, idempotent referral_join_* (ledger / payments / JSON-кэш).
+ * Уже начисленные кванты с балансов не снимаются.
+ * @param {number} telegramUserId
+ * @returns {Promise<{ ok: true, clearedLinks: number, clearedReferralLedgerRefs: number, clearedReferralPayments: number, rewardQuantPerReferral: number } | { ok: false, reason: string }>}
+ */
+async function applyAdminReferralSystemReset(telegramUserId) {
+  if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
+  let r;
+  try {
+    r = await walletStore.adminResetReferralSystemOnly();
+  } catch (e) {
+    console.warn("[admin] referral_system_reset wallet:", e?.message || e);
+    return { ok: false, reason: "wallet_reset_failed" };
+  }
+  console.warn(
+    `[admin] referral_system_reset byTelegramId=${telegramUserId} clearedLinks=${r.clearedLinks} clearedReferralLedgerRefs=${r.clearedReferralLedgerRefs} clearedReferralPayments=${r.clearedReferralPayments} rewardQuantPerReferral=${r.rewardQuantPerReferral} (REFERRAL_JOIN_INVITER_QUANT)`
+  );
+  logAdminAction({
+    command: "referral_system_reset",
+    byTelegramId: telegramUserId,
+    clearedLinks: r.clearedLinks,
+    clearedReferralLedgerRefs: r.clearedReferralLedgerRefs,
+    clearedReferralPayments: r.clearedReferralPayments,
+    rewardQuantPerReferral: r.rewardQuantPerReferral,
+  });
+  await adminRefreshWalletsAfterBulkEconomy();
+  return { ok: true, ...r };
+}
+
+/**
  * Полный «как новая игра»: не частичный сброс — всё игровое состояние с нуля.
  * Удаляются команды (dynamic-teams.json), пиксели, раунд/таймеры/пауза/roundEnding, изоляция, флаги баз,
  * ручные очки, evt/slots, tiebreak, квантовые фермы пересчитываются, клады заново, round-state.json и снимок карты.
@@ -8921,6 +9261,24 @@ async function telegramSendFullGameResetConfirmation(chatId) {
   );
 }
 
+/** @param {number | string} chatId */
+async function telegramSendReferralResetConfirmation(chatId) {
+  await telegramSendMessage(
+    chatId,
+    "Вы уверены? Это полностью обнулит историю рефералов и позволит считать приглашения заново.",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Да, сбросить рефералов", callback_data: "adm_refreset_y" },
+            { text: "Отмена", callback_data: "adm_refreset_n" },
+          ],
+        ],
+      },
+    }
+  );
+}
+
 /** @param {{ id: string; from?: { id?: number }; message?: { chat?: { id?: number } }; data?: string }} cq */
 async function handleTelegramAdminCallbackQuery(cq) {
   const uid = cq.from?.id;
@@ -8960,6 +9318,40 @@ async function handleTelegramAdminCallbackQuery(cq) {
             ? "Сброс только на лидере кластера (CLUSTER_LEADER=true)."
             : r.reason === "wallet_reset_failed"
               ? "Состояние игры сброшено, но ошибка кошельков — см. лог сервера."
+              : "Сброс не выполнен."
+      );
+    }
+    return;
+  }
+
+  if (data === "adm_refreset_a") {
+    await telegramAnswerCallbackQuery(cq.id);
+    if (chatId != null) await telegramSendReferralResetConfirmation(chatId);
+    return;
+  }
+  if (data === "adm_refreset_n") {
+    await telegramAnswerCallbackQuery(cq.id, { text: "Отменено" });
+    return;
+  }
+  if (data === "adm_refreset_y") {
+    if (!isClusterLeader()) {
+      await telegramAnswerCallbackQuery(cq.id, {
+        text: "Только инстанс с CLUSTER_LEADER=true может сбросить рефералов.",
+        show_alert: true,
+      });
+      return;
+    }
+    await telegramAnswerCallbackQuery(cq.id, { text: "Сбрасываю рефералов…" });
+    const r = await applyAdminReferralSystemReset(uid);
+    if (chatId != null) {
+      await telegramSendMessage(
+        chatId,
+        r.ok
+          ? `Готово: реферальная история обнулена (связей снято: ${r.clearedLinks}, записей начислений referral_join в журнале: ${r.clearedReferralLedgerRefs}, строк payments: ${r.clearedReferralPayments}). Награда за новый валидный реферал: +${r.rewardQuantPerReferral} квантов. Команды, карта, раунд и балансы не менялись.`
+          : r.reason === "not_leader"
+            ? "Сброс только на лидере кластера (CLUSTER_LEADER=true)."
+            : r.reason === "wallet_reset_failed"
+              ? "Ошибка кошелька — см. лог сервера."
               : "Сброс не выполнен."
       );
     }
@@ -9157,6 +9549,7 @@ async function telegramPollLoop() {
             if (startBtn) rows.push([startBtn]);
             if (TELEGRAM_ADMIN_IDS.has(uid)) {
               rows.push([{ text: "⚠️ Полный сброс игры", callback_data: "adm_full_a" }]);
+              rows.push([{ text: "Сбросить рефералов", callback_data: "adm_refreset_a" }]);
               rows.push([
                 { text: "Сбросить всем кванты", callback_data: "adm_qzero_a" },
                 { text: "Выдать всем кванты", callback_data: "adm_qall_a" },
@@ -9197,6 +9590,11 @@ async function telegramPollLoop() {
           .toLowerCase()
           .replace(/^\/+/, "")
           .replace(/\s+/g, " ");
+
+        if (restartNorm === "referralreset") {
+          await telegramSendReferralResetConfirmation(chatId);
+          continue;
+        }
 
         {
           const qf = telegramAdminQuantGrantFlow.get(uid);
@@ -9759,9 +10157,9 @@ process.on("SIGINT", () => {
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
   schedulePlayStartBroadcast();
-  setInterval(() => {
-    void tickQuantumFarmIncome();
-  }, QUANTUM_FARM_TICK_MS);
+  if (!REDIS_URL || isClusterLeader()) {
+    startQuantumFarmIncomeLoop();
+  }
   setInterval(() => {
     void writePixelsSnapshotFileAsync();
   }, PIXELS_SNAPSHOT_INTERVAL_MS);

@@ -232,35 +232,6 @@
     </div>
   </div>
 
-  <div id="quantum-farm-panel" class="qf-command" hidden aria-hidden="true">
-    <div class="qf-command__backdrop" id="quantum-farm-panel-backdrop" aria-hidden="true"></div>
-    <div class="qf-command__dock" id="quantum-farm-panel-dock">
-      <div class="qf-command__nib" aria-hidden="true"></div>
-      <div
-        class="qf-command__card quantum-farm-panel__card"
-        role="dialog"
-        aria-labelledby="quantum-farm-panel-title"
-      >
-        <div class="qf-command__top">
-          <div class="qf-command__title-row">
-            <span class="qf-command__tactical-icon" aria-hidden="true"></span>
-            <h2 class="qf-command__title" id="quantum-farm-panel-title">Квантовая ферма</h2>
-          </div>
-          <button type="button" class="qf-command__close" id="quantum-farm-panel-close" aria-label="Закрыть">
-            ×
-          </button>
-        </div>
-        <p class="qf-command__level" id="quantum-farm-panel-level"></p>
-        <p class="qf-command__income" id="quantum-farm-panel-income"></p>
-        <p class="qf-command__blurb" id="quantum-farm-panel-blurb"></p>
-        <p class="qf-command__hint" id="quantum-farm-panel-hint" hidden></p>
-        <button type="button" class="qf-command__cta quantum-farm-panel__upgrade" id="quantum-farm-panel-upgrade" hidden>
-          Улучшить
-        </button>
-      </div>
-    </div>
-  </div>
-
   <div id="defeat-overlay" class="overlay defeat-overlay" hidden>
     <div class="overlay__card defeat-overlay__card">
       <h2 id="defeat-overlay-title" class="overlay__title defeat-overlay__title">Уничтожено</h2>
@@ -645,6 +616,33 @@
               </div>
             </article>
             <article
+              class="game-shop__card game-shop__card--premium game-shop__card--elite"
+              title="Таргетируемая способность (не мгновенная покупка): нажмите кнопку → на карте тапните только свою базу — клетку флага главной 6×6 или любую клетку своего плацдарма 2×2. Эффект: +20 HP, не выше максимума базы. 1000 квантов списываются только после успешного применения на валидную цель."
+            >
+              <div class="game-shop__badges">
+                <span class="game-shop__badge game-shop__badge--hot">Таргет</span>
+                <span class="game-shop__badge game-shop__badge--best">1000 → +20 HP</span>
+              </div>
+              <div class="game-shop__card-head">
+                <div class="game-shop__icon" aria-hidden="true">🔧</div>
+                <div class="game-shop__card-text">
+                  <h3 class="game-shop__card-title">Ремонт базы</h3>
+                  <p class="game-shop__card-desc">
+                    Указать на карте свою базу · +20 HP (cap) · не враг, не нейтраль, не ферма
+                  </p>
+                </div>
+              </div>
+              <div class="game-shop__price-row">
+                <div class="game-shop__price-stack">
+                  <span class="game-shop__price">1000 квантов</span>
+                  <span class="game-shop__price-sub">оплата только после тапа по своей базе</span>
+                </div>
+                <button type="button" class="game-shop__buy shop-btn shop-btn--supreme" id="shop-base-repair" data-action="baseRepair">
+                  Режим выбора базы
+                </button>
+              </div>
+            </article>
+            <article
               class="game-shop__card game-shop__card--premium game-shop__card--elite game-shop__card--military-supreme"
               title="Премиум: удар с воздуха — передовая база 2×2 на суше (тап — левый верх блока). Вторая активная база команды: территория, связанная с ней или с главной, снабжается; изолированы только карманы, оторванные от всех ваших баз."
             >
@@ -966,6 +964,36 @@
           </div>
         </div>
       </footer>
+    </div>
+  </div>
+
+  <!-- Панель квантофермы: в конце body, поверх #app и прочих оверлеев (z-index + порядок в DOM). -->
+  <div id="quantum-farm-panel" class="qf-command" hidden aria-hidden="true">
+    <div class="qf-command__backdrop" id="quantum-farm-panel-backdrop" aria-hidden="true"></div>
+    <div class="qf-command__dock" id="quantum-farm-panel-dock">
+      <div class="qf-command__nib" aria-hidden="true"></div>
+      <div
+        class="qf-command__card quantum-farm-panel__card"
+        role="dialog"
+        aria-labelledby="quantum-farm-panel-title"
+      >
+        <div class="qf-command__top">
+          <div class="qf-command__title-row">
+            <span class="qf-command__tactical-icon" aria-hidden="true"></span>
+            <h2 class="qf-command__title" id="quantum-farm-panel-title">Квантовая ферма</h2>
+          </div>
+          <button type="button" class="qf-command__close" id="quantum-farm-panel-close" aria-label="Закрыть">
+            ×
+          </button>
+        </div>
+        <p class="qf-command__level" id="quantum-farm-panel-level"></p>
+        <p class="qf-command__income" id="quantum-farm-panel-income"></p>
+        <p class="qf-command__blurb" id="quantum-farm-panel-blurb"></p>
+        <p class="qf-command__hint" id="quantum-farm-panel-hint" hidden></p>
+        <button type="button" class="qf-command__cta quantum-farm-panel__upgrade" id="quantum-farm-panel-upgrade" hidden>
+          Улучшить
+        </button>
+      </div>
     </div>
   </div>
 
