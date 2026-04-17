@@ -28,8 +28,8 @@ import {
   REFERRAL_JOIN_INVITER_QUANT,
   REFERRAL_JOIN_PAYMENT_ID_PREFIX,
   getEffectiveRecoverySec,
+  getAuthoritativePixelCooldownMs,
   quantToUsdt,
-  resolveAuthoritativePixelCooldownMs,
   resolveAuthoritativeRecoverySec,
   stageAllows,
   stageAllowsRecoveryPurchases,
@@ -718,6 +718,8 @@ let playStartMs = Date.now();
 /** «Мстим за Альт Сезон»: глобально пиксель раз в 1 с для всех (бот: speed). */
 const MSTIM_ALT_SEASON_DURATION_MS = 5 * 60 * 1000;
 const DEBUG_MSTIM_COOLDOWN = /^true$/i.test(String(process.env.DEBUG_MSTIM_COOLDOWN || "").trim());
+/** Логи accept/reject пикселя: cd, баффы, mstim (DEBUG_PIXEL_COOLDOWN или DEBUG_MSTIM_COOLDOWN). */
+const DEBUG_PIXEL_COOLDOWN = DEBUG_MSTIM_COOLDOWN || /^true$/i.test(String(process.env.DEBUG_PIXEL_COOLDOWN || "").trim());
 /** До какого момента (epoch ms) действует режим; 0 — выкл. */
 let mstimAltSeasonBurstUntilMs = 0;
 
@@ -1137,9 +1139,28 @@ function pickAutoTeamColor(name, emoji, salt) {
   return TEAM_CREATE_COLORS[idx];
 }
 
-/** Стартовая база команды на карте (только суша). */
-const TEAM_SPAWN_SIZE = 6;
+/** Макс. сторона стартовой базы команды на карте; при нехватке места подбирается 5×5 … 1×1. */
+const TEAM_SPAWN_MAX = 6;
+const TEAM_SPAWN_MIN = 1;
+const TEAM_SPAWN_SIZE = TEAM_SPAWN_MAX;
 const TEAM_SPAWN_GAP = 1;
+
+function clampTeamMainSpawnSide(raw) {
+  const s = Number(raw);
+  if (!Number.isFinite(s) || s < 1) return TEAM_SPAWN_MAX;
+  return Math.min(TEAM_SPAWN_MAX, Math.max(TEAM_SPAWN_MIN, s | 0));
+}
+
+function teamMainSpawnSide(t) {
+  if (!t) return TEAM_SPAWN_MAX;
+  return clampTeamMainSpawnSide(t.spawnS);
+}
+
+function teamSpawnRectOutOfBounds(t) {
+  if (!t || typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") return true;
+  const s = teamMainSpawnSide(t);
+  return t.spawnX0 < 0 || t.spawnY0 < 0 || t.spawnX0 + s > gridW || t.spawnY0 + s > gridH;
+}
 
 /** Премиум «военная база»: макс. на команду, кулдаун между развёртываниями. */
 const MILITARY_BASE_COOLDOWN_MS = 120_000;
@@ -1175,10 +1196,12 @@ function pruneExpiredManualBattleSlots(nowMs = Date.now()) {
 
 function getActiveManualBattleSlots(nowMs = Date.now()) {
   pruneExpiredManualBattleSlots(nowMs);
+  const cmp =
+    gamePaused && (pauseWallStartedAt | 0) > 0 ? pauseWallStartedAt | 0 : nowMs | 0;
   /** @type {{ cmd: string, untilMs: number }[]} */
   const out = [];
   for (const [cmd, untilMs] of manualBattleSlotsByCmd) {
-    if (typeof untilMs === "number" && untilMs > nowMs) {
+    if (typeof untilMs === "number" && untilMs > cmp) {
       out.push({ cmd: normalizeManualBattleCmdKey(cmd), untilMs });
     }
   }
@@ -1243,7 +1266,7 @@ function broadcastManualBattleSyncAndStats() {
     type: "manualBattleSync",
     slots: Object.fromEntries(manualBattleSlotsByCmd),
   });
-  const nowSync = Date.now();
+  const nowSync = effectiveGameClockMs();
   broadcast({ type: "globalEvent", globalEvent: getGlobalEventPayload(nowSync) });
   scheduleStatsBroadcast();
 }
@@ -1319,9 +1342,9 @@ function buildSynergyMultByTeamMap(snap) {
   return m;
 }
 
-function getGlobalEventPayload(nowMs = Date.now()) {
-  const nowCmp = Number.isFinite(nowMs) ? nowMs : Date.now();
-  const mstimOn = authoritativeMstimGlobalSpeedActiveAt(nowCmp);
+function getGlobalEventPayload(nowMs) {
+  const nowCmp = Number.isFinite(nowMs) ? nowMs : effectiveGameClockMs();
+  const mstimOn = globalSpeedMstimActive();
   const arUntil = mstimOn ? clampPositiveEpochMs(mstimAltSeasonBurstUntilMs) : 0;
   const ctx = getBattleEventsContext(nowCmp);
   if (!ctx) {
@@ -1376,8 +1399,9 @@ function buildBattleProtectedMask() {
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-      for (let yy = t.spawnY0; yy < t.spawnY0 + TEAM_SPAWN_SIZE; yy++) {
-        for (let xx = t.spawnX0; xx < t.spawnX0 + TEAM_SPAWN_SIZE; xx++) {
+      const S = teamMainSpawnSide(t);
+      for (let yy = t.spawnY0; yy < t.spawnY0 + S; yy++) {
+        for (let xx = t.spawnX0; xx < t.spawnX0 + S; xx++) {
           if (xx >= 0 && xx < gridW && yy >= 0 && yy < gridH) mask[yy * gridW + xx] = 1;
         }
       }
@@ -1665,7 +1689,8 @@ function allSpawnLikeRectsForConflict() {
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-      out.push({ x0: t.spawnX0, y0: t.spawnY0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE });
+      const S = teamMainSpawnSide(t);
+      out.push({ x0: t.spawnX0, y0: t.spawnY0, w: S, h: S });
     }
     for (const o of getTeamMilitaryOutposts(t)) {
       out.push({ x0: o.x0, y0: o.y0, w: MILITARY_OUTPOST_SIZE, h: MILITARY_OUTPOST_SIZE });
@@ -1684,7 +1709,7 @@ function teamsForMeta() {
     eliminated: !!t.eliminated,
     spawn:
       !t.solo && typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number"
-        ? { x0: t.spawnX0, y0: t.spawnY0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE }
+        ? { x0: t.spawnX0, y0: t.spawnY0, w: teamMainSpawnSide(t), h: teamMainSpawnSide(t) }
         : null,
     militaryOutposts: !t.solo
       ? getTeamMilitaryOutposts(t).map((o) => ({
@@ -1704,7 +1729,7 @@ function teamsForMeta() {
 
 const DYNAMIC_TEAMS_PATH = path.join(DATA_DIR, "dynamic-teams.json");
 
-/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, eliminated?: boolean, createdByPlayerKey?: string, militaryOutposts?: { x0: number, y0: number }[], lastMilitaryBaseAt?: number }[]} */
+/** @type {{ id: number, name: string, emoji: string, color: string, editToken?: string, solo?: boolean, soloResumeToken?: string, spawnX0?: number, spawnY0?: number, spawnS?: number, eliminated?: boolean, createdByPlayerKey?: string, militaryOutposts?: { x0: number, y0: number }[], lastMilitaryBaseAt?: number }[]} */
 let dynamicTeams = [];
 let nextTeamId = 1;
 
@@ -1733,6 +1758,7 @@ function loadDynamicTeams() {
           color,
           solo: !!t.solo,
           eliminated: !!t.eliminated,
+          spawnS: clampTeamMainSpawnSide(t.spawnS),
           militaryOutposts: mo,
           lastMilitaryBaseAt: Number.isFinite(lastMb) && lastMb > 0 ? lastMb : 0,
         };
@@ -2436,42 +2462,36 @@ function effectiveGameClockMs() {
 }
 
 /**
- * Единый авторитетный признак «Мстим / speed» для кулдауна пикселя.
- * @param {number} effectiveNowMs тот же «игровой now», что и в проверке `lastActionAt + cd` (см. effectiveGameClockMs()).
+ * Глобальный «Мстим / speed» (бот): `mstimAltSeasonBurstUntilMs` — wall epoch окончания окна.
+ * На паузе окно «заморожено»: активно, если к моменту pause оно ещё не истекло (см. unpause — until сдвигается).
  */
-function authoritativeMstimGlobalSpeedActiveAt(effectiveNowMs) {
+function globalSpeedMstimActive() {
   const until = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
   if (until <= 0) return false;
   if (gamePaused && (pauseWallStartedAt | 0) > 0) {
     return until > (pauseWallStartedAt | 0);
   }
-  const t = Number(effectiveNowMs);
-  const nowCmp = Number.isFinite(t) ? t : Date.now();
-  return until > nowCmp;
+  return until > Date.now();
 }
 
-/** Окно «Мстим за Альт Сезон»: для подписей/HUD без явного now — текущие игровые часы. */
+/** @deprecated используйте globalSpeedMstimActive */
 function isMstimAltSeasonBurstActive() {
-  return authoritativeMstimGlobalSpeedActiveAt(effectiveGameClockMs());
+  return globalSpeedMstimActive();
 }
 
-function effectivePixelCooldownMs(u, teamFx, st, now) {
-  return resolveAuthoritativePixelCooldownMs(authoritativeMstimGlobalSpeedActiveAt(now), u, teamFx, st, now);
+/** Единый расчёт cd (мс) для wallet и пикселя; wallNow = Date.now(). */
+function effectivePixelCooldownMs(u, teamFx, st, wallNow) {
+  return getAuthoritativePixelCooldownMs({
+    globalSpeedActive: globalSpeedMstimActive(),
+    user: u,
+    teamFx,
+    stage: st,
+    nowMs: wallNow,
+  });
 }
 
-/**
- * Время для проверки `lastActionAt + cd` и записи `lastActionAt` после пикселя.
- * Режим «Мстим/speed» задаётся в wall-clock (`untilMs`); при глобальной паузе
- * `effectiveGameClockMs()` застывает — без Date.now() реальный серверный интервал 1 с не наступал бы.
- */
-function pixelActionCooldownNowMs() {
-  const gameNow = effectiveGameClockMs();
-  if (authoritativeMstimGlobalSpeedActiveAt(gameNow)) return Date.now();
-  return gameNow;
-}
-
-function effectiveRecoverySecForWallet(u, teamFx, now) {
-  return resolveAuthoritativeRecoverySec(authoritativeMstimGlobalSpeedActiveAt(now), u, teamFx, now);
+function effectiveRecoverySecForWallet(u, teamFx, wallNow) {
+  return resolveAuthoritativeRecoverySec(globalSpeedMstimActive(), u, teamFx, wallNow);
 }
 
 function getWarmupDurationMs() {
@@ -2509,7 +2529,7 @@ function isWarmupPhaseNow() {
   if (gameFinished) return false;
   if (roundIndex === 0 && !roundTimerStarted) return false;
   if (gamePaused) return pauseCapturedWarmup;
-  return Date.now() < getPlayStartMs();
+  return effectiveGameClockMs() < getPlayStartMs();
 }
 
 function clearTiebreakSnapshots() {
@@ -2556,16 +2576,17 @@ function resetMassRoundBattlefieldAfterWarmup() {
   for (const t of dynamicTeams) {
     if (t.solo) continue;
     if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") {
-      const sp = findValidSpawnRect6();
+      const sp = findValidSpawnRect();
       if (!sp) {
-        console.warn("[reset-after-warmup] нет места 6×6 для команды", t.id, t.name);
+        console.warn("[reset-after-warmup] нет места под стартовую базу для команды", t.id, t.name);
         continue;
       }
       t.spawnX0 = sp.x0;
       t.spawnY0 = sp.y0;
+      t.spawnS = sp.s;
       teamsChanged = true;
     }
-    fillTeamSpawnAreaSilent(t.id, t.spawnX0, t.spawnY0, "");
+    fillTeamSpawnAreaSilent(t.id, t.spawnX0, t.spawnY0, "", teamMainSpawnSide(t));
   }
   if (teamsChanged) saveDynamicTeams();
 
@@ -2617,7 +2638,7 @@ function updateTiebreakFromStatsPayload(stats) {
     const peak = teamPeakScoreForTiebreak.get(tid) || 0;
     if (sc > peak) {
       teamPeakScoreForTiebreak.set(tid, sc);
-      teamFirstHitPeakAt.set(tid, Date.now());
+      teamFirstHitPeakAt.set(tid, effectiveGameClockMs());
     }
   }
 }
@@ -2832,14 +2853,8 @@ function advanceTerritoryIsolationState() {
   /** @type {Map<string, { teamId: number, cells: Set<string>, deadlineMs: number, groupId: string }>} */
   let carry = territoryIsolationByGroupId;
   for (let iter = 0; iter < 96; iter++) {
-    const now = Date.now();
-    const isolatedGroups = computeIsolatedTerritoryGroups(
-      pixels,
-      dynamicTeams,
-      pixelTeam,
-      flagCellFromSpawn,
-      TEAM_SPAWN_SIZE
-    );
+    const now = effectiveGameClockMs();
+    const isolatedGroups = computeIsolatedTerritoryGroups(pixels, dynamicTeams, pixelTeam, flagCellFromSpawn);
     /** @type {{ groupId: string, teamId: number, cells: Set<string>, deadlineMs: number }[]} */
     const meta = [];
     for (let i = 0; i < isolatedGroups.length; i++) {
@@ -3212,16 +3227,15 @@ async function buildWalletPayload(ws) {
   const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
   const u = await walletStore.getOrCreateUser(pk);
   const nowGame = effectiveGameClockMs();
-  const nowCd = pixelActionCooldownNowMs();
   const st = tournamentStage(roundIndex, gameFinished);
   const tid = ws.teamId | 0;
   const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const devUnl = pk && isDevUnlimitedWallet(pk);
   const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
   /* Безлимит только баланс/списания — интервал пикселя и баффы как у всех */
-  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, nowCd) : BASE_ACTION_COOLDOWN_SEC * 1000;
+  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, nowGame) : BASE_ACTION_COOLDOWN_SEC * 1000;
   const ref = u.invitedByPlayerKey ? sanitizePlayerKey(u.invitedByPlayerKey) : "";
-  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, nowCd) : BASE_ACTION_COOLDOWN_SEC;
+  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, nowGame) : BASE_ACTION_COOLDOWN_SEC;
   const farmQ5 = tid && quantumFarmLayouts.length ? getQuantumFarmIncomeQuantsForTeam(tid) : 0;
   const zoneQ5 = tid ? getBattleEventZoneQuantumQuantsForTeam(tid, nowGame) : 0;
   return {
@@ -3544,7 +3558,7 @@ async function runQuantumFarmIncomeScheduledPass() {
     scheduleQuantumFarmIncomeDelayed(QUANTUM_FARM_TICK_MS);
     return;
   }
-  const now = Date.now();
+  const now = effectiveGameClockMs();
   const force = quantumFarmIncomeForceTickPending;
   const dueByTime = now - quantumFarmIncomeLastCompletedMs >= QUANTUM_FARM_TICK_MS - 50;
   const due = force || dueByTime;
@@ -3557,7 +3571,7 @@ async function runQuantumFarmIncomeScheduledPass() {
   quantumFarmIncomeInFlight = true;
   try {
     await tickQuantumFarmIncome();
-    quantumFarmIncomeLastCompletedMs = Date.now();
+    quantumFarmIncomeLastCompletedMs = effectiveGameClockMs();
   } finally {
     quantumFarmIncomeInFlight = false;
   }
@@ -4107,15 +4121,11 @@ function applyClusterGameReplication(msg) {
   }
 }
 
-/** Клетка внутри прямоугольника стартовой базы команды (6×6), даже без пикселя в `pixels`. */
+/** Клетка внутри прямоугольника стартовой базы команды, даже без пикселя в `pixels`. */
 function cellInsideTeamSpawnRect(x, y, t) {
   if (!t || typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") return false;
-  return (
-    x >= t.spawnX0 &&
-    x < t.spawnX0 + TEAM_SPAWN_SIZE &&
-    y >= t.spawnY0 &&
-    y < t.spawnY0 + TEAM_SPAWN_SIZE
-  );
+  const S = teamMainSpawnSide(t);
+  return x >= t.spawnX0 && x < t.spawnX0 + S && y >= t.spawnY0 && y < t.spawnY0 + S;
 }
 
 /** Старт BFS «связь с базой»: все закрашенные клетки команды внутри прямоугольника базы 6×6. */
@@ -4140,7 +4150,7 @@ function addBfsSeedsTouchingTeamBaseRectsInVertices(vertices, t, out, stack) {
   /** @type {{ ox0: number, oy0: number, S: number }[]} */
   const rects = [];
   if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-    rects.push({ ox0: t.spawnX0 | 0, oy0: t.spawnY0 | 0, S: TEAM_SPAWN_SIZE });
+    rects.push({ ox0: t.spawnX0 | 0, oy0: t.spawnY0 | 0, S: teamMainSpawnSide(t) });
   }
   for (const o of getTeamMilitaryOutposts(t)) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
@@ -4188,7 +4198,7 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
   const stack = [];
   const neighBuf = [];
   if (hasMain) {
-    addBfsSeedsFromRectInVertices(vertices, t.spawnX0, t.spawnY0, TEAM_SPAWN_SIZE, out, stack);
+    addBfsSeedsFromRectInVertices(vertices, t.spawnX0, t.spawnY0, teamMainSpawnSide(t), out, stack);
   }
   for (const o of getTeamMilitaryOutposts(t)) {
     if (!o || typeof o.x0 !== "number" || typeof o.y0 !== "number") continue;
@@ -4281,7 +4291,7 @@ function resolveFlagBaseAtCell(x, y) {
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-      const fc = flagCellFromSpawn(t.spawnX0, t.spawnY0);
+      const fc = flagCellFromSpawn(t.spawnX0, t.spawnY0, teamMainSpawnSide(t));
       if (fc.x === xi && fc.y === yi) return { kind: "main", team: t };
     }
     for (const o of getTeamMilitaryOutposts(t)) {
@@ -4361,12 +4371,12 @@ function pushOneFlagSnapshotRow(out, now, teamId, fx, fy, st, clientKey, militar
 
 function buildFlagsSnapshot() {
   const out = [];
-  const now = Date.now();
+  const now = effectiveGameClockMs();
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     const tid = Number(t.id) | 0;
     if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-      const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0);
+      const { x, y } = flagCellFromSpawn(t.spawnX0, t.spawnY0, teamMainSpawnSide(t));
       const st = flagCaptureByDefender.get(tid);
       pushOneFlagSnapshotRow(out, now, tid, x, y, st, `b:${tid}`, null);
     }
@@ -4714,7 +4724,7 @@ function executeFlagCaptureSuccess(attackerId, defenderId) {
 
   const { x: gx, y: gy } =
     typeof dtDef.spawnX0 === "number" && typeof dtDef.spawnY0 === "number"
-      ? flagCellFromSpawn(dtDef.spawnX0, dtDef.spawnY0)
+      ? flagCellFromSpawn(dtDef.spawnX0, dtDef.spawnY0, teamMainSpawnSide(dtDef))
       : { x: 0, y: 0 };
 
   clearFlagCaptureStateForDefender(defenderId);
@@ -4920,7 +4930,7 @@ function validateMilitaryBasePlacement(teamId, x0, y0) {
     }
   }
   if (typeof t.spawnX0 === "number" && typeof t.spawnY0 === "number") {
-    const gOwn = rectChebyshevEdgeGap(x0, y0, M, M, t.spawnX0, t.spawnY0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE);
+    const gOwn = rectChebyshevEdgeGap(x0, y0, M, M, t.spawnX0, t.spawnY0, teamMainSpawnSide(t), teamMainSpawnSide(t));
     if (gOwn < MILITARY_MIN_EDGE_GAP_OWN_MAIN) {
       return { ok: false, reason: "military_too_close_own_main" };
     }
@@ -4929,7 +4939,7 @@ function validateMilitaryBasePlacement(teamId, x0, y0) {
     if (ot.solo || ot.eliminated) continue;
     if ((ot.id | 0) === tid) continue;
     if (typeof ot.spawnX0 !== "number" || typeof ot.spawnY0 !== "number") continue;
-    const gEn = rectChebyshevEdgeGap(x0, y0, M, M, ot.spawnX0, ot.spawnY0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE);
+    const gEn = rectChebyshevEdgeGap(x0, y0, M, M, ot.spawnX0, ot.spawnY0, teamMainSpawnSide(ot), teamMainSpawnSide(ot));
     if (gEn < MILITARY_MIN_EDGE_GAP_ENEMY_MAIN) {
       return { ok: false, reason: "military_too_close_enemy_main" };
     }
@@ -4960,21 +4970,25 @@ function mapCenterCellCoords() {
   return { cx: (gridW - 1) / 2, cy: (gridH - 1) / 2 };
 }
 
-/** Геометрический центр прямоугольника базы 6×6. */
-function teamSpawnRectCenterXY(x0, y0) {
-  return { x: x0 + TEAM_SPAWN_SIZE / 2, y: y0 + TEAM_SPAWN_SIZE / 2 };
+/** Геометрический центр квадратной базы стороны S. */
+function teamSpawnRectCenterXY(x0, y0, S) {
+  const s = S | 0;
+  return { x: x0 + s / 2, y: y0 + s / 2 };
 }
 
 /**
  * Макс. расстояние от центра карты до углов области допустимых центров базы
  * (кольцо спавна задаётся как доля этого радиуса).
+ * @param {number} S сторона кандидата размещения
  */
-function maxTeamSpawnCenterRadiusFromMapCenter() {
+function maxTeamSpawnCenterRadiusFromMapCenter(S) {
+  const s = S | 0;
+  const half = s * 0.5;
   const { cx, cy } = mapCenterCellCoords();
-  const xLo = TEAM_SPAWN_SIZE / 2;
-  const xHi = gridW - TEAM_SPAWN_SIZE / 2;
-  const yLo = TEAM_SPAWN_SIZE / 2;
-  const yHi = gridH - TEAM_SPAWN_SIZE / 2;
+  const xLo = half;
+  const xHi = gridW - half;
+  const yLo = half;
+  const yHi = gridH - half;
   const corners = [
     [xLo, yLo],
     [xHi, yLo],
@@ -4998,7 +5012,7 @@ function existingTeamSpawnAnglesRad() {
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
     if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") continue;
-    const c = teamSpawnRectCenterXY(t.spawnX0, t.spawnY0);
+    const c = teamSpawnRectCenterXY(t.spawnX0, t.spawnY0, teamMainSpawnSide(t));
     out.push(Math.atan2(c.y - cy, c.x - cx));
   }
   return out;
@@ -5033,11 +5047,12 @@ function pickBalancedTeamSpawnAngleRad(seed) {
   return bestMid;
 }
 
-function spawnCandidatePassesConflict(x0, y0, others) {
-  if (!rectAllLandSpan(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) return false;
-  if (!rectFreeOfPixels(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE)) return false;
+function spawnCandidatePassesConflict(x0, y0, S, others) {
+  const s = S | 0;
+  if (!rectAllLandSpan(x0, y0, s, s)) return false;
+  if (!rectFreeOfPixels(x0, y0, s, s)) return false;
   for (const o of others) {
-    if (spawnRectsConflictSized(x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, o.x0, o.y0, o.w, o.h)) {
+    if (spawnRectsConflictSized(x0, y0, s, s, o.x0, o.y0, o.w, o.h)) {
       return false;
     }
   }
@@ -5070,13 +5085,13 @@ function teamSpawnCenterInRing(d, rInner, rOuter) {
 }
 
 /**
- * Подобрать левый верх 6×6: только периферийное кольцо (не центр), ~равный r и раскладка по углам.
- * Запасные проходы расширяют кольцо к краю карты, но не разрешают спавн в середине.
+ * Подобрать левый верх квадрата S×S: периферийное кольцо (не центр), ~равный r и раскладка по углам.
  */
-function findValidSpawnRect6() {
-  if (!landGrid) return null;
-  const maxX = gridW - TEAM_SPAWN_SIZE;
-  const maxY = gridH - TEAM_SPAWN_SIZE;
+function findValidSpawnRectForSize(S) {
+  const s = S | 0;
+  if (!landGrid || s < 1) return null;
+  const maxX = gridW - s;
+  const maxY = gridH - s;
   if (maxX < 0 || maxY < 0) return null;
   const others = allSpawnLikeRectsForConflict();
   let seed = (Date.now() ^ (nextTeamId * 0x9e3779b9)) >>> 0;
@@ -5086,7 +5101,7 @@ function findValidSpawnRect6() {
   };
 
   const { cx: mapCx, cy: mapCy } = mapCenterCellCoords();
-  let rMaxGeom = maxTeamSpawnCenterRadiusFromMapCenter();
+  let rMaxGeom = maxTeamSpawnCenterRadiusFromMapCenter(s);
   if (!(rMaxGeom > 1e-6)) rMaxGeom = 1;
 
   const baseAngle = pickBalancedTeamSpawnAngleRad(seed ^ 0xdeadbeef);
@@ -5103,55 +5118,67 @@ function findValidSpawnRect6() {
       const r = rInner + rand() * (rOuter - rInner);
       const tcx = mapCx + Math.cos(theta) * r;
       const tcy = mapCy + Math.sin(theta) * r;
-      let x0 = Math.round(tcx - TEAM_SPAWN_SIZE / 2);
-      let y0 = Math.round(tcy - TEAM_SPAWN_SIZE / 2);
+      let x0 = Math.round(tcx - s / 2);
+      let y0 = Math.round(tcy - s / 2);
       if (x0 < 0) x0 = 0;
       if (y0 < 0) y0 = 0;
       if (x0 > maxX) x0 = maxX;
       if (y0 > maxY) y0 = maxY;
-      const c = teamSpawnRectCenterXY(x0, y0);
+      const c = teamSpawnRectCenterXY(x0, y0, s);
       const d = Math.hypot(c.x - mapCx, c.y - mapCy);
       if (!teamSpawnCenterInRing(d, rInner, rOuter)) continue;
-      if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+      if (spawnCandidatePassesConflict(x0, y0, s, others)) return { x0, y0 };
     }
 
     for (let attempt = 0; attempt < 480; attempt++) {
       const x0 = (rand() * (maxX + 1)) | 0;
       const y0 = (rand() * (maxY + 1)) | 0;
-      const c = teamSpawnRectCenterXY(x0, y0);
+      const c = teamSpawnRectCenterXY(x0, y0, s);
       const d = Math.hypot(c.x - mapCx, c.y - mapCy);
       if (!teamSpawnCenterInRing(d, rInner, rOuter)) continue;
-      if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+      if (spawnCandidatePassesConflict(x0, y0, s, others)) return { x0, y0 };
     }
   }
 
   const { rInner: rInLast, rOuter: rOutLast } = teamSpawnRingRadii(rMaxGeom, TEAM_SPAWN_RING_PRESETS.length - 1);
   for (let y0 = 0; y0 <= maxY; y0++) {
     for (let x0 = 0; x0 <= maxX; x0++) {
-      const c = teamSpawnRectCenterXY(x0, y0);
+      const c = teamSpawnRectCenterXY(x0, y0, s);
       const d = Math.hypot(c.x - mapCx, c.y - mapCy);
       if (!teamSpawnCenterInRing(d, rInLast, rOutLast)) continue;
-      if (spawnCandidatePassesConflict(x0, y0, others)) return { x0, y0 };
+      if (spawnCandidatePassesConflict(x0, y0, s, others)) return { x0, y0 };
     }
   }
   return null;
 }
 
-/** Залить 6×6 базу без WS-сообщений (для массового сброса карты). */
-function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk) {
+/** Сначала 6×6, при нехватке места — меньше, минимум 1×1. */
+function findValidSpawnRect() {
+  if (!landGrid) return null;
+  for (let s = TEAM_SPAWN_MAX; s >= TEAM_SPAWN_MIN; s--) {
+    const spot = findValidSpawnRectForSize(s);
+    if (spot) return { x0: spot.x0, y0: spot.y0, s };
+  }
+  return null;
+}
+
+/** Залить главную базу без WS-сообщений (для массового сброса карты). */
+function fillTeamSpawnAreaSilent(teamId, x0, y0, ownerPk, spawnSide) {
+  const ss = spawnSide == null ? TEAM_SPAWN_MAX : clampTeamMainSpawnSide(spawnSide);
   invalidateTeamScoresAggCache();
   const opk = String(ownerPk || "").slice(0, 128);
-  for (let y = y0; y < y0 + TEAM_SPAWN_SIZE; y++) {
-    for (let x = x0; x < x0 + TEAM_SPAWN_SIZE; x++) {
+  for (let y = y0; y < y0 + ss; y++) {
+    for (let x = x0; x < x0 + ss; x++) {
       if (!cellAllowsPixelPlacement(x, y)) continue;
       pixels.set(`${x},${y}`, { teamId, ownerPlayerKey: opk, shieldedUntil: 0 });
     }
   }
 }
 
-/** Закрасить 6×6 без afterTerritoryMutation (пакетное восстановление плацдармов). */
-function paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk) {
-  paintRectTeamPixels(teamId, x0, y0, TEAM_SPAWN_SIZE, TEAM_SPAWN_SIZE, ownerPk);
+/** Закрасить главную базу без afterTerritoryMutation (пакетное восстановление плацдармов). */
+function paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk, spawnSide) {
+  const ss = spawnSide == null ? TEAM_SPAWN_MAX : clampTeamMainSpawnSide(spawnSide);
+  paintRectTeamPixels(teamId, x0, y0, ss, ss, ownerPk);
 }
 
 /** Закрасить прямоугольник w×h (плацдарм 2×2 и т.п.). */
@@ -5170,16 +5197,17 @@ function paintRectTeamPixels(teamId, x0, y0, w, h, ownerPk) {
   }
 }
 
-function paintTeamSpawnArea(teamId, x0, y0, ownerPk) {
+function paintTeamSpawnArea(teamId, x0, y0, ownerPk, spawnSide) {
   invalidateTeamScoresAggCache();
-  paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk);
+  paintTeamSpawnCellsOnly(teamId, x0, y0, ownerPk, spawnSide);
   afterTerritoryMutation();
 }
 
 function teamSpawnMissingPixels(t) {
   if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") return true;
-  for (let y = t.spawnY0; y < t.spawnY0 + TEAM_SPAWN_SIZE; y++) {
-    for (let x = t.spawnX0; x < t.spawnX0 + TEAM_SPAWN_SIZE; x++) {
+  const S = teamMainSpawnSide(t);
+  for (let y = t.spawnY0; y < t.spawnY0 + S; y++) {
+    for (let x = t.spawnX0; x < t.spawnX0 + S; x++) {
       const p = pixels.get(`${x},${y}`);
       if (!p || pixelTeam(p) !== (t.id | 0)) return true;
     }
@@ -5187,24 +5215,27 @@ function teamSpawnMissingPixels(t) {
   return false;
 }
 
-/** Миграция и восстановление 6×6 баз после загрузки команд / сетки. */
+/** Миграция и восстановление главных баз после загрузки команд / сетки. */
 function ensureAllTeamSpawnsAfterLoad() {
   if (!landGrid) return;
   let changed = false;
   for (const t of dynamicTeams) {
     if (t.solo || t.eliminated) continue;
-    if (typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number") {
-      const sp = findValidSpawnRect6();
+    const needSpawn =
+      typeof t.spawnX0 !== "number" || typeof t.spawnY0 !== "number" || teamSpawnRectOutOfBounds(t);
+    if (needSpawn) {
+      const sp = findValidSpawnRect();
       if (!sp) {
-        console.warn("[spawn] нет места 6×6 для команды", t.id, t.name);
+        console.warn("[spawn] нет места под стартовую базу для команды", t.id, t.name);
         continue;
       }
       t.spawnX0 = sp.x0;
       t.spawnY0 = sp.y0;
+      t.spawnS = sp.s;
       changed = true;
-      paintTeamSpawnArea(t.id, sp.x0, sp.y0, "");
+      paintTeamSpawnArea(t.id, sp.x0, sp.y0, "", sp.s);
     } else if (teamSpawnMissingPixels(t)) {
-      paintTeamSpawnArea(t.id, t.spawnX0, t.spawnY0, "");
+      paintTeamSpawnArea(t.id, t.spawnX0, t.spawnY0, "", teamMainSpawnSide(t));
       changed = true;
     }
   }
@@ -5236,7 +5267,7 @@ function ensureMilitaryOutpostPixelsAfterLoad() {
       }
       if (need) {
         any = true;
-        paintTeamSpawnCellsOnly(tid, x0, y0, "");
+        paintTeamSpawnCellsOnly(tid, x0, y0, "", MILITARY_OUTPOST_SIZE);
       }
     }
   }
@@ -5301,7 +5332,7 @@ function afterTerritoryMutation() {
     const st = buildStatsPayload();
     updateTiebreakFromStatsPayload(st);
     checkDuelWinByElimination(st);
-    scanMilitaryOutpostsVacancyAndExpire(Date.now()); /* no-op: плацдарм без автотаймера */
+    scanMilitaryOutpostsVacancyAndExpire(effectiveGameClockMs()); /* no-op: плацдарм без автотаймера */
     schedulePixelsSnapshotSave();
   }
   /* Всегда: иначе при паузе / раннем return кэш «связь с базой» устаревает — нельзя ставить пиксели от передовой базы. */
@@ -5329,7 +5360,7 @@ function eliminateTeamByTerritoryLoss(teamId) {
   clearFlagCaptureStateForDefender(teamId);
   removeTerritoryIsolationGroupsForTeam(teamId);
   if (isClusterLeader() && !gameFinished) {
-    broadcastTerritoryIsolationSyncIfChanged(Date.now());
+    broadcastTerritoryIsolationSyncIfChanged(effectiveGameClockMs());
   }
   dt.eliminated = true;
   dt.militaryOutposts = [];
@@ -5337,11 +5368,13 @@ function eliminateTeamByTerritoryLoss(teamId) {
   let destroyGx = 0;
   let destroyGy = 0;
   if (typeof dt.spawnX0 === "number" && typeof dt.spawnY0 === "number") {
-    destroyGx = (dt.spawnX0 + TEAM_SPAWN_SIZE / 2) | 0;
-    destroyGy = (dt.spawnY0 + TEAM_SPAWN_SIZE / 2) | 0;
+    const fc = flagCellFromSpawn(dt.spawnX0, dt.spawnY0, teamMainSpawnSide(dt));
+    destroyGx = fc.x | 0;
+    destroyGy = fc.y | 0;
   }
   delete dt.spawnX0;
   delete dt.spawnY0;
+  delete dt.spawnS;
   saveDynamicTeams();
   teamManualScoreBonus.delete(teamId);
   teamPeakScoreForTiebreak.delete(teamId);
@@ -6586,6 +6619,66 @@ function shiftMstimAfterPause(d, pauseStart) {
 }
 
 /**
+ * Сдвиг всех «игровых» epoch-таймстампов на длительность паузы (только лидер / одиночный процесс).
+ * Чтобы после unpause кулдауны, регент баз, изоляция и баффы не «прожглись» за время паузы.
+ */
+async function shiftGameWorldAfterUnpause(d, pauseStart) {
+  const ps = pauseStart | 0;
+  const dd = d | 0;
+  const MIN_START = 946684800000;
+  if (dd < 1 || ps < MIN_START) return;
+
+  const bumpAfter = (t) => {
+    const v = Number(t);
+    return Number.isFinite(v) && v > ps ? v + dd : v;
+  };
+
+  const adapter = walletStore;
+  const inner = adapter && adapter.inner ? adapter.inner : adapter;
+  if (inner && inner.users && typeof inner.users === "object") {
+    for (const k of Object.keys(inner.users)) {
+      const u = inner.users[k];
+      if (!u || typeof u !== "object") continue;
+      const la = Number(u.lastActionAt);
+      if (Number.isFinite(la) && la > 0) u.lastActionAt = la + dd;
+      u.lastZoneCaptureAt = bumpAfter(u.lastZoneCaptureAt);
+      u.lastMassCaptureAt = bumpAfter(u.lastMassCaptureAt);
+      u.lastZone12CaptureAt = bumpAfter(u.lastZone12CaptureAt);
+      u.personalRecoveryUntil = bumpAfter(u.personalRecoveryUntil);
+    }
+    if (typeof inner.save === "function") inner.save();
+  }
+
+  for (const fx of teamEffects.values()) {
+    fx.teamRecoveryUntil = bumpAfter(fx.teamRecoveryUntil);
+  }
+
+  const bumpFlagSt = (st) => {
+    if (!st) return;
+    const lh = toEpochMsSafe(st.lastHitAt);
+    if (Number.isFinite(lh) && lh >= FLAG_CAPTURE_MIN_VALID_LAST_HIT_MS) {
+      st.lastHitAt = lh + dd;
+    }
+    const br = st._lastRegenBroadcastAt;
+    if (typeof br === "number" && Number.isFinite(br) && br > ps) st._lastRegenBroadcastAt = br + dd;
+  };
+  for (const st of flagCaptureByDefender.values()) bumpFlagSt(st);
+  for (const st of militaryFlagCaptureByKey.values()) bumpFlagSt(st);
+
+  for (const g of territoryIsolationByGroupId.values()) {
+    if (typeof g.deadlineMs === "number" && g.deadlineMs > ps) g.deadlineMs += dd;
+  }
+
+  quantumFarmIncomeLastCompletedMs += dd;
+
+  invalidateTeamScoresAggCache();
+  battleSnapCacheKey = "";
+  battleSnapCacheSnap = null;
+  battleClientPayloadCacheKey = "";
+  battleClientPayloadCache = null;
+}
+
+/**
  * @param {number} telegramUserId
  * @returns {{ ok: true } | { ok: false; reason: string }}
  */
@@ -6633,7 +6726,7 @@ function applyAdminPause(telegramUserId) {
  * @param {number} telegramUserId
  * @returns {{ ok: true } | { ok: false; reason: string }}
  */
-function applyAdminUnpause(telegramUserId) {
+async function applyAdminUnpause(telegramUserId) {
   if (!isClusterLeader()) return { ok: false, reason: "not_leader" };
   if (!gamePaused) return { ok: false, reason: "not_paused" };
   const start = pauseWallStartedAt | 0;
@@ -6650,6 +6743,7 @@ function applyAdminUnpause(telegramUserId) {
   }
   shiftManualBattleSlotsAfterPause(d, start);
   shiftMstimAfterPause(d, start);
+  await shiftGameWorldAfterUnpause(d, start);
   gamePaused = false;
   pauseWallStartedAt = 0;
   pauseCapturedWarmup = false;
@@ -6671,6 +6765,8 @@ function applyAdminUnpause(telegramUserId) {
   broadcast({ type: "mstimAltSeasonSync", untilMs: mstimAltSeasonBurstUntilMs });
   broadcastManualBattleSyncAndStats();
   schedulePlayStartBroadcast();
+  broadcastStatsImmediate();
+  void broadcastWalletPayloadToAllClients();
   void Promise.all(
     wss ? [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c)) : []
   );
@@ -6689,7 +6785,12 @@ function blockPrePlayPurchases(ws) {
 
 function assertCanPlay(ws) {
   if (gamePaused) {
-    safeSend(ws, { type: "playRejected", reason: "paused" });
+    safeSend(ws, {
+      type: "playRejected",
+      reason: "paused",
+      pauseWallStartedAt: pauseWallStartedAt | 0,
+      pauseCapturedWarmup: !!pauseCapturedWarmup,
+    });
     return false;
   }
   if (gameFinished) {
@@ -6739,6 +6840,7 @@ async function sendConnectionMeta(ws) {
     warmupMs: getWarmupDurationMs(),
     gamePaused: !!gamePaused,
     pauseWallStartedAt: gamePaused ? pauseWallStartedAt | 0 : 0,
+    pauseCapturedWarmup: gamePaused ? !!pauseCapturedWarmup : false,
     lobbyBeforeGo: !!(WAIT_FOR_TELEGRAM_GO && roundIndex === 0 && !roundTimerStarted),
     eligible: !!ws.eligible,
     gameFinished: !!gameFinished,
@@ -7161,8 +7263,8 @@ function maybeEndRound() {
 
 /* Было 30 с — при тестовых раундах по 30 с конец этапа запаздывал почти на минуту. */
 setInterval(() => maybeEndRound(), 5000);
-setInterval(() => tickFlagBaseRegen(Date.now()), 500);
-setInterval(() => tickBattleEvents(Date.now()), 1000);
+setInterval(() => tickFlagBaseRegen(effectiveGameClockMs()), 500);
+setInterval(() => tickBattleEvents(effectiveGameClockMs()), 1000);
 setInterval(() => {
   if (gameFinished || gamePaused) return;
   if (REDIS_URL && !isClusterLeader()) return;
@@ -7258,6 +7360,28 @@ wss.on("connection", (ws, req) => {
         });
         return;
       }
+      if (msg.type === "__testSetPersonalRecovery") {
+        const rawPk = typeof msg.playerKey === "string" ? msg.playerKey : "";
+        const probePk = sanitizePlayerKey(rawPk) || sanitizePlayerKey(ws.playerKey) || sanitizePlayerKey("integration_mstim_pk");
+        const tier = [10, 5, 2, 1].includes(msg.tierSec | 0) ? msg.tierSec | 0 : 0;
+        const sec = tier || (Number.isFinite(Number(msg.sec)) ? Math.trunc(Number(msg.sec)) : 10);
+        if (sec < 1 || sec > 600) {
+          safeSend(ws, { type: "__testSetPersonalRecoveryAck", ok: false, reason: "bad_sec" });
+          return;
+        }
+        const u = await walletStore.getOrCreateUser(probePk);
+        const uMs = Number(msg.untilMs);
+        const until = Number.isFinite(uMs) && uMs > 0 ? clampPositiveEpochMs(uMs) : Date.now() + RECOVERY_BUFF_DURATION_MS;
+        u.personalRecoverySec = sec;
+        u.personalRecoveryUntil = until;
+        safeSend(ws, {
+          type: "__testSetPersonalRecoveryAck",
+          ok: true,
+          personalRecoverySec: u.personalRecoverySec,
+          personalRecoveryUntil: u.personalRecoveryUntil,
+        });
+        return;
+      }
       if (msg.type === "__testPixelCooldownProbe") {
         const rawPk = typeof msg.playerKey === "string" ? msg.playerKey : "";
         const probePk = sanitizePlayerKey(rawPk) || sanitizePlayerKey("integration_mstim_pk");
@@ -7266,8 +7390,8 @@ wss.on("connection", (ws, req) => {
         const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
         const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
         const st = tournamentStage(roundIndex, gameFinished);
-        const now = pixelActionCooldownNowMs();
-        const cd = effectivePixelCooldownMs(u, teamFxPayload, st, now);
+        const gameNowProbe = effectiveGameClockMs();
+        const cd = effectivePixelCooldownMs(u, teamFxPayload, st, gameNowProbe);
         safeSend(ws, {
           type: "__testPixelCooldownProbeAck",
           cd,
@@ -7422,7 +7546,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws,{ type: "createTeamError", reason: "limit" });
         return;
       }
-      const spawn = findValidSpawnRect6();
+      const spawn = findValidSpawnRect();
       if (!spawn) {
         safeSend(ws, { type: "createTeamError", reason: "spawn_failed" });
         return;
@@ -7442,12 +7566,13 @@ wss.on("connection", (ws, req) => {
         eliminated: false,
         spawnX0: spawn.x0,
         spawnY0: spawn.y0,
+        spawnS: spawn.s,
         createdByPlayerKey: pkForColor || "",
         militaryOutposts: [],
         lastMilitaryBaseAt: 0,
       });
       saveDynamicTeams();
-      paintTeamSpawnArea(id, spawn.x0, spawn.y0, pkForColor || "");
+      paintTeamSpawnArea(id, spawn.x0, spawn.y0, pkForColor || "", spawn.s);
       ws.teamId = id;
       teamPlayerCounts.set(id, 1);
       if (ws.playerKey) addTeamMemberKey(id, ws.playerKey);
@@ -7457,7 +7582,7 @@ wss.on("connection", (ws, req) => {
         emoji,
         color,
         solo: false,
-        spawn: { x0: spawn.x0, y0: spawn.y0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE },
+        spawn: { x0: spawn.x0, y0: spawn.y0, w: spawn.s, h: spawn.s },
       };
       safeSend(ws, {
         type: "created",
@@ -7472,7 +7597,7 @@ wss.on("connection", (ws, req) => {
       broadcast({
         type: "teamCreated",
         teamId: id,
-        spawn: { x0: spawn.x0, y0: spawn.y0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE },
+        spawn: { x0: spawn.x0, y0: spawn.y0, w: spawn.s, h: spawn.s },
       });
       broadcastStatsImmediate();
       return;
@@ -7521,7 +7646,12 @@ wss.on("connection", (ws, req) => {
       if (ws.playerKey) addTeamMemberKey(tid, ws.playerKey);
       const sp =
         typeof dtJoin.spawnX0 === "number" && typeof dtJoin.spawnY0 === "number"
-          ? { x0: dtJoin.spawnX0, y0: dtJoin.spawnY0, w: TEAM_SPAWN_SIZE, h: TEAM_SPAWN_SIZE }
+          ? {
+              x0: dtJoin.spawnX0,
+              y0: dtJoin.spawnY0,
+              w: teamMainSpawnSide(dtJoin),
+              h: teamMainSpawnSide(dtJoin),
+            }
           : null;
       safeSend(ws, { type: "joined", teamId: tid, spawn: sp });
       if (sp) {
@@ -7894,17 +8024,18 @@ wss.on("connection", (ws, req) => {
         if (did === aidNuke) continue;
         const sx0 = t.spawnX0 | 0;
         const sy0 = t.spawnY0 | 0;
+        const sMain = teamMainSpawnSide(t);
         let spawnInBlast = false;
         for (let j = 0; j < blast.length; j++) {
           const bx = blast[j][0];
           const by = blast[j][1];
-          if (bx >= sx0 && bx < sx0 + TEAM_SPAWN_SIZE && by >= sy0 && by < sy0 + TEAM_SPAWN_SIZE) {
+          if (bx >= sx0 && bx < sx0 + sMain && by >= sy0 && by < sy0 + sMain) {
             spawnInBlast = true;
             break;
           }
         }
         if (!spawnInBlast) continue;
-        const fc = flagCellFromSpawn(sx0, sy0);
+        const fc = flagCellFromSpawn(sx0, sy0, sMain);
         const fr = tryFlagCaptureHit(aidNuke, fc.x, fc.y, nowNuke, { skipAdjacency: true, skipRateLimit: true });
         if (fr && !fr.rateLimited && (fr.hit || fr.captured)) nukeDidFlagDamage = true;
       }
@@ -7915,17 +8046,18 @@ wss.on("connection", (ws, req) => {
         for (const o of getTeamMilitaryOutposts(t)) {
           const sx0 = o.x0 | 0;
           const sy0 = o.y0 | 0;
+          const Mo = MILITARY_OUTPOST_SIZE;
           let moInBlast = false;
           for (let j = 0; j < blast.length; j++) {
             const bx = blast[j][0];
             const by = blast[j][1];
-            if (bx >= sx0 && bx < sx0 + TEAM_SPAWN_SIZE && by >= sy0 && by < sy0 + TEAM_SPAWN_SIZE) {
+            if (bx >= sx0 && bx < sx0 + Mo && by >= sy0 && by < sy0 + Mo) {
               moInBlast = true;
               break;
             }
           }
           if (!moInBlast) continue;
-          const fc = flagCellFromSpawn(sx0, sy0);
+          const fc = flagCellFromMilitaryOutpost(sx0, sy0);
           const fr = tryFlagCaptureHit(aidNuke, fc.x, fc.y, nowNuke, { skipAdjacency: true, skipRateLimit: true });
           if (fr && !fr.rateLimited && (fr.hit || fr.captured)) nukeDidFlagDamage = true;
         }
@@ -8453,35 +8585,46 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "pixelReject", reason: "rate_limited" });
         return;
       }
+      if (typeof walletStore.reloadEconomyFieldsFromDb === "function") {
+        await walletStore.reloadEconomyFieldsFromDb(pk);
+      }
       const u = await walletStore.getOrCreateUser(pk);
       const st = tournamentStage(roundIndex, gameFinished);
       const fx = getTeamFx(teamId);
       const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
-      const nowGame = effectiveGameClockMs();
-      const nowCd = pixelActionCooldownNowMs();
-      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, nowCd);
-      /* После mstim lastActionAt мог быть записан в wall-clock во время паузы; для обычного режима снова game-clock — иначе lastAt > nowCd и пиксель навсегда «не готов». */
-      let lastAtForCd = u.lastActionAt;
-      if (nowCd === nowGame && lastAtForCd > nowGame) lastAtForCd = nowGame;
-      if (nowCd < lastAtForCd + cd) {
-        if (DEBUG_MSTIM_COOLDOWN) {
-          const mA = authoritativeMstimGlobalSpeedActiveAt(nowCd);
+      const gameNow = effectiveGameClockMs();
+      const wallNow = Date.now();
+      const mstimOn = globalSpeedMstimActive();
+      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, gameNow);
+      let lastAt = Number(u.lastActionAt) || 0;
+      if (!Number.isFinite(lastAt) || lastAt < 0) lastAt = 0;
+      if (lastAt > gameNow) lastAt = gameNow;
+      if (gameNow < lastAt + cd) {
+        if (DEBUG_PIXEL_COOLDOWN) {
+          const secP = Number(u.personalRecoverySec);
+          const untilP = Number(u.personalRecoveryUntil);
+          const persOn = Number.isFinite(untilP) && untilP > gameNow && Number.isFinite(secP) && secP >= 1;
           console.warn(
-            `[mstim] pixel cooldown reject pk=${String(pk).slice(0, 16)} cd=${cd} needWait=${lastAtForCd + cd - nowCd}ms wallNow=${Date.now()} gameNow=${nowGame} pixelCdNow=${nowCd} mstimUntil=${mstimAltSeasonBurstUntilMs} mstimActiveAtPixelCdNow=${mA}`
+            `[pixel-cd] REJECT pk=${String(pk).slice(0, 16)} cdMs=${cd} needWait=${lastAt + cd - gameNow} gameNow=${gameNow} lastActionAt=${u.lastActionAt} mstim=${mstimOn} mstimUntil=${mstimAltSeasonBurstUntilMs} personal=${persOn ? `${secP}s` : "off"} teamSec=${fx.teamRecoverySec} stage=${st}`
           );
         }
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "cooldown not ready" });
         safeSend(ws, { type: "pixelReject", reason: "cooldown not ready" });
         return;
       }
+      if (DEBUG_PIXEL_COOLDOWN) {
+        console.warn(
+          `[pixel-cd] ACCEPT pk=${String(pk).slice(0, 16)} cdMs=${cd} mstim=${mstimOn} personal=${Number(u.personalRecoveryUntil) > gameNow ? u.personalRecoverySec : "off"} stage=${st}`
+        );
+      }
 
-      const fc = tryFlagCaptureHit(teamId, x, y, nowGame);
+      const fc = tryFlagCaptureHit(teamId, x, y, gameNow);
       if (fc && fc.rateLimited) {
         safeSend(ws, { type: "pixelReject", reason: "flag_rate" });
         return;
       }
       if (fc && (fc.hit || fc.captured)) {
-        u.lastActionAt = nowCd;
+        u.lastActionAt = wallNow;
         scheduleEconomyFlushForPlayer(pk);
         if (!fc.captured) {
           scheduleStatsBroadcast();
@@ -8502,7 +8645,7 @@ wss.on("connection", (ws, req) => {
       if (!enemyFlagDef) {
         const wallRes = tryApplyGreatWallSiegeHit(x, y, teamId, pk);
         if (wallRes.handled) {
-          u.lastActionAt = nowCd;
+          u.lastActionAt = wallNow;
           scheduleEconomyFlushForPlayer(pk);
           scheduleStatsBroadcast();
           afterTerritoryMutation();
@@ -8523,7 +8666,7 @@ wss.on("connection", (ws, req) => {
         return;
       }
 
-      u.lastActionAt = nowCd;
+      u.lastActionAt = wallNow;
       scheduleEconomyFlushForPlayer(pk);
 
       /* Обычная покраска: не якорь чужой базы (это только tryFlagCaptureHit / executeFlagCaptureSuccess). */
@@ -10013,7 +10156,7 @@ async function telegramPollLoop() {
               await telegramSendMessage(chatId, "Unpause only on cluster leader (CLUSTER_LEADER=true).");
               continue;
             }
-            const ur = applyAdminUnpause(uid);
+            const ur = await applyAdminUnpause(uid);
             if (!ur.ok) {
               await telegramSendMessage(chatId, ur.reason === "not_paused" ? "Game is not paused." : "Unpause failed.");
               continue;

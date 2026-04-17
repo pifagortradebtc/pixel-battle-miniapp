@@ -15,6 +15,7 @@ import {
   enqueueBaseCapturedPresentation,
   enqueueTerritoryCapturePresentation,
   getEffectiveAltSeasonRevengeUntilMs,
+  setPresentationNowProvider,
 } from "./event-presentation.js";
 import {
   initGameAudio,
@@ -53,7 +54,7 @@ import {
   BASE_ACTION_COOLDOWN_SEC,
   PRICES_QUANT,
   REFERRAL_JOIN_INVITER_QUANT,
-  resolveAuthoritativePixelCooldownMs,
+  getAuthoritativePixelCooldownMs,
   resolveAuthoritativeRecoverySec,
 } from "../lib/tournament-economy.js";
 import { computeNukeBombBlastCells } from "../lib/nuke-bomb-shape.js";
@@ -85,6 +86,7 @@ import {
   getMstimAltSeasonClientBurstUntilMs,
   getMstimAltSeasonClientBurstUntilStored,
   setMstimAltSeasonClientBurstUntilMs,
+  setMstimClientNowProvider,
 } from "./mstim-alt-season-client.js";
 import { GREAT_WALL_MAX_HP, normalizeWallHp } from "../lib/great-wall.js";
 import { isUsdtDepositsEnabled } from "../lib/usdt-deposits-enabled.js";
@@ -787,7 +789,7 @@ function computeClientBaseConnectedPixelKeys(teamId) {
     const r = mos[i];
     addClientBfsSeedsFromRectInVertices(vertices, r.x0, r.y0, r.w, r.h, out, stack);
   }
-  addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, FLAG_SPAWN_SIZE, out, stack);
+  addClientBfsSeedsTouchingBaseRectsInVertices(vertices, sp, mos, sp ? clientMainSpawnSideFromSpawn(sp) : FLAG_SPAWN_SIZE, out, stack);
   if (!stack.length) return new Set();
   while (stack.length) {
     const cur = stack.pop();
@@ -1047,6 +1049,17 @@ let gameFinishedMeta = false;
 let gamePausedMeta = false;
 /** Wall-time старта паузы (как на сервере); 0 если не на паузе. Для «Мстим» на паузе таймер замирает. */
 let pauseWallStartedAtMeta = 0;
+/** С сервера: в момент паузы шла разминка (для подписи таймера). */
+let pauseCapturedWarmupMeta = false;
+
+/** UI «сейчас»: при паузе — момент начала паузы (синхронно с серверным effectiveGameClockMs). */
+function effectiveClientUiNowMs() {
+  if (gamePausedMeta && pauseWallStartedAtMeta > 0) return pauseWallStartedAtMeta;
+  return Date.now();
+}
+
+setMstimClientNowProvider(effectiveClientUiNowMs);
+setPresentationNowProvider(effectiveClientUiNowMs);
 
 function syncBackgroundMusicAllowed() {
   const allow = !spectatorMode && !gameFinishedMeta && !gamePausedMeta;
@@ -1243,15 +1256,23 @@ function clientPixelWallHpAt(x, y) {
   return normalizeWallHp(v.wallHp);
 }
 
-/** Прямоугольник базы команды из meta (как на сервере spawn 6×6). */
+/** Прямоугольник базы команды из meta (как на сервере spawn, до 6×6). */
 function clientTeamSpawnRect(teamId) {
   if (teamId == null || !teamsMeta) return null;
   const t = teamsMeta.find((x) => (x.id | 0) === (teamId | 0));
   const s = t?.spawn;
   if (!s || typeof s.x0 !== "number" || typeof s.y0 !== "number") return null;
-  const w = typeof s.w === "number" ? s.w : 6;
-  const h = typeof s.h === "number" ? s.h : 6;
+  const w = typeof s.w === "number" ? s.w : FLAG_SPAWN_SIZE;
+  const h = typeof s.h === "number" ? s.h : FLAG_SPAWN_SIZE;
   return { x0: s.x0, y0: s.y0, w, h };
+}
+
+/** Сторона главной базы из объекта spawn в teamsMeta (1…FLAG_SPAWN_SIZE). */
+function clientMainSpawnSideFromSpawn(sp) {
+  if (sp && typeof sp.w === "number" && sp.w >= 1) {
+    return Math.max(1, Math.min(FLAG_SPAWN_SIZE, sp.w | 0));
+  }
+  return FLAG_SPAWN_SIZE;
 }
 
 function clientCellInsideSpawnRect(x, y, sp) {
@@ -1724,7 +1745,8 @@ function clientNukeBlastWouldClearTerritory(cx, cy) {
         if ((t.id | 0) === myT) continue;
         const x0 = t.spawn.x0 | 0;
         const y0 = t.spawn.y0 | 0;
-        if (x >= x0 && x < x0 + FLAG_SPAWN_SIZE && y >= y0 && y < y0 + FLAG_SPAWN_SIZE) return true;
+        const sw = clientMainSpawnSideFromSpawn(t.spawn);
+        if (x >= x0 && x < x0 + sw && y >= y0 && y < y0 + sw) return true;
       }
       continue;
     }
@@ -2641,7 +2663,7 @@ function syncTournamentWarmupOverlay() {
     tournamentWarmupBodyEl.innerHTML = tournamentRoundCopy(roundIndexMeta).bodyHtml;
   }
   if (show && playStartsAtMs != null) {
-    const left = Math.max(0, playStartsAtMs - Date.now());
+    const left = Math.max(0, playStartsAtMs - effectiveClientUiNowMs());
     const s = Math.ceil(left / 1000);
     const mm = Math.floor(s / 60);
     const ss = s % 60;
@@ -2769,7 +2791,33 @@ function updateRoundTimer() {
     if (gamePausedMeta) {
       roundTimerEl.hidden = false;
       roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
-      roundTimerEl.textContent = "ПАУЗА\nадмин";
+      const nowU = effectiveClientUiNowMs();
+      if (roundEndsAtMs == null && roundIndexMeta === 0) {
+        roundTimerEl.textContent = "ПАУЗА\nадмин";
+      } else if (roundEndsAtMs != null && playStartsAtMs != null && nowU < playStartsAtMs) {
+        const wLeft = Math.max(0, playStartsAtMs - nowU);
+        const ws = Math.max(0, Math.ceil(wLeft / 1000));
+        const wm = Math.floor(ws / 60);
+        const wsec = ws % 60;
+        roundTimerEl.textContent = `ПАУЗА · разминка ${wm}:${String(wsec).padStart(2, "0")}\nдо боя`;
+      } else if (roundEndsAtMs != null) {
+        const ms = roundEndsAtMs - nowU;
+        if (ms <= 0) {
+          roundTimerEl.textContent = "ПАУЗА\nКонец раунда…";
+        } else {
+          const s = Math.floor(ms / 1000);
+          const h = Math.floor(s / 3600);
+          const m = Math.floor((s % 3600) / 60);
+          const sec = s % 60;
+          const body =
+            h > 0 ? `Бой ${h}ч ${m}м` : m > 0 ? `Бой ${m}м ${sec}с` : `Бой ${sec}с`;
+          roundTimerEl.textContent = `ПАУЗА · ${body}`;
+          if (ms <= 3 * 60 * 1000) roundTimerEl.classList.add("toolbar__round--critical");
+          else if (ms <= 10 * 60 * 1000) roundTimerEl.classList.add("toolbar__round--urgent");
+        }
+      } else {
+        roundTimerEl.textContent = "ПАУЗА\nадмин";
+      }
       syncTournamentWarmupOverlay();
       return;
     }
@@ -2789,13 +2837,13 @@ function updateRoundTimer() {
     roundTimerEl.hidden = false;
     roundTimerEl.classList.remove("toolbar__round--urgent", "toolbar__round--critical");
     if (isClientWarmupPhase()) {
-      const wLeft = Math.max(0, (playStartsAtMs || 0) - Date.now());
+      const wLeft = Math.max(0, (playStartsAtMs || 0) - effectiveClientUiNowMs());
       const ws = Math.max(0, Math.ceil(wLeft / 1000));
       const wm = Math.floor(ws / 60);
       const wsec = ws % 60;
       roundTimerEl.textContent = `Разминка ${wm}:${String(wsec).padStart(2, "0")}\nдо боя`;
     } else {
-      const ms = roundEndsAtMs - Date.now();
+      const ms = roundEndsAtMs - effectiveClientUiNowMs();
       if (ms <= 0) {
         roundTimerEl.textContent = "Конец раунда…";
       } else {
@@ -4267,6 +4315,8 @@ function onMeta(msg) {
     gamePausedMeta && typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
       ? msg.pauseWallStartedAt | 0
       : 0;
+  pauseCapturedWarmupMeta =
+    gamePausedMeta && typeof msg.pauseCapturedWarmup === "boolean" ? !!msg.pauseCapturedWarmup : false;
   syncAdminGamePauseOverlay();
   syncClientCooldownFromWalletFields();
   roundEndsAtMs =
@@ -4657,16 +4707,16 @@ function eventBannerRoundHintDismissalBlocks(minutes) {
   return (
     eventBannerDismissedMinuteBucket != null &&
     minutes === eventBannerDismissedMinuteBucket &&
-    Date.now() < eventBannerDismissedUntilMs
+    effectiveClientUiNowMs() < eventBannerDismissedUntilMs
   );
 }
 
 function hideEventBannerRoundHintSwipe() {
   if (!eventBannerEl) return;
-  const left = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : 0;
+  const left = roundEndsAtMs != null ? roundEndsAtMs - effectiveClientUiNowMs() : 0;
   const m = Math.max(1, Math.ceil(left / 60000));
   eventBannerDismissedMinuteBucket = m;
-  eventBannerDismissedUntilMs = Date.now() + 75000;
+  eventBannerDismissedUntilMs = effectiveClientUiNowMs() + 75000;
   detachSwipeDismissSlot("eventBanner");
   resetDismissibleBannerNode(eventBannerEl);
   try {
@@ -4709,7 +4759,7 @@ function hideTeamBuffBannerSwipe() {
   teamBuffSwipeSuppressKey = teamBuffBannerEl.dataset.buffBannerKey || "";
   const u = Number(teamBuffBannerEl.dataset.buffUntil);
   teamBuffSwipeSuppressUntilMs =
-    Number.isFinite(u) && u > Date.now() ? u : Date.now() + 90000;
+    Number.isFinite(u) && u > effectiveClientUiNowMs() ? u : effectiveClientUiNowMs() + 90000;
   detachSwipeDismissSlot("teamBuff");
   resetDismissibleBannerNode(teamBuffBannerEl);
   try {
@@ -4731,7 +4781,7 @@ function computeRoundEndHintToast(leftMs) {
     return { show: false, minutes: 0 };
   }
   const minutes = Math.max(1, Math.ceil(leftMs / 60000));
-  const now = Date.now();
+  const now = effectiveClientUiNowMs();
   if (roundEndHintLastMinuteBucket !== minutes) {
     roundEndHintLastMinuteBucket = minutes;
     roundEndHintVisibleUntilMs = now + BANNER_MAX_VISIBLE_MS;
@@ -4819,10 +4869,10 @@ function syncEventBanner() {
   applySeismicTremorBodyOverride();
 
   if (hideLegacyBattle) {
-    if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
+    if (seismicPreviewClient && effectiveClientUiNowMs() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
       seismicPreviewClient = null;
     }
-    const leftR = roundEndsAtMs != null ? roundEndsAtMs - Date.now() : 0;
+    const leftR = roundEndsAtMs != null ? roundEndsAtMs - effectiveClientUiNowMs() : 0;
     const hintR = computeRoundEndHintToast(leftR);
     if (hintR.show && !eventBannerRoundHintDismissalBlocks(hintR.minutes)) {
       const txt = `\u23f1 До конца раунда · ещё ~${hintR.minutes} мин`;
@@ -4842,13 +4892,13 @@ function syncEventBanner() {
     return;
   }
 
-  if (ge && ge.active && ge.title && typeof ge.until === "number" && ge.until > Date.now()) {
+  if (ge && ge.active && ge.title && typeof ge.until === "number" && ge.until > effectiveClientUiNowMs()) {
     /* Активное событие боя: заголовок и таймер только в #event-hud-dock, без закреплённой верхней «золотой» плашки. */
     clearEventBannerRoundHintVisual();
     eventBannerEl.textContent = "";
     return;
   }
-  if (seismicPreviewClient && Date.now() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
+  if (seismicPreviewClient && effectiveClientUiNowMs() > (seismicPreviewClient.impactAtMs || 0) + 3000) {
     seismicPreviewClient = null;
   }
   if (roundEndsAtMs == null) {
@@ -4856,7 +4906,7 @@ function syncEventBanner() {
     clearEventBannerRoundHintVisual();
     return;
   }
-  const left = roundEndsAtMs - Date.now();
+  const left = roundEndsAtMs - effectiveClientUiNowMs();
   const hint = computeRoundEndHintToast(left);
   if (!hint.show || eventBannerRoundHintDismissalBlocks(hint.minutes)) {
     clearEventBannerRoundHintVisual();
@@ -4875,13 +4925,11 @@ function syncEventBanner() {
   }
 }
 
+/** Согласовано с server: globalSpeedMstimActive → until (wall) > Date.now(). */
 function isAltSeasonRevengeWallActive(arUntilRaw) {
   const u = arUntilRaw | 0;
   if (u <= 0) return false;
-  if (gamePausedMeta && pauseWallStartedAtMeta > 0) {
-    return u > pauseWallStartedAtMeta;
-  }
-  return u > Date.now();
+  return u > effectiveClientUiNowMs();
 }
 
 function syncClientCooldownFromWalletFields() {
@@ -4900,9 +4948,15 @@ function syncClientCooldownFromWalletFields() {
     ? { teamRecoveryUntil: te.teamRecoveryUntil, teamRecoverySec: te.teamRecoverySec }
     : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const st = walletState.tournamentStage || "MASS_BATTLE";
-  const now = Date.now();
+  const now = effectiveClientUiNowMs();
   walletState.effectiveRecoverySec = resolveAuthoritativeRecoverySec(globalAltSeasonActive, u, teamFx, now);
-  walletState.cooldownMs = resolveAuthoritativePixelCooldownMs(globalAltSeasonActive, u, teamFx, st, now);
+  walletState.cooldownMs = getAuthoritativePixelCooldownMs({
+    globalSpeedActive: globalAltSeasonActive,
+    user: u,
+    teamFx,
+    stage: st,
+    nowMs: now,
+  });
 }
 
 /** Интервал между пикселями (мс) — как на сервере; не использовать `cooldownMs || fallback` (ломает 0 и баффы). */
@@ -4912,7 +4966,7 @@ function getWalletActionCooldownMs() {
   syncClientCooldownFromWalletFields();
   const sec = walletState.effectiveRecoverySec;
   if (typeof sec === "number" && Number.isFinite(sec) && sec >= 0) {
-    return Math.max(0, Math.round(sec * 1000));
+    return Math.max(0, Math.trunc(sec) * 1000);
   }
   const cd = Number(walletState.cooldownMs);
   if (Number.isFinite(cd) && cd >= 0) return cd;
@@ -5562,7 +5616,7 @@ function syncTeamBuffBanner() {
     return;
   }
   const until = typeof te.teamRecoveryUntil === "number" ? te.teamRecoveryUntil : 0;
-  const now = Date.now();
+  const now = effectiveClientUiNowMs();
   if (until <= now) {
     clearTeamBuffBannerVisual();
     return;
@@ -5609,7 +5663,7 @@ function updateActiveBuffBars() {
     if (toolbarBuffPersonalEl) toolbarBuffPersonalEl.hidden = true;
     return;
   }
-  const now = Date.now();
+  const now = effectiveClientUiNowMs();
   const pu = typeof walletState.personalRecoveryUntil === "number" && walletState.personalRecoveryUntil > now;
 
   if (pu && toolbarBuffPersonalEl && toolbarBuffPersonalLabelEl && toolbarBuffPersonalFillEl) {
@@ -5698,7 +5752,7 @@ function updateToolbarPixelTimer() {
   }
   const cd = getWalletActionCooldownMs();
   const la = getOnlineLastPixelActionAt();
-  const left = la + cd - Date.now();
+  const left = la + cd - effectiveClientUiNowMs();
   const erSec =
     typeof walletState.effectiveRecoverySec === "number" && Number.isFinite(walletState.effectiveRecoverySec)
       ? walletState.effectiveRecoverySec
@@ -6296,7 +6350,7 @@ function handlePurchaseOk(msg) {
         const mos = Array.isArray(t.militaryOutposts) ? t.militaryOutposts.slice() : [];
         const dup = mos.some((o) => o && (o.x0 | 0) === mx0 && (o.y0 | 0) === my0);
         if (!dup) {
-          mos.push({ x0: mx0, y0: my0, w: FLAG_SPAWN_SIZE, h: FLAG_SPAWN_SIZE });
+          mos.push({ x0: mx0, y0: my0, w: MILITARY_OUTPOST_SIZE, h: MILITARY_OUTPOST_SIZE });
         }
         return { ...t, militaryOutposts: mos };
       });
@@ -7675,6 +7729,14 @@ function connectWs() {
     if (msg.type === "playRejected") {
       if (msg.reason === "paused") {
         gamePausedMeta = true;
+        pauseWallStartedAtMeta =
+          typeof msg.pauseWallStartedAt === "number" && !Number.isNaN(msg.pauseWallStartedAt)
+            ? Math.max(0, msg.pauseWallStartedAt | 0)
+            : pauseWallStartedAtMeta;
+        pauseCapturedWarmupMeta =
+          gamePausedMeta && typeof msg.pauseCapturedWarmup === "boolean"
+            ? !!msg.pauseCapturedWarmup
+            : pauseCapturedWarmupMeta;
         syncAdminGamePauseOverlay();
         updateRoundTimer();
         syncTournamentWarmupOverlay();
@@ -7704,6 +7766,8 @@ function connectWs() {
         !Number.isNaN(msg.pauseWallStartedAt)
           ? msg.pauseWallStartedAt | 0
           : 0;
+      pauseCapturedWarmupMeta =
+        gamePausedMeta && typeof msg.pauseCapturedWarmup === "boolean" ? !!msg.pauseCapturedWarmup : false;
       /* Один пакет с актуальными таймстампами — без гонки с отдельным tournamentTimeScale после unpause. */
       if ("roundEndsAt" in msg) {
         roundEndsAtMs =
@@ -7995,7 +8059,7 @@ function connectWs() {
             } else {
               const def = teamsMeta.find((x) => (Number(x.id) | 0) === did);
               if (def?.spawn) {
-                const a = flagCellFromSpawn(def.spawn.x0, def.spawn.y0);
+                const a = flagCellFromSpawn(def.spawn.x0, def.spawn.y0, clientMainSpawnSideFromSpawn(def.spawn));
                 fgx = a.x;
                 fgy = a.y;
               }
@@ -8366,7 +8430,7 @@ function connectWs() {
         limit: "Достигнут лимит команд на сервере.",
         duel: "В дуэли нельзя вступить в чужую команду — создайте свою (один игрок).",
         spawn_failed:
-          "Не удалось разместить стартовую базу 6×6 на карте (мало места). Попробуйте позже или сообщите администратору.",
+          "Не удалось разместить стартовую базу на карте (мало места). Попробуйте позже или сообщите администратору.",
       };
       const text = map[msg.reason] || "Не удалось создать команду.";
       setCreateTeamInlineError(text);
@@ -9343,7 +9407,7 @@ function isClientEnemyOwnedFlagAnchor(attackerTeamId, gx, gy) {
     const tid = t.id | 0;
     if (tid === aid) continue;
     if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
-      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0, clientMainSpawnSideFromSpawn(t.spawn));
       if (fx === gx && fy === gy) {
         const owner = clientPixelOwnerTeamAt(gx, gy);
         return owner === tid;
@@ -9366,7 +9430,7 @@ function clientCellIsAnyFlagAnchor(gx, gy) {
   for (const t of teamsMeta) {
     if (t.solo || t.eliminated) continue;
     if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
-      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0, clientMainSpawnSideFromSpawn(t.spawn));
       if (fx === gx && fy === gy) return true;
     }
     const mos = clientMilitaryOutpostRects(t.id | 0);
@@ -9387,7 +9451,7 @@ function clientCellIsOwnRepairableBase(gx, gy) {
   const xi = gx | 0;
   const yi = gy | 0;
   if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
-    const fc = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+    const fc = flagCellFromSpawn(t.spawn.x0, t.spawn.y0, clientMainSpawnSideFromSpawn(t.spawn));
     if (fc.x === xi && fc.y === yi) return true;
   }
   const mos = clientMilitaryOutpostRects(mid);
@@ -9406,7 +9470,7 @@ function clientIsEnemyBaseFlagCellCoords(gx, gy) {
     const tid = t.id | 0;
     if (tid === mid) continue;
     if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
-      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0, clientMainSpawnSideFromSpawn(t.spawn));
       if (fx === gx && fy === gy) return true;
     }
     const mos = clientMilitaryOutpostRects(tid);
@@ -9429,7 +9493,7 @@ function clientShouldIgnoreTerritoryPixelOnEnemyFlagAnchor(x, y, newTeamId) {
     if (t.solo || t.eliminated) continue;
     const tid = t.id | 0;
     if (t.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
-      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0);
+      const { x: fx, y: fy } = flagCellFromSpawn(t.spawn.x0, t.spawn.y0, clientMainSpawnSideFromSpawn(t.spawn));
       if (fx === x && fy === y) return tid !== nid;
     }
     const mos = clientMilitaryOutpostRects(tid);
@@ -9452,7 +9516,8 @@ function clientCellNukeProtectedSpawn(gx, gy) {
     if (t.solo || t.eliminated || !t.spawn) continue;
     const x0 = t.spawn.x0 | 0;
     const y0 = t.spawn.y0 | 0;
-    if (gx >= x0 && gx < x0 + FLAG_SPAWN_SIZE && gy >= y0 && gy < y0 + FLAG_SPAWN_SIZE) return true;
+    const sw = clientMainSpawnSideFromSpawn(t.spawn);
+    if (gx >= x0 && gx < x0 + sw && gy >= y0 && gy < y0 + sw) return true;
     for (const r of clientMilitaryOutpostRects(t.id)) {
       const rx0 = r.x0 | 0;
       const ry0 = r.y0 | 0;
@@ -10660,8 +10725,9 @@ function draw(time = performance.now(), drawOpts = {}) {
     if (t?.spawn && typeof t.spawn.x0 === "number" && typeof t.spawn.y0 === "number") {
       const sx0 = t.spawn.x0 | 0;
       const sy0 = t.spawn.y0 | 0;
-      const sw = FLAG_SPAWN_SIZE * cell;
-      const sh = FLAG_SPAWN_SIZE * cell;
+      const side = clientMainSpawnSideFromSpawn(t.spawn);
+      const sw = side * cell;
+      const sh = side * cell;
       const px = offsetX + sx0 * cell;
       const py = offsetY + sy0 * cell;
       ctx.fillStyle = `rgba(56, 189, 248, ${0.07 + pulse * 0.06})`;
@@ -10669,7 +10735,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.strokeStyle = `rgba(125, 211, 252, ${0.38 + pulse * 0.22})`;
       ctx.lineWidth = Math.max(2, cell * 0.09);
       ctx.strokeRect(px + 0.5, py + 0.5, sw - 1, sh - 1);
-      const fc = flagCellFromSpawn(sx0, sy0);
+      const fc = flagCellFromSpawn(sx0, sy0, side);
       const fx = offsetX + fc.x * cell;
       const fy = offsetY + fc.y * cell;
       ctx.strokeStyle = `rgba(34, 211, 238, ${0.62 + pulse * 0.18})`;
@@ -11151,7 +11217,7 @@ function draw(time = performance.now(), drawOpts = {}) {
     for (const t of teamsMeta) {
       if (t.solo || t.eliminated || !t.spawn) continue;
       const sp = t.spawn;
-      const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0);
+      const { x: fgx, y: fgy } = flagCellFromSpawn(sp.x0, sp.y0, clientMainSpawnSideFromSpawn(sp));
       const tidFlag = Number(t.id) | 0;
       drawClientFlagBaseHpUi(
         fgx,

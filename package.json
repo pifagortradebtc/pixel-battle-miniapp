@@ -13,7 +13,8 @@
     "stress": "node scripts/stress-concurrency-sim.mjs",
     "copy-sfx": "node scripts/copy-sfx-from-downloads.mjs",
     "verify:scores": "node scripts/verify-team-score-incremental.mjs",
-    "test:mstim-cooldown": "node scripts/integration-mstim-cooldown.mjs"
+    "test:mstim-cooldown": "node scripts/integration-mstim-cooldown.mjs",
+    "test:pixel-cooldown-full": "node scripts/integration-pixel-cooldown-full.mjs"
   },
   "devDependencies": {
     "sharp": "^0.33.5"

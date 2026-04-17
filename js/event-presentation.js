@@ -26,6 +26,20 @@ let finalPressureEl = null;
 /** @type {ReturnType<typeof setInterval> | null} */
 let hudTickTimer = null;
 
+/** «Сейчас» для отображения таймеров (пауза — заморозка). */
+let presentationNowMsFn = () => Date.now();
+
+/**
+ * @param {() => number} fn
+ */
+export function setPresentationNowProvider(fn) {
+  presentationNowMsFn = typeof fn === "function" ? fn : () => Date.now();
+}
+
+function uiNow() {
+  return presentationNowMsFn();
+}
+
 /** @type {number | null} */
 let lastStripRoundEndMs = null;
 
@@ -51,7 +65,7 @@ function escapeHtml(s) {
 
 function formatHudTime(untilMs) {
   if (typeof untilMs !== "number" || !Number.isFinite(untilMs)) return "—";
-  const left = untilMs - Date.now();
+  const left = untilMs - uiNow();
   if (left <= 0) return "0:00";
   const s = Math.max(0, Math.ceil(left / 1000));
   const m = Math.floor(s / 60);
@@ -156,7 +170,7 @@ const LAYER_HUD_ORDER = [
 ];
 
 function sortLayersForHud(layers) {
-  const arr = (layers || []).filter((L) => L && typeof L.untilMs === "number" && L.untilMs > Date.now());
+  const arr = (layers || []).filter((L) => L && typeof L.untilMs === "number" && L.untilMs > uiNow());
   return arr.sort((a, b) => {
     const ia = LAYER_HUD_ORDER.indexOf(a.kind);
     const ib = LAYER_HUD_ORDER.indexOf(b.kind);
@@ -177,7 +191,7 @@ function battleLayersCoverRoundEvent(layers, re) {
   if (!Array.isArray(layers)) return false;
   const um = re.untilMs;
   const k = String(re.eventType || "");
-  const now = Date.now();
+  const now = uiNow();
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
     if (!L || typeof L.untilMs !== "number" || !Number.isFinite(L.untilMs) || L.untilMs <= now) continue;
@@ -195,7 +209,7 @@ function appendRoundEventHudFallback(chips, ge) {
   if (chips.length >= 6) return;
   if (chips.some((c) => c.kind === "alt_season_revenge")) return;
   const re = lastRoundEventStartMsg;
-  if (!re || typeof re.untilMs !== "number" || re.untilMs <= Date.now()) return;
+  if (!re || typeof re.untilMs !== "number" || re.untilMs <= uiNow()) return;
   const rawLayers = ge?.battleEvents?.layers;
   if (battleLayersCoverRoundEvent(rawLayers, re)) return;
   const kind = String(re.eventType || "battle_event");
@@ -471,7 +485,7 @@ export function notifyRoundEventFromServer(msg) {
  * @param {{ eventId?: string; impactAtMs?: number }} preview
  */
 export function notifySeismicPreview(preview) {
-  if (!preview || typeof preview.impactAtMs !== "number" || preview.impactAtMs <= Date.now()) return;
+  if (!preview || typeof preview.impactAtMs !== "number" || preview.impactAtMs <= uiNow()) return;
   const key = `${preview.eventId || "se"}_${preview.impactAtMs | 0}`;
   if (lastSeismicPreviewKey === key) return;
   lastSeismicPreviewKey = key;
@@ -658,7 +672,7 @@ export function syncPremiumBattlePresentation(opts) {
   lastStripRoundEndMs = typeof roundEndsAtMs === "number" ? roundEndsAtMs : null;
   if (!hudDock) initEventPresentation();
 
-  syncBodyAtmosphere(ge || null, !!(seismicPreview && seismicPreview.impactAtMs > Date.now()));
+  syncBodyAtmosphere(ge || null, !!(seismicPreview && seismicPreview.impactAtMs > uiNow()));
 
   if (!online || spectator || gameFinished) {
     stopHudTick();
@@ -677,7 +691,7 @@ export function syncPremiumBattlePresentation(opts) {
   }
 
   if (lastRoundEventStartMsg && typeof lastRoundEventStartMsg.untilMs === "number") {
-    if (lastRoundEventStartMsg.untilMs <= Date.now()) lastRoundEventStartMsg = null;
+    if (lastRoundEventStartMsg.untilMs <= uiNow()) lastRoundEventStartMsg = null;
   }
 
   /** @type {object[]} */
@@ -685,7 +699,7 @@ export function syncPremiumBattlePresentation(opts) {
 
   const arUntilRaw = getEffectiveAltSeasonRevengeUntilMs(ge);
   const arUntil =
-    typeof arUntilRaw === "number" && arUntilRaw > Date.now() ? arUntilRaw : 0;
+    typeof arUntilRaw === "number" && arUntilRaw > uiNow() ? arUntilRaw : 0;
   if (arUntil > 0) {
     chips.push({
       kind: "alt_season_revenge",
@@ -696,7 +710,7 @@ export function syncPremiumBattlePresentation(opts) {
     });
   }
 
-  if (seismicPreview && typeof seismicPreview.impactAtMs === "number" && seismicPreview.impactAtMs > Date.now()) {
+  if (seismicPreview && typeof seismicPreview.impactAtMs === "number" && seismicPreview.impactAtMs > uiNow()) {
     chips.push({
       kind: "seismic_preview",
       title: "СЕЙСМИКА",

@@ -6,6 +6,20 @@
 
 let burstUntilMs = 0;
 
+/** Подмена «сейчас» для UI (пауза — заморозка на pauseWallStartedAt). По умолчанию Date.now. */
+let clientNowMsFn = () => Date.now();
+
+/**
+ * @param {() => number} fn
+ */
+export function setMstimClientNowProvider(fn) {
+  clientNowMsFn = typeof fn === "function" ? fn : () => Date.now();
+}
+
+function clientNowMs() {
+  return clientNowMsFn();
+}
+
 function clampEpochMs(n) {
   const t = Math.trunc(Number(n));
   if (!Number.isFinite(t) || t < 1) return 0;
@@ -25,7 +39,7 @@ export function setMstimAltSeasonClientBurstUntilMs(u) {
 export function getMstimAltSeasonClientBurstUntilMs() {
   const u = clampEpochMs(burstUntilMs);
   if (u <= 0) return 0;
-  if (u <= Date.now()) {
+  if (u <= clientNowMs()) {
     burstUntilMs = 0;
     return 0;
   }
