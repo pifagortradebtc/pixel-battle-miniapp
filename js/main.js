@@ -2669,6 +2669,14 @@ function isClientWarmupPhase() {
   return effectiveClientUiNowMs() < playStartsAtMs;
 }
 
+/** Совпадает с серверным isQuantumFarmIncomeAccrualPhaseNow: доход ферм/зон только в бою. */
+function isClientQuantumFarmIncomeAccrualPhase() {
+  if (!wantOnline || !getWsUrl() || gameFinishedMeta || spectatorMode || gamePausedMeta) return false;
+  if (lobbyBeforeGoMeta) return false;
+  if (isClientWarmupPhase()) return false;
+  return true;
+}
+
 function syncAdminGamePauseOverlay() {
   if (!adminGamePauseOverlayEl) return;
   adminGamePauseOverlayEl.hidden = !gamePausedMeta;
@@ -4718,6 +4726,7 @@ function notifyPurchaseError(reason) {
     water: "Нельзя укреплять воду.",
     out_of_bounds: "Сюда нельзя (вне карты).",
     quantum_farm_not_controlled: "Ферма не под контролем вашей команды или нет связи.",
+    quantum_farm_no_supply: "Нет связи территории фермы с базой — улучшение недоступно.",
     quantum_farm_max_level: "Ферма уже максимального уровня.",
     base_repair_invalid_target: "You can only repair your own base",
     base_repair_full: "Base already at full HP",
@@ -5032,7 +5041,7 @@ function getOnlineLastPixelActionAt() {
 /** Сумма уровней ферм под контролем команды (+N квант / 5 с на команду при связи). */
 function computeClientQuantumFarmIncomePer5s() {
   const tid = myTeamId | 0;
-  if (!tid || !quantumFarmsMeta.length || gridW < 1 || gridH < 1) return 0;
+  if (!tid || !quantumFarmsMeta.length || gridW < 1 || gridH < 1 || !isClientQuantumFarmIncomeAccrualPhase()) return 0;
   let sum = 0;
   for (let i = 0; i < quantumFarmsMeta.length; i++) {
     const f = quantumFarmsMeta[i];
@@ -5044,7 +5053,7 @@ function computeClientQuantumFarmIncomePer5s() {
       return v == null ? 0 : v | 0;
     });
     const st = resolveFarmControl(scores);
-    if ((st.owner | 0) === tid && !st.contested) {
+    if ((st.owner | 0) === tid && !st.contested && clientQuantumFarmSupplyConnected(tid, f)) {
       sum += normalizeQuantumFarmLevel(f.level);
     }
   }
@@ -5181,10 +5190,10 @@ function openQuantumFarmPanel(f) {
       quantumFarmPanelIncomeEl.textContent = "Спор — доход: 0 / 5 с";
     } else if (owner === myT) {
       quantumFarmPanelIncomeEl.textContent = supplyLinked
-        ? `Доход: +${lvl} / 5 с`
+        ? `Доход: +${lvl} / 5 с (каждому члену команды)`
         : "Доход: 0 / 5 с (нет связи с базой)";
     } else {
-      quantumFarmPanelIncomeEl.textContent = `Чужой контроль · их доход: +${lvl} / 5 с`;
+      quantumFarmPanelIncomeEl.textContent = `Чужой контроль · их доход: +${lvl} / 5 с на игрока`;
     }
   }
 
@@ -5377,7 +5386,7 @@ function clientTeamTerritoryOverlapsBestCompression(teamId, comp) {
  */
 function computeClientBattleEventZoneQuantsPer5s() {
   const tid = myTeamId | 0;
-  if (!tid || gridW < 1 || gridH < 1) return 0;
+  if (!tid || gridW < 1 || gridH < 1 || !isClientQuantumFarmIncomeAccrualPhase()) return 0;
   const ge = getClientGlobalEventSnapshot();
   const be = ge?.battleEvents;
   const layers = be?.layers;
@@ -5419,11 +5428,19 @@ function computeClientBattleEventZoneQuantsPer5s() {
 }
 
 /**
- * Пассив для подписи в UI: по текущей карте и globalEvent (совпадает с начислением на сервере при тех же данных).
- * Не используем кэш из wallet — чтобы при захвате зоны подпись обновлялась без ожидания следующего тика.
+ * Пассив для подписи в UI: в онлайне — суммы с сервера (wallet); каждому члену команды начисляется столько же / 5 с.
  */
 function getDisplayedPassiveQuantumBreakdown() {
   if (myTeamId == null || spectatorMode) return { farm: 0, zone: 0, total: 0 };
+  if (wantOnline && getWsUrl() && walletState) {
+    const farm = walletState.quantFarmIncomeQuantsPer5s;
+    const zone = walletState.battleEventZoneQuantsPer5s;
+    if (typeof farm === "number" && typeof zone === "number" && Number.isFinite(farm) && Number.isFinite(zone)) {
+      const ff = Math.max(0, farm | 0);
+      const zz = Math.max(0, zone | 0);
+      return { farm: ff, zone: zz, total: ff + zz };
+    }
+  }
   const farm = computeClientQuantumFarmIncomePer5s();
   const zone = computeClientBattleEventZoneQuantsPer5s();
   return { farm, zone, total: farm + zone };
@@ -5441,7 +5458,7 @@ function passiveQuantumIncomeSubtitle(farm, zone, total) {
   if (zone > 0) {
     return { text: `+${total} / 5 с за зоны турнира на карте`, hidden: false };
   }
-  return { text: `+${total} / 5 с с квантовых ферм (команда)`, hidden: false };
+  return { text: `+${total} / 5 с с квантовых ферм (команда, каждому)`, hidden: false };
 }
 
 /** Обновление подписи пассива при движении по карте / смене событий (без полного updateWalletBar). */
@@ -5458,7 +5475,7 @@ function refreshPassiveIncomeDisplays() {
   walletBalanceEl.textContent = `💰 ${t} ${quantWord(t)}${farmSuffix}`;
   walletBalanceEl.title =
     passiveTotal > 0
-      ? `Баланс в квантах. Пассивный доход: ${passiveTotal} квант. / 5 с (фермы: ${farmOnly}, зоны турнира на карте: ${zoneOnly}). Таймер пикселя — слева.`
+      ? `Баланс в квантах. Каждому в команде: до +${passiveTotal} кв. / 5 с (фермы: ${farmOnly}, зоны турнира: ${zoneOnly}). Таймер пикселя — слева.`
       : "Баланс в квантах. Пауза до следующего обычного пикселя — слева.";
 }
 
@@ -5469,7 +5486,7 @@ function refreshPassiveIncomeDisplays() {
  */
 function playQuantumFarmIncomeClientFx(quants, opts = {}) {
   const q = quants | 0;
-  if (q < 1 || spectatorMode) return;
+  if (q < 1 || spectatorMode || !isClientQuantumFarmIncomeAccrualPhase()) return;
   const tid = myTeamId | 0;
   if (!tid) return;
   const tr = getVfxTransform();
@@ -5487,7 +5504,8 @@ function playQuantumFarmIncomeClientFx(quants, opts = {}) {
         const v = clientPixelTeamIdAt(Number(p[0]), Number(p[1]));
         return v == null ? 0 : v | 0;
       });
-      if ((resolveFarmControl(scores).owner | 0) !== tid) continue;
+      const ctrl = resolveFarmControl(scores);
+      if ((ctrl.owner | 0) !== tid || ctrl.contested || !clientQuantumFarmSupplyConnected(tid, f)) continue;
       const gcx = f.x0 + f.w * 0.5;
       const gcy = f.y0 + f.h * 0.5;
       const gxi = gcx | 0;
@@ -5558,6 +5576,7 @@ function syncToolbarQuantumObjective() {
     return;
   }
   const tid = myTeamId | 0;
+  const accrual = isClientQuantumFarmIncomeAccrualPhase();
   let held = 0;
   let incomeSum = 0;
   let contestedNearUs = 0;
@@ -5569,7 +5588,12 @@ function syncToolbarQuantumObjective() {
       return v == null ? 0 : v | 0;
     });
     const st = resolveFarmControl(scores);
-    if ((st.owner | 0) === tid && !st.contested) {
+    if (
+      accrual &&
+      (st.owner | 0) === tid &&
+      !st.contested &&
+      clientQuantumFarmSupplyConnected(tid, f)
+    ) {
       held++;
       incomeSum += normalizeQuantumFarmLevel(f.level);
     }
@@ -5577,7 +5601,7 @@ function syncToolbarQuantumObjective() {
   }
   toolbarQuantumObjectiveEl.textContent =
     held > 0 ? `⚛ Удерживаем ${held}/${total}` : `⚛ Штурм ферм 0/${total}`;
-  toolbarQuantumObjectiveEl.title = `Фермы: ур. 1 (+1) … ур. 4 «Вершина» (+4) кв. / 5 с при контроле и связи. Ваш доход с ферм: до +${incomeSum} / 5 с (${held} из ${total}). Спор — без дохода. Тап по ферме — улучшение.`;
+  toolbarQuantumObjectiveEl.title = `Фермы: ур. 1…4 при контроле и связи с базой. С ферм каждому в команде: +${incomeSum} кв. / 5 с (сумма удерживаемых точек, ${held}/${total}). Тап по ферме — улучшение.`;
   toolbarQuantumObjectiveEl.classList.toggle("toolbar__quantum-objective--held", held > 0);
   toolbarQuantumObjectiveEl.classList.toggle(
     "toolbar__quantum-objective--contested",
@@ -7956,6 +7980,8 @@ function connectWs() {
       syncTournamentWarmupOverlay();
       syncBackgroundMusicAllowed();
       syncClientCooldownFromWalletFields();
+      syncToolbarQuantumObjective();
+      refreshPassiveIncomeDisplays();
       return;
     }
 
@@ -7975,6 +8001,8 @@ function connectWs() {
       syncDevTimeScaleBanner();
       updateRoundTimer();
       syncTournamentWarmupOverlay();
+      syncToolbarQuantumObjective();
+      refreshPassiveIncomeDisplays();
       return;
     }
     if (msg.type === "meta") {
@@ -9035,6 +9063,7 @@ function connectWs() {
         quantumFarmPanelEl &&
         !quantumFarmPanelEl.hidden &&
         (pur === "quantum_farm_not_controlled" ||
+          pur === "quantum_farm_no_supply" ||
           pur === "quantum_farm_max_level" ||
           pur === "not enough balance");
       if (!keepQuantumFarmPanelOpen) closeQuantumFarmPanel();
@@ -9144,6 +9173,8 @@ function connectWs() {
       showRoundStartSplash(ri);
       syncTournamentWarmupOverlay();
       updateRoundTimer();
+      syncToolbarQuantumObjective();
+      refreshPassiveIncomeDisplays();
       scheduleDraw();
       return;
     }

@@ -105,6 +105,7 @@ import { computeNukeBombBlastCells } from "./lib/nuke-bomb-shape.js";
 import {
   QUANTUM_FARM_TICK_MS,
   computeQuantumFarmLayouts,
+  getQuantumFarmInfluenceKeys,
   scoreTeamsAroundFarm,
   resolveFarmControl,
 } from "./lib/quantum-farms.js";
@@ -113,6 +114,9 @@ import { normalizeQuantumFarmLevel, QUANTUM_FARM_MAX_LEVEL } from "./lib/quantum
 
 /** За каждую активную «визуальную» зону события, где есть хотя бы одна клетка территории команды, +столько квантов / 5 с. */
 const BATTLE_EVENT_ZONE_QUANT_PER_STACK = 5;
+
+/** Включить подробный лог тика дохода ферм: `DEBUG_QUANTUM_FARM_INCOME=1 node server.js` */
+const DEBUG_QUANTUM_FARM_INCOME = process.env.DEBUG_QUANTUM_FARM_INCOME === "1";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
@@ -2317,6 +2321,7 @@ function rebuildLandFromRound(ri) {
   }));
   quantumFarmLayouts = computeQuantumFarmLayouts(playableGrid, gridW, gridH, ri, quantumFarmAvoidRects);
   quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
+  quantumFarmPayingTeamPrev = quantumFarmLayouts.length ? computeQuantumFarmPayingTeamsNow(quantumFarmOwnerPrev) : [];
   if (quantumFarmLayouts.length) {
     if (pendingQuantumFarmLevelsRestore && pendingQuantumFarmLevelsRestore.length === quantumFarmLayouts.length) {
       quantumFarmLevels = pendingQuantumFarmLevelsRestore.map((x) => normalizeQuantumFarmLevel(x));
@@ -2590,6 +2595,14 @@ function isWarmupPhaseNow() {
   return effectiveGameClockMs() < getPlayStartMs();
 }
 
+/** Пассив ферм и зон турнира начисляется только в активной фазе боя (не лобби до go, не разминка, не пауза). */
+function isQuantumFarmIncomeAccrualPhaseNow() {
+  if (gameFinished || gamePaused) return false;
+  if (roundIndex === 0 && !roundTimerStarted) return false;
+  if (isWarmupPhaseNow()) return false;
+  return true;
+}
+
 function clearTiebreakSnapshots() {
   teamPeakScoreForTiebreak.clear();
   teamFirstHitPeakAt.clear();
@@ -2684,6 +2697,8 @@ function schedulePlayStartBroadcast() {
         [...wss.clients].filter((c) => c.readyState === 1).map((c) => sendConnectionMeta(c))
       );
     }
+    void broadcastWalletPayloadToAllClients();
+    requestQuantumFarmIncomeTickSoon();
   }, delay);
 }
 
@@ -2769,6 +2784,8 @@ const teamEffects = new Map();
 let quantumFarmLayouts = [];
 /** @type {number[]} владельцы по индексу (для детекта смены и тика дохода). */
 let quantumFarmOwnerPrev = [];
+/** @type {number[]} команда, которой реально начисляется доход с фермы (0 = нет: спор или нет связи с базой). */
+let quantumFarmPayingTeamPrev = [];
 let quantumFarmIncomeTickSeq = 0;
 /** Планировщик тика дохода ферм: один таймер + срочный тик при смене контроля (без ожидания reload). */
 let quantumFarmIncomeTimer = null;
@@ -2855,6 +2872,27 @@ function collectWinnerTeamPlayerKeys(winnerTeamId) {
     }
   }
   return out;
+}
+
+/**
+ * Ключи для пассива ферм/зон: каждый из списка получает полную сумму команды за тик (+N квантов каждый, без деления).
+ * Без dev-unlimited; стабильный порядок для логов.
+ * @param {number} teamId
+ * @returns {string[]}
+ */
+function getPassiveIncomePayeeKeysSorted(teamId) {
+  const tid = teamId | 0;
+  if (!tid) return [];
+  const raw = collectWinnerTeamPlayerKeys(tid);
+  /** @type {string[]} */
+  const keys = [...raw].map((k) => sanitizePlayerKey(k)).filter((pk) => pk && !isDevUnlimitedWallet(pk));
+  if (!keys.length) {
+    const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
+    const fb = dt && typeof dt.createdByPlayerKey === "string" ? sanitizePlayerKey(dt.createdByPlayerKey) : "";
+    if (fb && !isDevUnlimitedWallet(fb)) keys.push(fb);
+  }
+  keys.sort();
+  return keys;
 }
 
 function cellSetsEqual(a, b) {
@@ -3306,11 +3344,14 @@ async function broadcastWalletPayloadToAllClients() {
   if (!wss) return;
   const clients = [...wss.clients].filter((c) => c.readyState === 1);
   await Promise.all(
-    clients.map((c) =>
-      buildWalletPayload(c).then((pl) => {
+    clients.map(async (c) => {
+      try {
+        const pl = await buildWalletPayload(c);
         safeSend(c, pl);
-      })
-    )
+      } catch (e) {
+        console.warn("[wallet] broadcast payload failed:", e?.message || e);
+      }
+    })
   );
 }
 
@@ -3390,11 +3431,13 @@ function computeQuantumFarmOwnersNow() {
 
 function getQuantumFarmIncomeQuantsForTeam(teamId) {
   const tid = teamId | 0;
-  if (!tid || !quantumFarmLayouts.length) return 0;
+  if (!tid || !quantumFarmLayouts.length || !isQuantumFarmIncomeAccrualPhaseNow()) return 0;
   const owners = computeQuantumFarmOwnersNow();
   let sum = 0;
   for (let i = 0; i < owners.length; i++) {
     if ((owners[i] | 0) !== tid) continue;
+    const f = quantumFarmLayouts[i];
+    if (!f || !serverQuantumFarmSupplyConnected(tid, f)) continue;
     sum += normalizeQuantumFarmLevel(quantumFarmLevels[i]);
   }
   return sum;
@@ -3482,6 +3525,7 @@ function getBattleEventZoneQuantumStackForTeam(teamId, nowMs) {
 }
 
 function getBattleEventZoneQuantumQuantsForTeam(teamId, nowMs) {
+  if (!isQuantumFarmIncomeAccrualPhaseNow()) return 0;
   return getBattleEventZoneQuantumStackForTeam(teamId, nowMs) * BATTLE_EVENT_ZONE_QUANT_PER_STACK;
 }
 
@@ -3491,19 +3535,26 @@ function broadcastQuantumFarmTeamNotice(teamId, payload) {
 }
 
 function syncQuantumFarmStateAfterTerritoryChange() {
-  if (gamePaused || gameFinished || !quantumFarmLayouts.length) return;
+  if (gameFinished || !quantumFarmLayouts.length) return;
   if (REDIS_URL && !isClusterLeader()) return;
-  const next = computeQuantumFarmOwnersNow();
-  if (quantumFarmOwnerPrev.length !== next.length) {
-    quantumFarmOwnerPrev = next;
+  const nextOwners = computeQuantumFarmOwnersNow();
+  const nextPaying = computeQuantumFarmPayingTeamsNow(nextOwners);
+  if (quantumFarmOwnerPrev.length !== nextOwners.length) {
+    quantumFarmOwnerPrev = nextOwners;
+    quantumFarmPayingTeamPrev = nextPaying;
     void broadcastWalletToAll();
     requestQuantumFarmIncomeTickSoon();
     return;
   }
   let ownersChanged = false;
-  for (let i = 0; i < next.length; i++) {
+  let payingChanged = false;
+  for (let i = 0; i < nextOwners.length; i++) {
+    const aPay = quantumFarmPayingTeamPrev[i] | 0;
+    const bPay = nextPaying[i] | 0;
+    if (aPay !== bPay) payingChanged = true;
+
     const a = quantumFarmOwnerPrev[i] | 0;
-    const b = next[i] | 0;
+    const b = nextOwners[i] | 0;
     if (a === b) continue;
     ownersChanged = true;
     const farmId = quantumFarmLayouts[i].id;
@@ -3534,8 +3585,30 @@ function syncQuantumFarmStateAfterTerritoryChange() {
       broadcast({ type: "quantumFarmsInit", farms: buildQuantumFarmsClientPayload() });
     }
   }
-  quantumFarmOwnerPrev = next;
-  if (ownersChanged) {
+
+  /* Смена только «связи с базой»: владелец тот же, начисление вкл/выкл. */
+  for (let i = 0; i < nextOwners.length; i++) {
+    const aOwn = quantumFarmOwnerPrev[i] | 0;
+    const bOwn = nextOwners[i] | 0;
+    if (aOwn !== bOwn) continue;
+    const aPay = quantumFarmPayingTeamPrev[i] | 0;
+    const bPay = nextPaying[i] | 0;
+    if (aPay === bPay) continue;
+    const farmId = quantumFarmLayouts[i].id;
+    if (aPay && !bPay) {
+      broadcastQuantumFarmTeamNotice(aPay, { type: "quantumFarmNotice", kind: "disconnected", farmId });
+    } else if (!aPay && bPay) {
+      broadcastQuantumFarmTeamNotice(bPay, {
+        type: "quantumFarmNotice",
+        kind: "connected",
+        farmId,
+      });
+    }
+  }
+
+  quantumFarmOwnerPrev = nextOwners;
+  quantumFarmPayingTeamPrev = nextPaying;
+  if (ownersChanged || payingChanged) {
     void broadcastWalletToAll();
     requestQuantumFarmIncomeTickSoon();
   }
@@ -3544,6 +3617,7 @@ function syncQuantumFarmStateAfterTerritoryChange() {
 async function tickQuantumFarmIncome() {
   if (REDIS_URL && !isClusterLeader()) return;
   if (gamePaused || gameFinished) return;
+  if (!isQuantumFarmIncomeAccrualPhaseNow()) return;
   const nowMs = effectiveGameClockMs();
 
   /** @type {Map<number, number>} */
@@ -3553,6 +3627,8 @@ async function tickQuantumFarmIncome() {
     for (let i = 0; i < owners.length; i++) {
       const t = owners[i] | 0;
       if (!t) continue;
+      const f = quantumFarmLayouts[i];
+      if (!f || !serverQuantumFarmSupplyConnected(t, f)) continue;
       const inc = normalizeQuantumFarmLevel(quantumFarmLevels[i]);
       farmsPerTeam.set(t, (farmsPerTeam.get(t) | 0) + inc);
     }
@@ -3574,50 +3650,99 @@ async function tickQuantumFarmIncome() {
   quantumFarmIncomeTickSeq += 1;
   const tickTag = `${roundIndex}_${quantumFarmIncomeTickSeq}_${Date.now()}`;
   /** @type {Map<string, number>} */
-  const quantByPk = new Map();
+  const farmCreditByPk = new Map();
+  /** @type {Map<string, number>} */
+  const zoneCreditByPk = new Map();
 
   for (const [tid, nf] of farmsPerTeam) {
     const nFarm = nf | 0;
     if (nFarm < 1) continue;
     if (isTeamEliminated(tid)) continue;
-    const playerKeys = collectWinnerTeamPlayerKeys(tid);
-    for (const pk of playerKeys) {
-      if (!pk || isDevUnlimitedWallet(pk)) continue;
-      quantByPk.set(pk, (quantByPk.get(pk) | 0) + nFarm);
+    const payees = getPassiveIncomePayeeKeysSorted(tid);
+    if (!payees.length) {
+      if (DEBUG_QUANTUM_FARM_INCOME) {
+        console.warn(`[quantFarmIncome] team ${tid} farmQ=${nFarm} but no payee keys`);
+      }
+      continue;
+    }
+    for (let i = 0; i < payees.length; i++) {
+      const pk = payees[i];
+      farmCreditByPk.set(pk, (farmCreditByPk.get(pk) | 0) + nFarm);
     }
   }
 
   for (const [tid, zq] of zoneQuantsByTeam) {
     const zoneQ = zq | 0;
     if (zoneQ < 1) continue;
-    const playerKeys = collectWinnerTeamPlayerKeys(tid);
-    for (const pk of playerKeys) {
-      if (!pk || isDevUnlimitedWallet(pk)) continue;
-      quantByPk.set(pk, (quantByPk.get(pk) | 0) + zoneQ);
+    if (isTeamEliminated(tid)) continue;
+    const payees = getPassiveIncomePayeeKeysSorted(tid);
+    if (!payees.length) {
+      if (DEBUG_QUANTUM_FARM_INCOME) {
+        console.warn(`[quantFarmIncome] team ${tid} zoneQ=${zoneQ} but no payee keys`);
+      }
+      continue;
+    }
+    for (let i = 0; i < payees.length; i++) {
+      const pk = payees[i];
+      zoneCreditByPk.set(pk, (zoneCreditByPk.get(pk) | 0) + zoneQ);
     }
   }
 
-  if (quantByPk.size === 0) return;
+  /** @type {Map<string, number>} */
+  const quantByPk = new Map();
+  for (const pk of new Set([...farmCreditByPk.keys(), ...zoneCreditByPk.keys()])) {
+    const sum = (farmCreditByPk.get(pk) | 0) + (zoneCreditByPk.get(pk) | 0);
+    if (sum > 0) quantByPk.set(pk, sum);
+  }
+
+  if (quantByPk.size === 0) {
+    if (DEBUG_QUANTUM_FARM_INCOME && (farmsPerTeam.size > 0 || zoneQuantsByTeam.size > 0)) {
+      const detail = [...farmsPerTeam.entries()]
+        .map(([t, n]) => `team ${t} farmQ=${n} payees=${getPassiveIncomePayeeKeysSorted(t).length}`)
+        .join("; ");
+      console.warn(`[quantFarmIncome] skip credit: nothing to mint (${detail})`);
+    }
+    return;
+  }
+  let passiveCreditOkCount = 0;
   for (const [pk, q] of quantByPk) {
     const qq = q | 0;
     if (qq < 1) continue;
-    await walletStore.credit(pk, quantToUsdt(qq), { txHash: `passive_quant:${tickTag}:${pk.slice(0, 24)}` });
+    try {
+      await walletStore.credit(pk, quantToUsdt(qq), { txHash: `passive_quant:${tickTag}:${pk.slice(0, 24)}` });
+      passiveCreditOkCount++;
+    } catch (e) {
+      console.warn("[quantFarmIncome] credit failed", pk.slice(0, 20), e?.message || e);
+    }
   }
-  await walletStore.save();
+  try {
+    await walletStore.save();
+  } catch (e) {
+    console.warn("[quantFarmIncome] wallet save failed:", e?.message || e);
+  }
   await broadcastWalletPayloadToAllClients();
 
-  /** Пульс клиенту: сумма ферм + зоны событий за тик (на игрока). */
+  if (DEBUG_QUANTUM_FARM_INCOME) {
+    const farmPart = [...farmsPerTeam.entries()].map(([t, n]) => `t${t}=${n}`).join(",");
+    console.log(
+      `[quantFarmIncome] tick ${tickTag} farms{${farmPart}} intendedPlayers=${quantByPk.size} creditsOk=${passiveCreditOkCount}`
+    );
+  }
+
+  /** Пульс только если хотя бы одно начисление прошло — иначе FX без роста баланса. */
+  if (passiveCreditOkCount < 1) return;
+
+  /** Один пакет на команду: каждый участник получил столько же квантов (полные +N ферм и +N зоны каждому). */
   const pulseTeams = new Set([...farmsPerTeam.keys(), ...zoneQuantsByTeam.keys()]);
   for (const tid of pulseTeams) {
     if (isTeamEliminated(tid)) continue;
     const nFarm = farmsPerTeam.get(tid) | 0;
     const nZone = zoneQuantsByTeam.get(tid) | 0;
-    const total = nFarm + nZone;
-    if (total < 1) continue;
-    broadcast({
+    const perPerson = nFarm + nZone;
+    if (perPerson < 1) continue;
+    broadcastQuantumFarmTeamNotice(tid, {
       type: "quantFarmIncomePulse",
-      teamId: tid | 0,
-      quants: total,
+      quants: perPerson,
       farmQuants: nFarm > 0 ? nFarm : undefined,
       eventZoneQuants: nZone > 0 ? nZone : undefined,
     });
@@ -4172,6 +4297,9 @@ function applyClusterGameReplication(msg) {
           return normalizeQuantumFarmLevel(raw);
         });
         quantumFarmOwnerPrev = quantumFarmLayouts.length ? computeQuantumFarmOwnersNow() : [];
+        quantumFarmPayingTeamPrev = quantumFarmLayouts.length
+          ? computeQuantumFarmPayingTeamsNow(quantumFarmOwnerPrev)
+          : [];
       }
       return;
     }
@@ -4320,6 +4448,50 @@ function computeBaseConnectedPixelKeysForTeam(teamId) {
     }
   }
   baseConnectedPixelsCacheByTeam.set(tid, out);
+  return out;
+}
+
+/**
+ * Ферма даёт доход только при «связи с базой»: хотя бы одна клетка команды в зоне влияния входит в компонент территории от базы.
+ * Та же логика, что `clientQuantumFarmSupplyConnected` в main.js.
+ * @param {number} teamId
+ * @param {{ x0: number, y0: number, w?: number, h?: number }} farm
+ */
+function serverQuantumFarmSupplyConnected(teamId, farm) {
+  const tid = teamId | 0;
+  if (!tid || !farm || gridW < 1 || gridH < 1) return false;
+  const keys = getQuantumFarmInfluenceKeys(farm.x0 | 0, farm.y0 | 0, gridW, gridH);
+  const baseConn = computeBaseConnectedPixelKeysForTeam(tid);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = pixels.get(k);
+    if (!v || (pixelTeam(v) | 0) !== tid) continue;
+    if (baseConn.has(k)) return true;
+  }
+  return false;
+}
+
+/**
+ * По массиву владельцев ферм — кто реально получает пассив (владелец при наличии связи с базой, иначе 0).
+ * @param {number[]} owners
+ * @returns {number[]}
+ */
+function computeQuantumFarmPayingTeamsNow(owners) {
+  /** @type {number[]} */
+  const out = [];
+  for (let i = 0; i < owners.length; i++) {
+    const t = owners[i] | 0;
+    if (!t) {
+      out.push(0);
+      continue;
+    }
+    const f = quantumFarmLayouts[i];
+    if (!f) {
+      out.push(0);
+      continue;
+    }
+    out.push(serverQuantumFarmSupplyConnected(t, f) ? t : 0);
+  }
   return out;
 }
 
@@ -5485,12 +5657,15 @@ function afterTerritoryMutation() {
     notifyTerritoryDramaEvents(lastTerritoryCountSnapshot, next);
     lastTerritoryCountSnapshot = new Map(next);
     scanAndEliminateTeamsWithNoTerritory(next);
-    syncQuantumFarmStateAfterTerritoryChange();
     const st = buildStatsPayload();
     updateTiebreakFromStatsPayload(st);
     checkDuelWinByElimination(st);
     scanMilitaryOutpostsVacancyAndExpire(effectiveGameClockMs()); /* no-op: плацдарм без автотаймера */
     schedulePixelsSnapshotSave();
+  }
+  /* Синхронизация ферм и кошельков — и при паузе (связь с базой / payload без начислений до снятия паузы). */
+  if (!gameFinished && (!REDIS_URL || isClusterLeader())) {
+    syncQuantumFarmStateAfterTerritoryChange();
   }
   /* Всегда: иначе при паузе / раннем return кэш «связь с базой» устаревает — нельзя ставить пиксели от передовой базы. */
   invalidateBaseConnectedPixelsCache();
@@ -6251,7 +6426,7 @@ function parseTeamquantTelegramCommand(normRaw) {
     .trim()
     .replace(/^\/+/, "")
     .replace(/\s+/g, " ");
-  const m = /^teamquant\s+(.+?)\s*\+\s*(\d{1,12})\s*$/i.exec(s);
+  const m = /^teamquant\s+(.+?)\s*([+\-])\s*(\d{1,12})\s*$/i.exec(s);
   if (!m) return { ok: false };
   let namePart = m[1].trim();
   if (
@@ -6260,11 +6435,12 @@ function parseTeamquantTelegramCommand(normRaw) {
   ) {
     namePart = namePart.slice(1, -1).trim();
   }
-  const amount = parseInt(m[2], 10);
+  const op = m[2] === "-" ? "-" : "+";
+  const amount = parseInt(m[3], 10);
   if (!namePart || !Number.isFinite(amount) || amount < 1 || amount > ADMIN_QUANT_SINGLE_OP_MAX) {
     return { ok: false };
   }
-  return { ok: true, teamNameQuery: namePart, amount };
+  return { ok: true, teamNameQuery: namePart, amount, op };
 }
 
 /**
@@ -6603,8 +6779,9 @@ async function adminPushWalletUpdateToOnlinePlayerKeys(playerKeys) {
  * @param {number} adminTelegramUid
  * @param {string} teamNameQuery
  * @param {number} amount
+ * @param {"+" | "-"} op
  */
-async function applyAdminTeamQuantTelegramCommand(chatId, adminTelegramUid, teamNameQuery, amount) {
+async function applyAdminTeamQuantTelegramCommand(chatId, adminTelegramUid, teamNameQuery, amount, op) {
   const resolved = resolveTeamForAdminQuantGrant(teamNameQuery);
   if (resolved.kind !== "one") {
     await telegramSendMessage(chatId, resolved.message);
@@ -6621,11 +6798,40 @@ async function applyAdminTeamQuantTelegramCommand(chatId, adminTelegramUid, team
     );
     return;
   }
-  const addUsdt = quantToUsdt(amount);
+  const deltaUsdt = quantToUsdt(amount);
+  /** @type {{ pk: string, oldB: number, oldQ: number }[]} */
+  const snapshots = [];
   for (const pk of keys) {
     const u = await walletStore.getOrCreateUser(pk);
     const oldB = roundEconomyUsdt(Number(u.balanceUSDT) || 0);
-    u.balanceUSDT = roundEconomyUsdt(Math.max(0, oldB + addUsdt));
+    const oldQ = quantsFromBalanceUsdt(oldB);
+    snapshots.push({ pk, oldB, oldQ });
+  }
+  if (op === "-") {
+    const short = [];
+    for (const row of snapshots) {
+      if (row.oldB + 1e-9 < deltaUsdt) {
+        const m = /^tg_(\d+)$/.exec(row.pk);
+        short.push(m ? `tg ${m[1]} (${row.oldQ} кв.)` : `${row.pk.slice(0, 24)}… (${row.oldQ} кв.)`);
+      }
+    }
+    if (short.length) {
+      const sample = short.slice(0, 8).join("; ");
+      const more = short.length > 8 ? ` …и ещё ${short.length - 8}` : "";
+      await telegramSendMessage(
+        chatId,
+        `Списание отменено: у ${short.length} из ${keys.length} игроков нет ${amount} квантов (нужен достаточный баланс у всех). Примеры: ${sample}${more}`
+      );
+      return;
+    }
+  }
+  for (let i = 0; i < keys.length; i++) {
+    const pk = keys[i];
+    const u = await walletStore.getOrCreateUser(pk);
+    const oldB = snapshots[i].oldB;
+    const newB =
+      op === "+" ? roundEconomyUsdt(Math.max(0, oldB + deltaUsdt)) : roundEconomyUsdt(Math.max(0, oldB - deltaUsdt));
+    u.balanceUSDT = newB;
   }
   await walletStore.flushUsersEconomy(keys);
   const affected = keys.length;
@@ -6635,13 +6841,18 @@ async function applyAdminTeamQuantTelegramCommand(chatId, adminTelegramUid, team
     target: "team_members",
     teamId: tid,
     teamName: sanitizeTeamName(team.name),
-    perPlayerQuantGrant: amount,
+    perPlayerQuantOp: op,
+    perPlayerQuantAmount: amount,
     playersAffected: affected,
   });
   await adminPushWalletUpdateToOnlinePlayerKeys(keys);
+  const verb =
+    op === "+"
+      ? `лично начислено +${amount} квантов`
+      : `лично списано −${amount} квантов`;
   await telegramSendMessage(
     chatId,
-    `Каждому из ${affected} игроков команды «${sanitizeTeamName(team.name)}» лично начислено +${amount} квантов (общий кошелёк команды не используется).`
+    `Каждому из ${affected} игроков команды «${sanitizeTeamName(team.name)}» ${verb} (общий кошелёк команды не используется).`
   );
 }
 
@@ -6904,6 +7115,7 @@ async function applyAdminUnpause(telegramUserId) {
   gamePaused = false;
   pauseWallStartedAt = 0;
   pauseCapturedWarmup = false;
+  syncQuantumFarmStateAfterTerritoryChange();
   saveRoundState();
   logAdminAction({ command: "unpause", byTelegramId: telegramUserId, pauseDurationMs: d });
   broadcast({
@@ -7509,6 +7721,7 @@ wss.on("connection", (ws, req) => {
       return;
     }
     if (!msg || typeof msg !== "object") return;
+    if (ws.teamId != null && ws.playerKey) ensureWsTeamMemberKeyRegistered(ws);
 
     if (PIXEL_BATTLE_ENABLE_TEST_WS) {
       if (msg.type === "__testSetMstim") {
@@ -8632,6 +8845,10 @@ wss.on("connection", (ws, req) => {
       const owners = computeQuantumFarmOwnersNow();
       if ((owners[idx] | 0) !== tid) {
         safeSend(ws, { type: "purchaseError", reason: "quantum_farm_not_controlled" });
+        return;
+      }
+      if (!serverQuantumFarmSupplyConnected(tid, quantumFarmLayouts[idx])) {
+        safeSend(ws, { type: "purchaseError", reason: "quantum_farm_no_supply" });
         return;
       }
       const curLv = normalizeQuantumFarmLevel(quantumFarmLevels[idx]);
@@ -10213,11 +10430,17 @@ async function telegramPollLoop() {
             if (!parsedTq.ok) {
               await telegramSendMessage(
                 chatId,
-                'Формат: teamquant ИмяКоманды +N или teamquant "Имя с пробелами" +N\nПример: teamquant RedWolves +100'
+                'Формат: teamquant Имя +N или teamquant Имя -N (списание у всех). Пробелы в имени — кавычки.\nПример: teamquant RedWolves +100\nПример: teamquant "забрать" -50'
               );
               continue;
             }
-            await applyAdminTeamQuantTelegramCommand(chatId, uid, parsedTq.teamNameQuery, parsedTq.amount);
+            await applyAdminTeamQuantTelegramCommand(
+              chatId,
+              uid,
+              parsedTq.teamNameQuery,
+              parsedTq.amount,
+              parsedTq.op
+            );
             continue;
           }
         }
@@ -10458,7 +10681,7 @@ async function telegramPollLoop() {
           if (t.trim().startsWith("/")) {
             await telegramSendMessage(
               chatId,
-              "Неизвестная команда. Админ: /start, allquants, go, quant, quantlist, teamquant Имя +N, teams, say, speed, evt help…"
+              "Неизвестная команда. Админ: /start, allquants, go, quant, quantlist, teamquant Имя ±N, teams, say, speed, evt help…"
             );
           }
           continue;
