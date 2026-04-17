@@ -9,3 +9,6 @@ services:
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
+    scaling:
+      minInstances: 1
+      maxInstances: 1

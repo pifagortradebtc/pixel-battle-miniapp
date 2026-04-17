@@ -252,7 +252,18 @@ async function tryConsumeTelegramBridgeFromUrl() {
       body: JSON.stringify({ token }),
     });
     const j = await r.json().catch(() => ({}));
-    if (!j || !j.ok || typeof j.initData !== "string" || !j.initData.trim()) return;
+    if (!j || !j.ok || typeof j.initData !== "string" || !j.initData.trim()) {
+      if (r.status === 400 && j && j.error === "invalid or expired token") {
+        try {
+          window.Telegram?.WebApp?.showAlert?.(
+            "Сессия входа устарела. Закройте вкладку и снова откройте игру из бота (кнопка «В браузере»)."
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      return;
+    }
     sessionStorage.setItem(BRIDGE_INIT_STORAGE_KEY, j.initData.trim());
     u.searchParams.delete("tg_bridge");
     const clean = `${u.pathname}${u.search}${u.hash}` || "/";

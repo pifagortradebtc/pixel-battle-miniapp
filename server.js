@@ -5958,7 +5958,9 @@ async function handleApi(req, res) {
     }
     pruneTelegramBridgeTokens();
     const token = crypto.randomBytes(TELEGRAM_BRIDGE_TOKEN_BYTES).toString("hex");
-    telegramBridgeTokens.set(token, { initData, exp: Date.now() + TELEGRAM_BRIDGE_TOKEN_TTL_MS });
+    const bridgeEntry = { initData, exp: Date.now() + TELEGRAM_BRIDGE_TOKEN_TTL_MS };
+    telegramBridgeTokens.set(token, bridgeEntry);
+    void telegramBridgeRedisSet(token, bridgeEntry);
     const base = PUBLIC_BASE_URL.replace(/\/$/, "");
     const openUrl = `${base}/?tg_bridge=${encodeURIComponent(token)}`;
     res.writeHead(200);
@@ -5990,13 +5992,18 @@ async function handleApi(req, res) {
       return;
     }
     pruneTelegramBridgeTokens();
-    const entry = telegramBridgeTokens.get(token);
+    let entry = await telegramBridgeRedisConsume(token);
+    if (entry) {
+      telegramBridgeTokens.delete(token);
+    } else {
+      entry = telegramBridgeTokens.get(token) || null;
+      if (entry) telegramBridgeTokens.delete(token);
+    }
     if (!entry || entry.exp < Date.now()) {
       res.writeHead(400);
       res.end(JSON.stringify({ ok: false, error: "invalid or expired token" }));
       return;
     }
-    telegramBridgeTokens.delete(token);
     res.writeHead(200);
     res.end(JSON.stringify({ ok: true, initData: entry.initData }));
     return;
@@ -6296,9 +6303,60 @@ setInterval(() => {
 
 /** @type {Map<string, { initData: string, exp: number }>} */
 const telegramBridgeTokens = new Map();
-const TELEGRAM_BRIDGE_TOKEN_TTL_MS = 12 * 60 * 1000;
+const TELEGRAM_BRIDGE_TOKEN_TTL_MS = 18 * 60 * 1000;
 const TELEGRAM_BRIDGE_TOKEN_BYTES = 24;
 const TELEGRAM_BRIDGE_MINT_PER_HOUR = 48;
+
+/** @type {Promise<import("redis").RedisClientType | null> | null} */
+let telegramBridgeRedisConnectPromise = null;
+
+function getTelegramBridgeRedis() {
+  if (!REDIS_URL) return Promise.resolve(null);
+  if (!telegramBridgeRedisConnectPromise) {
+    telegramBridgeRedisConnectPromise = import("./lib/telegram-bridge-redis.mjs")
+      .then((m) => m.connectTelegramBridgeRedis(REDIS_URL))
+      .catch((e) => {
+        console.warn("[tg-bridge] redis connect:", e?.message || e);
+        telegramBridgeRedisConnectPromise = null;
+        return null;
+      });
+  }
+  return telegramBridgeRedisConnectPromise;
+}
+
+/**
+ * @param {string} token
+ * @param {{ initData: string, exp: number }} entry
+ */
+async function telegramBridgeRedisSet(token, entry) {
+  const client = await getTelegramBridgeRedis();
+  if (!client) return;
+  try {
+    const { telegramBridgeRedisKey } = await import("./lib/telegram-bridge-redis.mjs");
+    await client.set(telegramBridgeRedisKey(token), JSON.stringify(entry), {
+      PX: TELEGRAM_BRIDGE_TOKEN_TTL_MS,
+    });
+  } catch (e) {
+    console.warn("[tg-bridge] redis SET:", e?.message || e);
+  }
+}
+
+/** @returns {Promise<{ initData: string, exp: number } | null>} */
+async function telegramBridgeRedisConsume(token) {
+  const client = await getTelegramBridgeRedis();
+  if (!client) return null;
+  try {
+    const { telegramBridgeRedisKey } = await import("./lib/telegram-bridge-redis.mjs");
+    const raw = await client.getDel(telegramBridgeRedisKey(token));
+    if (typeof raw !== "string" || !raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.initData !== "string" || typeof parsed.exp !== "number") return null;
+    return parsed;
+  } catch (e) {
+    console.warn("[tg-bridge] redis GETDEL:", e?.message || e);
+    return null;
+  }
+}
 
 function pruneTelegramBridgeTokens() {
   const now = Date.now();
