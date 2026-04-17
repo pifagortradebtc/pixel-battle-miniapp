@@ -27,13 +27,14 @@ import {
   RECOVERY_BUFF_DURATION_MS,
   REFERRAL_JOIN_INVITER_QUANT,
   REFERRAL_JOIN_PAYMENT_ID_PREFIX,
-  getEffectiveRecoverySec,
-  getAuthoritativePixelCooldownMs,
+  computeAuthoritativePixelPlacementCooldownMs,
+  isAltSeasonMstimBurstWallActive,
   quantToUsdt,
   resolveAuthoritativeRecoverySec,
   stageAllows,
   stageAllowsRecoveryPurchases,
   tournamentStage,
+  quantumFarmUpgradePriceQuant,
 } from "./lib/tournament-economy.js";
 import { createWalletBackend } from "./lib/wallet-backend.js";
 import {
@@ -98,7 +99,6 @@ import {
   makeGridCellKey,
   neighborKeysInSet8,
 } from "./lib/territory-isolation.js";
-import { isWorldMapWaterPixel } from "./lib/world-map-water.js";
 import { buildRandomTreasureMap } from "./lib/map-treasures.js";
 import { computeNukeBombBlastCells } from "./lib/nuke-bomb-shape.js";
 import {
@@ -1145,6 +1145,11 @@ const TEAM_SPAWN_MIN = 1;
 const TEAM_SPAWN_SIZE = TEAM_SPAWN_MAX;
 const TEAM_SPAWN_GAP = 1;
 
+/** Кэш макс. радиуса центра базы для кольца спавна (roundIndex≥1: ромб/отступ ≠ прямоугольник bbox). */
+let spawnRingRmaxCacheKey = "";
+/** @type {Map<number, number>} */
+const spawnRingRmaxByS = new Map();
+
 function clampTeamMainSpawnSide(raw) {
   const s = Number(raw);
   if (!Number.isFinite(s) || s < 1) return TEAM_SPAWN_MAX;
@@ -1842,6 +1847,9 @@ function saveRoundState() {
         warmupPauseExtensionMs: Math.max(0, warmupPauseExtensionMs | 0),
         teamManualScoreBonus: Object.fromEntries(teamManualScoreBonus),
         quantumFarmLevels: quantumFarmLevels.length ? [...quantumFarmLevels] : [],
+        greatWallCharges: Object.fromEntries(
+          [...greatWallChargesByPk.entries()].filter(([, n]) => (Number(n) | 0) > 0)
+        ),
       }),
       "utf8"
     );
@@ -2074,6 +2082,14 @@ function loadRoundState() {
       } else {
         pendingQuantumFarmLevelsRestore = null;
       }
+      greatWallChargesByPk.clear();
+      if (j.greatWallCharges && typeof j.greatWallCharges === "object" && !Array.isArray(j.greatWallCharges)) {
+        for (const [k, v] of Object.entries(j.greatWallCharges)) {
+          const pk0 = sanitizePlayerKey(k);
+          const n0 = Number(v) | 0;
+          if (pk0 && n0 > 0) greatWallChargesByPk.set(pk0, n0);
+        }
+      }
       if (gamePaused && pauseWallStartedAt > Date.now()) {
         gamePaused = false;
         pauseWallStartedAt = 0;
@@ -2242,15 +2258,7 @@ function rebuildLandFromRound(ri) {
       const by = Math.min(BASE_GRID - 1, Math.floor(((y + 0.5) / gridH) * BASE_GRID));
       const idx = y * gridW + x;
       landGrid[idx] = baseRegion360[by * BASE_GRID + bx];
-      let play = landGrid[idx] !== 0 ? 1 : 0;
-      if (play && baseRgb360 && baseRgb360.length === BASE_GRID * BASE_GRID * 3) {
-        const bi = (by * BASE_GRID + bx) * 3;
-        const r = baseRgb360[bi];
-        const g = baseRgb360[bi + 1];
-        const b = baseRgb360[bi + 2];
-        if (isWorldMapWaterPixel(r, g, b, 255)) play = 0;
-      }
-      playableGrid[idx] = play;
+      playableGrid[idx] = landGrid[idx] !== 0 ? 1 : 0;
     }
   }
   applyRoundShapeMask(ri, landGrid, gridW, gridH);
@@ -2328,7 +2336,7 @@ function cellIsLand(x, y) {
   return landGrid[y * gridW + x] !== 0;
 }
 
-/** Размещение пикселей и баз: суша по маске и не океан по цвету плаката. */
+/** Размещение пикселей и баз: суша по регионам (вода = region id 0). Без доп. отсечки по RGB плаката — иначе ложная «вода» на краях карты. */
 function cellAllowsPixelPlacement(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
   if (!playableGrid || playableGrid.length !== gridW * gridH) return cellIsLand(x, y);
@@ -2461,17 +2469,42 @@ function effectiveGameClockMs() {
   return Date.now();
 }
 
+/** Если RAM потеряла mstim (другой воркер без Redis, пропущен pub/sub) — подтянуть until из round-state.json. */
+let lastMstimDiskHydrateAttemptWallMs = 0;
+function maybeRefreshMstimAltSeasonFromDisk() {
+  const wall = Date.now();
+  if (wall - lastMstimDiskHydrateAttemptWallMs < 400) return;
+  lastMstimDiskHydrateAttemptWallMs = wall;
+  const mem = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
+  if (mem > wall) return;
+  try {
+    if (!fs.existsSync(ROUND_STATE_PATH)) return;
+    const j = JSON.parse(fs.readFileSync(ROUND_STATE_PATH, "utf8"));
+    if (typeof j.mstimAltSeasonBurstUntilMs !== "number" || !Number.isFinite(j.mstimAltSeasonBurstUntilMs)) return;
+    const f = clampPositiveEpochMs(j.mstimAltSeasonBurstUntilMs);
+    if (f <= wall) return;
+    if (f === mem) return;
+    mstimAltSeasonBurstUntilMs = f;
+    if (DEBUG_MSTIM_COOLDOWN || DEBUG_PIXEL_COOLDOWN) {
+      console.log(`[mstim] hydrated RAM from disk until=${f} (was ${mem})`);
+    }
+  } catch (e) {
+    if (DEBUG_MSTIM_COOLDOWN) console.warn("[mstim] disk hydrate:", e?.message || e);
+  }
+}
+
 /**
  * Глобальный «Мстим / speed» (бот): `mstimAltSeasonBurstUntilMs` — wall epoch окончания окна.
  * На паузе окно «заморожено»: активно, если к моменту pause оно ещё не истекло (см. unpause — until сдвигается).
  */
 function globalSpeedMstimActive() {
-  const until = clampPositiveEpochMs(mstimAltSeasonBurstUntilMs);
-  if (until <= 0) return false;
-  if (gamePaused && (pauseWallStartedAt | 0) > 0) {
-    return until > (pauseWallStartedAt | 0);
-  }
-  return until > Date.now();
+  maybeRefreshMstimAltSeasonFromDisk();
+  return isAltSeasonMstimBurstWallActive({
+    mstimBurstUntilWallMs: mstimAltSeasonBurstUntilMs,
+    gamePaused,
+    pauseWallStartedAtMs: pauseWallStartedAt | 0,
+    wallNowMs: Date.now(),
+  });
 }
 
 /** @deprecated используйте globalSpeedMstimActive */
@@ -2479,19 +2512,34 @@ function isMstimAltSeasonBurstActive() {
   return globalSpeedMstimActive();
 }
 
-/** Единый расчёт cd (мс) для wallet и пикселя; wallNow = Date.now(). */
-function effectivePixelCooldownMs(u, teamFx, st, wallNow) {
-  return getAuthoritativePixelCooldownMs({
-    globalSpeedActive: globalSpeedMstimActive(),
+/**
+ * Единый расчёт cd (мс) для wallet и для валидации type:"pixel".
+ * Баффы личные/командные: только wall-time (см. computeAuthoritativePixelPlacementCooldownMs).
+ */
+function effectivePixelCooldownMs(u, teamFx, st, wallNowMs) {
+  maybeRefreshMstimAltSeasonFromDisk();
+  const w = Number.isFinite(wallNowMs) ? wallNowMs : Date.now();
+  return computeAuthoritativePixelPlacementCooldownMs({
     user: u,
     teamFx,
     stage: st,
-    nowMs: wallNow,
+    wallNowMs: w,
+    mstimBurstUntilWallMs: mstimAltSeasonBurstUntilMs,
+    gamePaused,
+    pauseWallStartedAtMs: pauseWallStartedAt | 0,
   });
 }
 
-function effectiveRecoverySecForWallet(u, teamFx, wallNow) {
-  return resolveAuthoritativeRecoverySec(globalSpeedMstimActive(), u, teamFx, wallNow);
+function effectiveRecoverySecForWallet(u, teamFx, wallNowMs) {
+  maybeRefreshMstimAltSeasonFromDisk();
+  const w = Number.isFinite(wallNowMs) ? wallNowMs : Date.now();
+  const mstim = isAltSeasonMstimBurstWallActive({
+    mstimBurstUntilWallMs: mstimAltSeasonBurstUntilMs,
+    gamePaused,
+    pauseWallStartedAtMs: pauseWallStartedAt | 0,
+    wallNowMs: w,
+  });
+  return resolveAuthoritativeRecoverySec(mstim, u, teamFx, w);
 }
 
 function getWarmupDurationMs() {
@@ -2717,10 +2765,38 @@ let quantumFarmIncomeTimer = null;
 let quantumFarmIncomeInFlight = false;
 let quantumFarmIncomeLastCompletedMs = 0;
 let quantumFarmIncomeForceTickPending = false;
-/** Уровни ферм 1..3 по индексу quantumFarmLayouts (доход = level кв. / 5 с при контроле). */
+/** Уровни ферм 1..QUANTUM_FARM_MAX_LEVEL по индексу quantumFarmLayouts (доход = level кв. / 5 с при контроле). */
 let quantumFarmLevels = [];
 /** Из round-state до первого rebuildLandFromRound (длина должна совпасть с layouts). */
 let pendingQuantumFarmLevelsRestore = null;
+
+/** Личный запас «кирпичей» Великой стены: покупка списывает кванты, установка — только запас. */
+let greatWallChargesByPk = new Map();
+
+function greatWallChargesGet(pk) {
+  const k = pk ? sanitizePlayerKey(pk) : "";
+  if (!k) return 0;
+  const n = greatWallChargesByPk.get(k);
+  return typeof n === "number" && n > 0 ? n | 0 : 0;
+}
+
+function greatWallChargesSet(pk, n) {
+  const k = pk ? sanitizePlayerKey(pk) : "";
+  if (!k) return;
+  const v = Math.max(0, n | 0);
+  if (v === 0) greatWallChargesByPk.delete(k);
+  else greatWallChargesByPk.set(k, v);
+}
+
+function greatWallChargesAdd(pk, delta) {
+  const cur = greatWallChargesGet(pk);
+  greatWallChargesSet(pk, cur + (delta | 0));
+  return greatWallChargesGet(pk);
+}
+
+function greatWallChargesClearAll() {
+  greatWallChargesByPk.clear();
+}
 
 function buildQuantumFarmsClientPayload() {
   const out = [];
@@ -2955,16 +3031,21 @@ function clearTeamEffectsMap() {
 }
 
 function getTeamFx(tid) {
-  if (!teamEffects.has(tid)) {
-    teamEffects.set(tid, { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC });
+  const id = Number(tid) | 0;
+  if (id <= 0) {
+    return { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   }
-  const fx = teamEffects.get(tid);
+  if (!teamEffects.has(id)) {
+    teamEffects.set(id, { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC });
+  }
+  const fx = teamEffects.get(id);
   if (fx.teamRecoveryUntil == null && fx.teamBoostUntil != null) {
     fx.teamRecoveryUntil = fx.teamBoostUntil;
   }
-  if (typeof fx.teamRecoveryUntil !== "number") fx.teamRecoveryUntil = 0;
-  if (typeof fx.teamRecoverySec !== "number" || fx.teamRecoverySec < 1) {
-    fx.teamRecoverySec = BASE_ACTION_COOLDOWN_SEC;
+  if (typeof fx.teamRecoveryUntil !== "number") fx.teamRecoveryUntil = Number(fx.teamRecoveryUntil) || 0;
+  {
+    const s = Math.trunc(Number(fx.teamRecoverySec));
+    fx.teamRecoverySec = Number.isFinite(s) && s >= 1 ? s : BASE_ACTION_COOLDOWN_SEC;
   }
   delete fx.teamBoostUntil;
   delete fx.raidBoostUntil;
@@ -3227,15 +3308,16 @@ async function buildWalletPayload(ws) {
   const pk = ws.playerKey ? sanitizePlayerKey(ws.playerKey) : "";
   const u = await walletStore.getOrCreateUser(pk);
   const nowGame = effectiveGameClockMs();
+  const wallNow = Date.now();
   const st = tournamentStage(roundIndex, gameFinished);
   const tid = ws.teamId | 0;
   const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const devUnl = pk && isDevUnlimitedWallet(pk);
   const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
   /* Безлимит только баланс/списания — интервал пикселя и баффы как у всех */
-  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, nowGame) : BASE_ACTION_COOLDOWN_SEC * 1000;
+  const cd = pk ? effectivePixelCooldownMs(u, teamFxPayload, st, wallNow) : BASE_ACTION_COOLDOWN_SEC * 1000;
   const ref = u.invitedByPlayerKey ? sanitizePlayerKey(u.invitedByPlayerKey) : "";
-  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, nowGame) : BASE_ACTION_COOLDOWN_SEC;
+  const effectiveRecoverySec = pk ? effectiveRecoverySecForWallet(u, teamFxPayload, wallNow) : BASE_ACTION_COOLDOWN_SEC;
   const farmQ5 = tid && quantumFarmLayouts.length ? getQuantumFarmIncomeQuantsForTeam(tid) : 0;
   const zoneQ5 = tid ? getBattleEventZoneQuantumQuantsForTeam(tid, nowGame) : 0;
   return {
@@ -3255,6 +3337,7 @@ async function buildWalletPayload(ws) {
     globalEvent: getGlobalEventPayload(nowGame),
     tournamentStage: st,
     roundIndex,
+    greatWallCharges: pk ? greatWallChargesGet(pk) : 0,
     devUnlimited: !!devUnl,
     teamEffects: tid
       ? {
@@ -3789,10 +3872,11 @@ function applyClusterGameReplication(msg) {
       return;
     }
     case "teamEffect":
-      if (msg.kind === "teamRecovery" && typeof msg.teamId === "number") {
-        const fx = getTeamFx(msg.teamId);
+      if (msg.kind === "teamRecovery" && msg.teamId != null) {
+        const fx = getTeamFx(msg.teamId | 0);
         fx.teamRecoveryUntil = Number(msg.until) || 0;
-        fx.teamRecoverySec = Number(msg.teamRecoverySec) || BASE_ACTION_COOLDOWN_SEC;
+        const ts = Number(msg.teamRecoverySec);
+        fx.teamRecoverySec = Number.isFinite(ts) && ts >= 1 ? ts : BASE_ACTION_COOLDOWN_SEC;
       }
       return;
     case "manualBattleSync": {
@@ -4965,6 +5049,64 @@ function rectFreeOfPixels(x0, y0, w, h) {
   return true;
 }
 
+/**
+ * Макс. евклидово расстояние от центра карты до центра S×S, полностью на суше.
+ * Нужен для roundIndex≥1: маска арены (отступ/ромб) меньше полного прямоугольника сетки —
+ * иначе кольцо 0.88–0.97*rMax от углов bbox требует недостижимых d и спавн ломается.
+ */
+function computeMaxSpawnCenterRadiusScan(S) {
+  const s = S | 0;
+  if (!landGrid || s < 1) return 0;
+  const maxX = gridW - s;
+  const maxY = gridH - s;
+  if (maxX < 0 || maxY < 0) return 0;
+  const { cx, cy } = mapCenterCellCoords();
+  let best = 0;
+  for (let y0 = 0; y0 <= maxY; y0++) {
+    for (let x0 = 0; x0 <= maxX; x0++) {
+      if (!rectAllLandSpan(x0, y0, s, s)) continue;
+      const c = teamSpawnRectCenterXY(x0, y0, s);
+      const d = Math.hypot(c.x - cx, c.y - cy);
+      if (d > best) best = d;
+    }
+  }
+  return best;
+}
+
+/**
+ * Радиус для пресетов TEAM_SPAWN_RING_PRESETS: в массовом раунде — bbox сетки;
+ * в полуфинале/финале/дуэли — по реальной сушe после маски (кэш на rebuild).
+ */
+function getSpawnRingRmaxGeom(S) {
+  const s = S | 0;
+  if (roundIndex === 0) {
+    const r = maxTeamSpawnCenterRadiusFromMapCenter(s);
+    return r > 1e-6 ? r : 1;
+  }
+  const key = `${landGridLayoutSeq}_${roundIndex}_${gridW}_${gridH}`;
+  if (key !== spawnRingRmaxCacheKey) {
+    spawnRingRmaxCacheKey = key;
+    spawnRingRmaxByS.clear();
+  }
+  if (spawnRingRmaxByS.has(s)) return spawnRingRmaxByS.get(s);
+  let scanned = computeMaxSpawnCenterRadiusScan(s);
+  if (!(scanned > 1e-6)) {
+    if (process.env.SPAWN_RING_DEBUG) {
+      console.warn("[spawn-ring] нет полностью сухого S×S под кольцо", {
+        roundIndex,
+        gridW,
+        gridH,
+        S: s,
+        landGridLayoutSeq,
+      });
+    }
+    scanned = maxTeamSpawnCenterRadiusFromMapCenter(s);
+  }
+  if (!(scanned > 1e-6)) scanned = 1;
+  spawnRingRmaxByS.set(s, scanned);
+  return scanned;
+}
+
 /** Центр карты (в координатах клеток) — опора для кольца спавна команд. */
 function mapCenterCellCoords() {
   return { cx: (gridW - 1) / 2, cy: (gridH - 1) / 2 };
@@ -5101,7 +5243,7 @@ function findValidSpawnRectForSize(S) {
   };
 
   const { cx: mapCx, cy: mapCy } = mapCenterCellCoords();
-  let rMaxGeom = maxTeamSpawnCenterRadiusFromMapCenter(s);
+  let rMaxGeom = getSpawnRingRmaxGeom(s);
   if (!(rMaxGeom > 1e-6)) rMaxGeom = 1;
 
   const baseAngle = pickBalancedTeamSpawnAngleRad(seed ^ 0xdeadbeef);
@@ -6913,6 +7055,7 @@ async function finalizeGameEnd(winnerRow) {
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
     clearTerritoryIsolationState();
+    greatWallChargesClearAll();
     pixels.clear();
     invalidateTeamScoresAggCache();
     clearTeamEffectsMap();
@@ -7023,6 +7166,7 @@ async function advanceToDuelRound(winnerRow) {
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
     clearTerritoryIsolationState();
+    greatWallChargesClearAll();
     pixels.clear();
     clearTeamEffectsMap();
     dynamicTeams = [];
@@ -7185,6 +7329,7 @@ async function runMaybeEndRound() {
     teamPlayerCounts.clear();
     clearAllFlagCaptureState();
     clearTerritoryIsolationState();
+    greatWallChargesClearAll();
     pixels.clear();
     invalidateTeamScoresAggCache();
     clearTeamEffectsMap();
@@ -7390,7 +7535,7 @@ wss.on("connection", (ws, req) => {
         const fx = tid ? getTeamFx(tid) : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
         const teamFxPayload = { teamRecoveryUntil: fx.teamRecoveryUntil, teamRecoverySec: fx.teamRecoverySec };
         const st = tournamentStage(roundIndex, gameFinished);
-        const gameNowProbe = effectiveGameClockMs();
+        const gameNowProbe = Date.now();
         const cd = effectivePixelCooldownMs(u, teamFxPayload, st, gameNowProbe);
         safeSend(ws, {
           type: "__testPixelCooldownProbeAck",
@@ -7656,6 +7801,11 @@ wss.on("connection", (ws, req) => {
       safeSend(ws, { type: "joined", teamId: tid, spawn: sp });
       if (sp) {
         safeSend(ws, { type: "teamBaseHighlighted", teamId: tid, spawn: sp });
+      }
+      try {
+        safeSend(ws, await buildWalletPayload(ws));
+      } catch (e) {
+        console.warn("[ws] wallet on joinTeam:", e?.message || e);
       }
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
@@ -8212,7 +8362,7 @@ wss.on("connection", (ws, req) => {
       return;
     }
 
-    if (msg.type === "purchaseGreatWall") {
+    if (msg.type === "purchaseGreatWallCharge") {
       if (!assertCanPlay(ws)) return;
       if (blockPrePlayPurchases(ws)) return;
       attachPlayerKey(ws, msg);
@@ -8240,9 +8390,58 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "warmup" });
         return;
       }
+      const priceQuant = PRICES_QUANT.greatWall;
+      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
+      if (!spend.ok) {
+        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
+        return;
+      }
+      if (!devUnl) {
+        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "great_wall_charge", { deferSave: true });
+      }
+      const total = greatWallChargesAdd(pk, 1);
+      safeSend(ws, { type: "purchaseOk", kind: "greatWallCharge", charges: total });
+      safeSend(ws, await buildWalletPayload(ws));
+      scheduleBroadcastWalletDebounced();
+      queuePersistWalletPurchaseWrites(pk);
+      saveRoundState();
+      return;
+    }
+
+    if (msg.type === "purchaseGreatWall") {
+      if (!assertCanPlay(ws)) return;
+      if (blockPrePlayPurchases(ws)) return;
+      attachPlayerKey(ws, msg);
+      ensureWsOnlineTracked(ws);
+      if (ws.teamId == null) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
+      if (isTeamEliminated(ws.teamId)) {
+        safeSend(ws, { type: "purchaseError", reason: "team_eliminated" });
+        return;
+      }
+      const pk = sanitizePlayerKey(ws.playerKey);
+      if (!wsPurchaseLimiter.allow(`pur:${pk}`, WS_PURCHASE_PER_10S, 10_000)) {
+        safeSend(ws, { type: "purchaseError", reason: "rate_limited" });
+        return;
+      }
+      const st = tournamentStage(roundIndex, gameFinished);
+      if (!stageAllows(st)) {
+        safeSend(ws, { type: "purchaseError", reason: "not available" });
+        return;
+      }
+      if (isWarmupPhaseNow()) {
+        safeSend(ws, { type: "purchaseError", reason: "warmup" });
+        return;
+      }
       const tid = ws.teamId | 0;
       const cx = msg.x | 0;
       const cy = msg.y | 0;
+      if (greatWallChargesGet(pk) < 1) {
+        safeSend(ws, { type: "purchaseError", reason: "no_wall_charges" });
+        return;
+      }
       if (cx < 0 || cx >= gridW || cy < 0 || cy >= gridH) {
         safeSend(ws, { type: "purchaseError", reason: "out_of_bounds" });
         return;
@@ -8265,15 +8464,7 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "wall_already" });
         return;
       }
-      const priceQuant = PRICES_QUANT.greatWall;
-      const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
-      if (!spend.ok) {
-        safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
-        return;
-      }
-      if (!devUnl) {
-        await walletStore.recordSpend(pk, quantToUsdt(priceQuant), "great_wall", { deferSave: true });
-      }
+      const left = greatWallChargesAdd(pk, -1);
       const p0 = normalizePixel(cell);
       const nextRec = {
         teamId: tid,
@@ -8286,7 +8477,7 @@ wss.on("connection", (ws, req) => {
       queuePixelBroadcast(cx, cy, tid, pk, p0.shieldedUntil, GREAT_WALL_MAX_HP);
       scheduleStatsBroadcast();
       afterTerritoryMutation();
-      safeSend(ws, { type: "purchaseOk", kind: "greatWall", x: cx, y: cy });
+      safeSend(ws, { type: "purchaseOk", kind: "greatWall", x: cx, y: cy, chargesLeft: left });
       safeSend(ws, await buildWalletPayload(ws));
       broadcast({
         type: "purchaseVfx",
@@ -8297,6 +8488,7 @@ wss.on("connection", (ws, req) => {
       });
       scheduleBroadcastWalletDebounced();
       queuePersistWalletPurchaseWrites(pk);
+      saveRoundState();
       return;
     }
 
@@ -8431,7 +8623,11 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "quantum_farm_max_level" });
         return;
       }
-      const priceQuant = curLv === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
+      const priceQuant = quantumFarmUpgradePriceQuant(curLv);
+      if (!priceQuant) {
+        safeSend(ws, { type: "purchaseError", reason: "bad request" });
+        return;
+      }
       const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
       if (!spend.ok) {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
@@ -8492,7 +8688,11 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const priceQuant = PRICES_QUANT.team[tier];
-      const tid = ws.teamId;
+      const tid = ws.teamId | 0;
+      if (!tid) {
+        safeSend(ws, { type: "purchaseError", reason: "no_team" });
+        return;
+      }
       const fx = getTeamFx(tid);
       const now = Date.now();
       const spend = await walletStore.trySpendQuant(pk, priceQuant, { devUnlimited: devUnl, deferSave: true });
@@ -8500,13 +8700,16 @@ wss.on("connection", (ws, req) => {
         safeSend(ws, { type: "purchaseError", reason: "not enough balance" });
         return;
       }
-      fx.teamRecoverySec = tier;
+      fx.teamRecoverySec = tier | 0;
       fx.teamRecoveryUntil = now + RECOVERY_BUFF_DURATION_MS;
       if (!devUnl) {
         await walletStore.recordSpend(pk, quantToUsdt(priceQuant), `team_recovery_${tier}s`, { deferSave: true });
       }
       safeSend(ws, { type: "purchaseOk", kind: "teamRecovery", tierSec: tier });
       safeSend(ws, await buildWalletPayload(ws));
+      if (process.env.TEAM_BUFF_DEBUG) {
+        console.log("[team-buff] purchase", { tid, sec: fx.teamRecoverySec, until: fx.teamRecoveryUntil });
+      }
       broadcast({
         type: "teamEffect",
         teamId: tid,
@@ -8531,7 +8734,7 @@ wss.on("connection", (ws, req) => {
       }
       const x = msg.x | 0;
       const y = msg.y | 0;
-      const teamId = ws.teamId;
+      const teamId = ws.teamId | 0;
       if (isTeamEliminated(teamId)) {
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "team_eliminated" });
         safeSend(ws, { type: "pixelReject", reason: "team_eliminated" });
@@ -8551,7 +8754,8 @@ wss.on("connection", (ws, req) => {
       const key = `${x},${y}`;
       const enemyFlagDef = findEnemyFlagDefenderAtCell(teamId, x, y);
 
-      if (isWarmupPhaseNow() && !enemyFlagDef) {
+      /* Разминка: обычная покраска запрещена; глобальный «Мстим» — исключение (1 с для всех, иначе баннер врёт). */
+      if (isWarmupPhaseNow() && !enemyFlagDef && !globalSpeedMstimActive()) {
         const tid = ws.teamId | 0;
         safeSend(ws, { type: "invalidPlacement", teamId: tid, reason: "warmup" });
         safeSend(ws, { type: "pixelReject", reason: "warmup" });
@@ -8595,17 +8799,22 @@ wss.on("connection", (ws, req) => {
       const gameNow = effectiveGameClockMs();
       const wallNow = Date.now();
       const mstimOn = globalSpeedMstimActive();
-      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, gameNow);
+      /* Интервал и сравнение с lastActionAt — только wall-time (как lastActionAt в economy). */
+      const cd = effectivePixelCooldownMs(u, teamFxPayload, st, wallNow);
       let lastAt = Number(u.lastActionAt) || 0;
       if (!Number.isFinite(lastAt) || lastAt < 0) lastAt = 0;
-      if (lastAt > gameNow) lastAt = gameNow;
-      if (gameNow < lastAt + cd) {
+      if (lastAt > wallNow) lastAt = wallNow;
+      if (wallNow < lastAt + cd) {
         if (DEBUG_PIXEL_COOLDOWN) {
           const secP = Number(u.personalRecoverySec);
           const untilP = Number(u.personalRecoveryUntil);
-          const persOn = Number.isFinite(untilP) && untilP > gameNow && Number.isFinite(secP) && secP >= 1;
+          const persOn = Number.isFinite(untilP) && untilP > wallNow && Number.isFinite(secP) && secP >= 1;
+          const untilT = Number(fx.teamRecoveryUntil);
+          const secT = Number(fx.teamRecoverySec);
+          const teamOn =
+            Number.isFinite(untilT) && untilT > wallNow && Number.isFinite(secT) && secT >= 1 ? `${secT}s` : "off";
           console.warn(
-            `[pixel-cd] REJECT pk=${String(pk).slice(0, 16)} cdMs=${cd} needWait=${lastAt + cd - gameNow} gameNow=${gameNow} lastActionAt=${u.lastActionAt} mstim=${mstimOn} mstimUntil=${mstimAltSeasonBurstUntilMs} personal=${persOn ? `${secP}s` : "off"} teamSec=${fx.teamRecoverySec} stage=${st}`
+            `[pixel-cd] REJECT pk=${String(pk).slice(0, 16)} cdMs=${cd} needWait=${lastAt + cd - wallNow} wallNow=${wallNow} gameNow=${gameNow} lastActionAt=${u.lastActionAt} mstim=${mstimOn} mstimUntil=${mstimAltSeasonBurstUntilMs} personal=${persOn ? `${secP}s` : "off"} team=${teamOn} stage=${st}`
           );
         }
         safeSend(ws, { type: "invalidPlacement", teamId, reason: "cooldown not ready" });
@@ -8613,8 +8822,12 @@ wss.on("connection", (ws, req) => {
         return;
       }
       if (DEBUG_PIXEL_COOLDOWN) {
+        const untilT = Number(fx.teamRecoveryUntil);
+        const secT = Number(fx.teamRecoverySec);
+        const teamOn =
+          Number.isFinite(untilT) && untilT > wallNow && Number.isFinite(secT) && secT >= 1 ? `${secT}s` : "off";
         console.warn(
-          `[pixel-cd] ACCEPT pk=${String(pk).slice(0, 16)} cdMs=${cd} mstim=${mstimOn} personal=${Number(u.personalRecoveryUntil) > gameNow ? u.personalRecoverySec : "off"} stage=${st}`
+          `[pixel-cd] ACCEPT pk=${String(pk).slice(0, 16)} cdMs=${cd} mstim=${mstimOn} personal=${Number(u.personalRecoveryUntil) > wallNow ? u.personalRecoverySec : "off"} team=${teamOn} stage=${st}`
         );
       }
 
@@ -9271,6 +9484,7 @@ async function applyAdminFullNewGameReset(telegramUserId) {
   synergyOnlineEpoch++;
   teamPlayerCounts.clear();
   clearTeamEffectsMap();
+  greatWallChargesClearAll();
   pixels.clear();
   invalidateTeamScoresAggCache();
 

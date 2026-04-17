@@ -55,6 +55,7 @@ import {
   PRICES_QUANT,
   REFERRAL_JOIN_INVITER_QUANT,
   getAuthoritativePixelCooldownMs,
+  quantumFarmUpgradePriceQuant,
   resolveAuthoritativeRecoverySec,
 } from "../lib/tournament-economy.js";
 import { computeNukeBombBlastCells } from "../lib/nuke-bomb-shape.js";
@@ -73,7 +74,6 @@ import {
   computeEffectiveBaseHp,
   toEpochMsSafe,
 } from "../lib/flag-capture.js";
-import { isWorldMapWaterPixel } from "../lib/world-map-water.js";
 import { pointInRect, tournamentCompressionMultiplierForCell } from "../lib/battle-events.js";
 import { GRID8_DELTAS, TERRITORY_ISOLATION_GRACE_MS, makeGridCellKey, neighborKeysInSet8 } from "../lib/territory-isolation.js";
 import { getQuantumFarmInfluenceKeys, scoreTeamsAroundFarm, resolveFarmControl } from "../lib/quantum-farms.js";
@@ -1073,6 +1073,19 @@ let pendingLeaveToCreate = false;
 /** Экономика с сервера */
 let walletState = null;
 
+function getGreatWallChargesClient() {
+  const n = Number(walletState?.greatWallCharges);
+  return Number.isFinite(n) && n > 0 ? Math.min(999, n | 0) : 0;
+}
+
+function updateGreatWallShopStockUi() {
+  const el = document.getElementById("shop-great-wall-stock");
+  if (!el) return;
+  const n = getGreatWallChargesClient();
+  el.textContent = `Запас кирпичей: ${n}`;
+  el.hidden = n < 1;
+}
+
 /** Позиции квантовых ферм с сервера (2×2 якоря). */
 /** @type {{ id: number, x0: number, y0: number, w: number, h: number, level?: number }[]} */
 let quantumFarmsMeta = [];
@@ -1234,12 +1247,9 @@ function isClientLandCell(x, y) {
   return regionCells[y * gridW + x] !== 0;
 }
 
-/** Куда можно ставить пиксель: суша по cells и не океан по RGB плаката (как на сервере). */
+/** Куда можно ставить пиксель: суша по регионам (как на сервере после rebuildLandFromRound). Вода только по маске region id 0. */
 function isClientPlayableCell(x, y) {
-  if (!isClientLandCell(x, y)) return false;
-  if (!regionRgb || regionRgb.length !== gridW * gridH * 3) return true;
-  const i = (y * gridW + x) * 3;
-  return !isWorldMapWaterPixel(regionRgb[i], regionRgb[i + 1], regionRgb[i + 2], 255);
+  return isClientLandCell(x, y);
 }
 
 function clientPixelTeamIdAt(x, y) {
@@ -2270,7 +2280,7 @@ function maybeOnboardSpawnAfterFull() {
   scheduleFocusOnMyTeamSpawn(sp, true);
 }
 
-/** Нельзя держать/рисовать пиксель (вода по маске или по цвету плаката). */
+/** Нельзя держать/рисовать пиксель (вода по маске регионов). */
 function isClientWaterCell(x, y) {
   return !isClientPlayableCell(x, y);
 }
@@ -4668,6 +4678,7 @@ function notifyPurchaseError(reason) {
     wall_not_yours: "Стену можно ставить только на свою закрашенную клетку.",
     wall_already: "Здесь уже стоит стена.",
     wall_flag_cell: "Нельзя укреплять клетку флага базы.",
+    no_wall_charges: "Нет кирпичей стены в запасе — купите в магазине (раздел «Зоны»).",
     no_team: "Сначала выберите команду.",
     water: "Нельзя укреплять воду.",
     out_of_bounds: "Сюда нельзя (вне карты).",
@@ -4948,14 +4959,15 @@ function syncClientCooldownFromWalletFields() {
     ? { teamRecoveryUntil: te.teamRecoveryUntil, teamRecoverySec: te.teamRecoverySec }
     : { teamRecoveryUntil: 0, teamRecoverySec: BASE_ACTION_COOLDOWN_SEC };
   const st = walletState.tournamentStage || "MASS_BATTLE";
-  const now = effectiveClientUiNowMs();
-  walletState.effectiveRecoverySec = resolveAuthoritativeRecoverySec(globalAltSeasonActive, u, teamFx, now);
+  /* Личные/командные until — wall-epoch; сравнение только с реальным временем (как на сервере после computeAuthoritativePixelPlacementCooldownMs). */
+  const recoveryNowMs = Date.now();
+  walletState.effectiveRecoverySec = resolveAuthoritativeRecoverySec(globalAltSeasonActive, u, teamFx, recoveryNowMs);
   walletState.cooldownMs = getAuthoritativePixelCooldownMs({
     globalSpeedActive: globalAltSeasonActive,
     user: u,
     teamFx,
     stage: st,
-    nowMs: now,
+    nowMs: recoveryNowMs,
   });
 }
 
@@ -5064,7 +5076,8 @@ function closeQuantumFarmPanel() {
   card?.classList.remove(
     "quantum-farm-panel__card--tier-1",
     "quantum-farm-panel__card--tier-2",
-    "quantum-farm-panel__card--tier-3"
+    "quantum-farm-panel__card--tier-3",
+    "quantum-farm-panel__card--tier-4"
   );
   quantumFarmPanelUpgradeEl?.classList.remove("qf-command__cta--warn");
   quantumFarmPanelEl.hidden = true;
@@ -5108,7 +5121,8 @@ function openQuantumFarmPanel(f) {
     card.classList.remove(
       "quantum-farm-panel__card--tier-1",
       "quantum-farm-panel__card--tier-2",
-      "quantum-farm-panel__card--tier-3"
+      "quantum-farm-panel__card--tier-3",
+      "quantum-farm-panel__card--tier-4"
     );
     card.classList.add(`quantum-farm-panel__card--tier-${lvl}`);
   }
@@ -5139,9 +5153,9 @@ function openQuantumFarmPanel(f) {
   } else if (!supplyLinked) {
     hint = "Нет связи с территорией — доход и улучшения недоступны.";
   } else if (lvl >= QUANTUM_FARM_MAX_LEVEL) {
-    hint = "Максимальный уровень — ключевая цель удерживается или перехватывается.";
+    hint = "Максимальный уровень — вершина удерживается или перехватывается.";
   } else {
-    const cost = lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
+    const cost = quantumFarmUpgradePriceQuant(lvl);
     const next = lvl + 1;
     const nextTier = quantumFarmTierMeta(next);
     hint = `Улучшить до «${nextTier.name}» (ур. ${next}): ${cost} квантов.`;
@@ -5154,7 +5168,7 @@ function openQuantumFarmPanel(f) {
       walletState &&
       !walletState.devUnlimited &&
       typeof walletState.balanceUSDT === "number";
-    const qNeed = showUpgrade ? (lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3) : 0;
+    const qNeed = showUpgrade ? quantumFarmUpgradePriceQuant(lvl) : 0;
     const qHave = needMoney ? usdtToQuant(walletState.balanceUSDT) : 999999;
     if (showUpgrade && needMoney && qHave < qNeed) {
       quantumFarmPanelHintEl.textContent = `Недостаточно квантов (нужно ${qNeed}).`;
@@ -5166,7 +5180,7 @@ function openQuantumFarmPanel(f) {
   }
 
   if (quantumFarmPanelUpgradeEl) {
-    const cost = lvl === 1 ? PRICES_QUANT.quantumFarmTo2 : PRICES_QUANT.quantumFarmTo3;
+    const cost = quantumFarmUpgradePriceQuant(lvl);
     const affordable =
       !walletState ||
       walletState.devUnlimited ||
@@ -5488,7 +5502,7 @@ function syncToolbarQuantumObjective() {
   const total = quantumFarmsMeta.length;
   if (spectatorMode || myTeamId == null) {
     toolbarQuantumObjectiveEl.textContent = `⚛ Квантофермы · ${total}`;
-    toolbarQuantumObjectiveEl.title = `${total} ферм: ур. 1 базовые, ур. 2 ценные, ур. 3 — ключевые цели. Доход суммируется (до +3 кв. / 5 с с точки макс. уровня).`;
+    toolbarQuantumObjectiveEl.title = `${total} ферм: ур. 1–4 (базовая → вершина). Доход суммируется (до +4 кв. / 5 с с одной точки макс. уровня).`;
     toolbarQuantumObjectiveEl.classList.remove(
       "toolbar__quantum-objective--held",
       "toolbar__quantum-objective--contested"
@@ -5515,7 +5529,7 @@ function syncToolbarQuantumObjective() {
   }
   toolbarQuantumObjectiveEl.textContent =
     held > 0 ? `⚛ Удерживаем ${held}/${total}` : `⚛ Штурм ферм 0/${total}`;
-  toolbarQuantumObjectiveEl.title = `Фермы: ур. 1 базовая (+1), ур. 2 ценная (+2), ур. 3 ключевая цель (+3) кв. / 5 с при контроле и связи. Ваш доход с ферм: до +${incomeSum} / 5 с (${held} из ${total}). Спор — без дохода. Тап по ферме — улучшение.`;
+  toolbarQuantumObjectiveEl.title = `Фермы: ур. 1 (+1) … ур. 4 «Вершина» (+4) кв. / 5 с при контроле и связи. Ваш доход с ферм: до +${incomeSum} / 5 с (${held} из ${total}). Спор — без дохода. Тап по ферме — улучшение.`;
   toolbarQuantumObjectiveEl.classList.toggle("toolbar__quantum-objective--held", held > 0);
   toolbarQuantumObjectiveEl.classList.toggle(
     "toolbar__quantum-objective--contested",
@@ -5530,6 +5544,9 @@ function applyWalletFromServer(msg) {
   }
   /* Не вызывать set(0) здесь: устаревший ответ wallet после пикселя затирал бы mstim, пришедший раньше по mstimAltSeasonSync. Сброс — sync(0) или истечение until. */
   walletState = msg;
+  if (walletState && typeof walletState.greatWallCharges !== "number") {
+    walletState.greatWallCharges = 0;
+  }
   syncClientCooldownFromWalletFields();
   updateWalletBar();
   updateShopAvailability();
@@ -5611,7 +5628,7 @@ function syncTeamBuffBanner() {
     return;
   }
   const te = walletState.teamEffects;
-  if (!te || (typeof te.teamId === "number" && te.teamId !== myTeamId)) {
+  if (!te || (te.teamId != null && (te.teamId | 0) !== (myTeamId | 0))) {
     clearTeamBuffBannerVisual();
     return;
   }
@@ -6238,14 +6255,48 @@ function handlePurchaseOk(msg) {
   const kind = msg.kind;
   const flo = { x: window.innerWidth * 0.5, y: window.innerHeight * 0.36 };
 
+  if (kind === "greatWallCharge") {
+    const n =
+      typeof msg.charges === "number" && Number.isFinite(msg.charges)
+        ? Math.max(0, msg.charges | 0)
+        : getGreatWallChargesClient();
+    if (walletState) walletState.greatWallCharges = n;
+    updateGreatWallShopStockUi();
+    showPlacementFeedback(`Кирпич куплен. Запас: ${n}. «На карту» или «Повторить» → разместить.`, "ok", {
+      telegramAlert: false,
+    });
+    try {
+      window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.("success");
+    } catch {
+      /* ignore */
+    }
+  }
   if (kind === "greatWall") {
     optimisticGreatWallPending = null;
+    const leftRaw = msg.chargesLeft;
+    const leftKnown =
+      typeof leftRaw === "number" && Number.isFinite(leftRaw) ? Math.max(0, leftRaw | 0) : null;
+    if (leftKnown !== null && walletState) walletState.greatWallCharges = leftKnown;
+    updateGreatWallShopStockUi();
+    const effectiveLeft = leftKnown !== null ? leftKnown : getGreatWallChargesClient();
+    if (effectiveLeft <= 0) {
+      pendingMapAction = null;
+    } else {
+      pendingMapAction = { type: "greatWall" };
+    }
+    setPendingHint();
     const wx = typeof msg.x === "number" ? msg.x | 0 : NaN;
     const wy = typeof msg.y === "number" ? msg.y | 0 : NaN;
     if (Number.isFinite(wx) && Number.isFinite(wy)) {
-      showPlacementFeedback("Стена готова: клетка держит 3 удара, HP не восстанавливается.", "ok", {
-        telegramAlert: false,
-      });
+      showPlacementFeedback(
+        effectiveLeft > 0
+          ? `Стена установлена. Осталось кирпичей: ${effectiveLeft}.`
+          : "Стена установлена. Запас исчерпан.",
+        "ok",
+        {
+          telegramAlert: false,
+        }
+      );
     }
   }
   if (kind === "baseRepair") {
@@ -6417,7 +6468,8 @@ function shopBtnMatchesPurchase(btn, msg) {
   if (kind === "zone12Capture") return action === "zone12Capture";
   if (kind === "nukeBomb") return action === "nukeBomb";
   if (kind === "militaryBase") return action === "militaryBase";
-  if (kind === "greatWall") return action === "greatWall";
+  if (kind === "greatWallCharge") return action === "greatWallBuy";
+  if (kind === "greatWall") return false;
   if (kind === "baseRepair") return action === "baseRepair";
   return false;
 }
@@ -6425,6 +6477,12 @@ function shopBtnMatchesPurchase(btn, msg) {
 function applyShopPurchaseSuccessUi(msg) {
   const root = document.getElementById("shop-overlay");
   if (!root || root.hidden) return;
+  /* Стена: много кликов «Купить» подряд — не затираем подпись кнопки галочкой. */
+  if (msg.kind === "greatWallCharge") {
+    updateGreatWallShopStockUi();
+    updateShopAvailability();
+    return;
+  }
   resetShopPurchaseButtonsUi();
   const buttons = Array.from(root.querySelectorAll(".shop-btn"));
   const winner = buttons.find((b) => shopBtnMatchesPurchase(b, msg));
@@ -6476,7 +6534,7 @@ function recordQuickBuyAfterPurchase(kind, msg) {
     pushQuickBuyHistory({ action: "nukeBomb" });
   } else if (kind === "militaryBase") {
     pushQuickBuyHistory({ action: "militaryBase" });
-  } else if (kind === "greatWall") {
+  } else if (kind === "greatWallCharge") {
     pushQuickBuyHistory({ action: "greatWall" });
   } else if (kind === "baseRepair") {
     pushQuickBuyHistory({ action: "baseRepair" });
@@ -6573,7 +6631,11 @@ function isQuickBuyEntryBlocked(entry) {
   ) {
     return true;
   }
-  if (!playerCanAffordQuickBuy(entry)) return true;
+  const affordBlocked =
+    entry.action === "greatWall" && getGreatWallChargesClient() > 0
+      ? false
+      : !playerCanAffordQuickBuy(entry);
+  if (affordBlocked) return true;
   return false;
 }
 
@@ -6635,19 +6697,23 @@ function executeQuickBuy(entry) {
     return;
   }
   if (entry.action === "greatWall") {
-    pendingMapAction = { type: "greatWall" };
-    setPendingHint();
-    showPlacementFeedback(
-      "Великая стена: тап по своей клетке (не флаг базы). 3 удара врага, HP не растёт. ~40 кв.",
-      "info",
-      { telegramAlert: false }
-    );
-    try {
-      window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("medium");
-    } catch {
-      /* ignore */
+    if (getGreatWallChargesClient() > 0) {
+      pendingMapAction = { type: "greatWall" };
+      setPendingHint();
+      showPlacementFeedback(
+        `Стена: запас ${getGreatWallChargesClient()} шт. Тап по своей клетке (не флаг).`,
+        "info",
+        { telegramAlert: false }
+      );
+      try {
+        window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.("medium");
+      } catch {
+        /* ignore */
+      }
+      if (shopOverlay) shopOverlay.hidden = true;
+      return;
     }
-    if (shopOverlay) shopOverlay.hidden = true;
+    wsSendJson({ type: "purchaseGreatWallCharge" });
     return;
   }
   if (entry.action === "baseRepair") {
@@ -6716,15 +6782,20 @@ function renderQuickBuyRail() {
     const blocked = isQuickBuyEntryBlocked(entry);
     btn.disabled = blocked;
     const short = quickBuyShortLabel(entry);
-    if (entry.action === "baseRepair") {
+    if (entry.action === "greatWall") {
+      const stock = getGreatWallChargesClient();
+      btn.title =
+        stock > 0
+          ? `${short} · запас ${stock} — тап: поставить стену (кванты не списываются)`
+          : `${short} · ${q} кв. — тап: купить 1 кирпич в запас`;
+    } else if (entry.action === "baseRepair") {
       btn.title = `${short} · ${q} кв. — таргет: тап по своей базе на карте, +${BASE_REPAIR_HP_DELTA} HP (не выше max); кванты списываются только после успеха`;
     } else if (
       entry.action === "zoneCapture" ||
       entry.action === "massCapture" ||
       entry.action === "zone12Capture" ||
       entry.action === "nukeBomb" ||
-      entry.action === "militaryBase" ||
-      entry.action === "greatWall"
+      entry.action === "militaryBase"
     ) {
       btn.title = `${short} · ${q} кв. — тап по карте, затем списание`;
     } else if (!playerCanAffordQuickBuy(entry)) {
@@ -6789,6 +6860,15 @@ function renderQuickBuyRail() {
 
     fab.appendChild(glyph);
     fab.appendChild(cost);
+    if (entry.action === "greatWall") {
+      const gwSt = getGreatWallChargesClient();
+      if (gwSt > 0) {
+        const stEl = document.createElement("span");
+        stEl.className = "quick-buy-rail__gw-stock";
+        stEl.textContent = `×${gwSt}`;
+        fab.appendChild(stEl);
+      }
+    }
     btn.appendChild(fab);
 
     host.appendChild(btn);
@@ -6989,6 +7069,22 @@ function updateShopAvailability() {
     }
     shopEffects.textContent = parts.length ? parts.join(" · ") : "Нет активных баффов восстановления.";
   }
+  updateGreatWallShopStockUi();
+  const gwStock = getGreatWallChargesClient();
+  const gwStageBlocked =
+    walletState.devUnlimited !== true &&
+    (st === "GRAND_FINAL" || spectatorMode || st === "DUEL");
+  document.querySelectorAll('.shop-btn[data-action="greatWallPlace"]').forEach((b) => {
+    b.disabled = gwStageBlocked || myTeamId == null || gwStock < 1;
+  });
+  document.querySelectorAll('.shop-btn[data-action="greatWallBuy"]').forEach((b) => {
+    let bBuy = gwStageBlocked || myTeamId == null;
+    if (!walletState.devUnlimited && walletState.balanceUSDT != null) {
+      const need = quantToUsdt(PRICES_QUANT.greatWall);
+      if (walletState.balanceUSDT + 1e-9 < need) bBuy = true;
+    }
+    b.disabled = bBuy;
+  });
   renderQuickBuyRail();
 }
 
@@ -7310,13 +7406,17 @@ function setupEconomyUi() {
   })();
   shopClose?.addEventListener("click", () => {
     if (shopOverlay) shopOverlay.hidden = true;
-    pendingMapAction = null;
+    if (pendingMapAction?.type !== "greatWall") {
+      pendingMapAction = null;
+    }
     setPendingHint();
   });
   shopOverlay?.addEventListener("click", (e) => {
     if (e.target === shopOverlay) {
       shopOverlay.hidden = true;
-      pendingMapAction = null;
+      if (pendingMapAction?.type !== "greatWall") {
+        pendingMapAction = null;
+      }
       setPendingHint();
     }
   });
@@ -7366,11 +7466,19 @@ function setupEconomyUi() {
         if (shopOverlay) shopOverlay.hidden = true;
         return;
       }
-      if (action === "greatWall") {
+      if (action === "greatWallBuy") {
+        wsSendJson({ type: "purchaseGreatWallCharge" });
+        return;
+      }
+      if (action === "greatWallPlace") {
+        if (getGreatWallChargesClient() < 1) {
+          notifyPurchaseError("no_wall_charges");
+          return;
+        }
         pendingMapAction = { type: "greatWall" };
         setPendingHint();
         showPlacementFeedback(
-          "Великая стена: тап по своей клетке (не флаг). Три удара врага ломают укрепление.",
+          `Стена: запас ${getGreatWallChargesClient()} шт. Тап по своей клетке (не флаг).`,
           "info",
           { telegramAlert: false }
         );
@@ -7455,8 +7563,10 @@ function setPendingHint() {
       return "Бомба: тап по эпицентру — взрыв ~12×12; чужие клетки снимаются, свои не страдают";
     if (pendingMapAction.type === "militaryBase")
       return "Плацдарм 2×2 — второй корень команды для расширения и снабжения. Тап по левому верхнему углу блока на чистой суше";
-    if (pendingMapAction.type === "greatWall")
-      return "Великая стена: тап по своей обычной клетке (не якорь флага). Укрепление до 3 HP без восстановления.";
+    if (pendingMapAction.type === "greatWall") {
+      const gwn = getGreatWallChargesClient();
+      return `Великая стена: тап по своей клетке (не флаг). Осталось кирпичей: ${gwn}.`;
+    }
     if (pendingMapAction.type === "baseRepair")
       return `Таргет · ремонт базы: тап только по своей базе — клетка флага (центр 6×6) или любая клетка своего плацдарма 2×2. +${BASE_REPAIR_HP_DELTA} HP, не выше max HP этой базы. ${PRICES_QUANT.baseRepair} кв. спишутся только после успешного применения (не мгновенная покупка).`;
     return "";
@@ -7469,8 +7579,10 @@ function setPendingHint() {
     if (pendingMapAction.type === "zone12Capture") return "12×12 · тап по центру";
     if (pendingMapAction.type === "nukeBomb") return "☢ бомба · ~12×12, край неровный · тап";
     if (pendingMapAction.type === "militaryBase") return "Плацдарм 2×2 · превью";
-    if (pendingMapAction.type === "greatWall") return "Стена · тап по своей клетке";
-    if (pendingMapAction.type === "baseRepair") return "🔧 Таргет · своя база · затем 1000 кв.";
+    if (pendingMapAction.type === "greatWall")
+      return `Стена · осталось ${getGreatWallChargesClient()} · тап по клетке`;
+    if (pendingMapAction.type === "baseRepair")
+      return `🔧 Таргет · своя база · затем ${PRICES_QUANT.baseRepair} кв.`;
     return "";
   })();
   const text = short;
@@ -7499,6 +7611,7 @@ const WS_PAUSE_BLOCKED_TYPES = new Set([
   "purchaseNukeBomb",
   "purchaseMilitaryBase",
   "purchaseGreatWall",
+  "purchaseGreatWallCharge",
 ]);
 
 function wsSendJson(obj) {
@@ -8796,7 +8909,7 @@ function connectWs() {
       if (kind === "connected") {
         playQuantumConnect();
         showPlacementFeedback(
-          "Квантовая ферма под контролем: доход зависит от уровня (до +3 кв. / 5 с), тап по ферме — улучшение.",
+          "Квантовая ферма под контролем: доход зависит от уровня (до +4 кв. / 5 с), тап по ферме — улучшение.",
           "ok",
           { telegramAlert: false }
         );
@@ -8866,6 +8979,10 @@ function connectWs() {
           pur === "quantum_farm_max_level" ||
           pur === "not enough balance");
       if (!keepQuantumFarmPanelOpen) closeQuantumFarmPanel();
+      if (pur === "no_wall_charges") {
+        pendingMapAction = null;
+        setPendingHint();
+      }
       const wk = optimisticWeaponPending?.blastKeys ?? optimisticWeaponPending?.keys;
       revertOptimisticWeapon();
       notifyPurchaseError(pur);
@@ -8878,15 +8995,16 @@ function connectWs() {
       return;
     }
     if (msg.type === "teamEffect") {
-      if (walletState && msg.teamId === myTeamId) {
+      if (walletState && (msg.teamId | 0) === (myTeamId | 0)) {
         if (!walletState.teamEffects) {
           walletState.teamEffects = {
-            teamId: msg.teamId,
+            teamId: msg.teamId | 0,
             teamRecoveryUntil: 0,
             teamRecoverySec: BASE_ACTION_COOLDOWN_SEC,
           };
         }
         const te = walletState.teamEffects;
+        te.teamId = msg.teamId | 0;
         if (msg.kind === "teamRecovery" && typeof msg.until === "number") {
           te.teamRecoveryUntil = msg.until;
           if (typeof msg.teamRecoverySec === "number") te.teamRecoverySec = msg.teamRecoverySec;
@@ -10321,7 +10439,8 @@ function draw(time = performance.now(), drawOpts = {}) {
         bg.addColorStop(1, "rgba(10, 40, 80, 0)");
       }
       if (farmLvl >= 3 && !contested) {
-        bg.addColorStop(0.2, `rgba(255, 210, 120, ${0.06 + pulse * 0.05})`);
+        const goldA = farmLvl >= 4 ? 0.08 + pulse * 0.06 : 0.06 + pulse * 0.05;
+        bg.addColorStop(0.2, `rgba(255, 210, 120, ${goldA})`);
       }
       ctx.fillStyle = bg;
       ctx.beginPath();
@@ -10852,7 +10971,7 @@ function draw(time = performance.now(), drawOpts = {}) {
       if (fx1 < x0 || f.x0 > x1 || fy1 < y0 || f.y0 > y1) continue;
       const { owner, contested } = qFarmCtrl(f);
       const lvl = normalizeQuantumFarmLevel(f.level);
-      const tierBoost = lvl === 1 ? 1 : lvl === 2 ? 1.22 : 1.52;
+      const tierBoost = lvl <= 1 ? 1 : lvl === 2 ? 1.22 : lvl === 3 ? 1.52 : 1.68;
       const sx0 = offsetX + f.x0 * cell;
       const sy0 = offsetY + f.y0 * cell;
       const sw = f.w * cell;
@@ -10870,13 +10989,15 @@ function draw(time = performance.now(), drawOpts = {}) {
           ? { r: 92, g: 188, b: 245 }
           : lvl === 2
             ? { r: 118, g: 208, b: 255 }
-            : { r: 150, g: 225, b: 255 };
+            : lvl === 3
+              ? { r: 150, g: 225, b: 255 }
+              : { r: 175, g: 235, b: 255 };
       const tr = rgb.r;
       const tg = rgb.g;
       const tb = rgb.b;
       const mine = myT && owner === myT;
-      const ringCount = lvl === 1 ? 3 : lvl === 2 ? 5 : 7;
-      const ringAlphaMul = lvl === 1 ? 0.82 : lvl === 2 ? 1 : 1.14;
+      const ringCount = lvl === 1 ? 3 : lvl === 2 ? 5 : lvl === 3 ? 7 : 8;
+      const ringAlphaMul = lvl === 1 ? 0.82 : lvl === 2 ? 1 : lvl === 3 ? 1.14 : 1.22;
       for (let ring = 0; ring < ringCount; ring++) {
         const phase = (time * 0.0019 + fi * 0.31 + ring * 0.21) % 1;
         const rad = Math.min(sw, sh) * (0.52 + ring * 0.28 + phase * 0.22) * tierBoost;
@@ -10973,7 +11094,13 @@ function draw(time = performance.now(), drawOpts = {}) {
         grd.addColorStop(0, "rgba(255, 255, 255, 0.96)");
         grd.addColorStop(
           0.4,
-          lvl >= 3 ? "rgba(160, 235, 255, 0.62)" : lvl === 2 ? "rgba(130, 215, 255, 0.58)" : "rgba(110, 200, 250, 0.52)"
+          lvl >= 4
+            ? "rgba(175, 240, 255, 0.68)"
+            : lvl >= 3
+              ? "rgba(160, 235, 255, 0.62)"
+              : lvl === 2
+                ? "rgba(130, 215, 255, 0.58)"
+                : "rgba(110, 200, 250, 0.52)"
         );
         grd.addColorStop(1, "rgba(20, 70, 120, 0)");
       }
@@ -10987,8 +11114,8 @@ function draw(time = performance.now(), drawOpts = {}) {
       ctx.beginPath();
       ctx.arc(cx, cy, cr * 0.42, 0, Math.PI * 2);
       ctx.fill();
-      const nRay = lvl === 1 ? 9 : lvl === 2 ? 14 : 18;
-      const rayAlpha = lvl === 1 ? 0.85 : lvl === 2 ? 1 : 1.12;
+      const nRay = lvl === 1 ? 9 : lvl === 2 ? 14 : lvl === 3 ? 18 : 21;
+      const rayAlpha = lvl === 1 ? 0.85 : lvl === 2 ? 1 : lvl === 3 ? 1.12 : 1.2;
       for (let ri = 0; ri < nRay; ri++) {
         const ang = (ri / nRay) * Math.PI * 2 + time * 0.0014 + fi * 0.17;
         const len = Math.min(sw, sh) * (0.46 + pulse * 0.16 + (lvl - 1) * 0.04) * tierBoost;
@@ -11298,12 +11425,12 @@ function draw(time = performance.now(), drawOpts = {}) {
       const cx = sx0 + sw * 0.5;
       const pulse = 0.5 + 0.5 * Math.sin(time * 0.0048 + fi * 0.52);
       const pulseL3c = farmLvlC >= 3 ? 0.5 + 0.5 * Math.sin(time * 0.0035 + fi * 0.4) : 0;
-      const fsMul = farmLvlC === 1 ? 1 : farmLvlC === 2 ? 1.06 : 1.14;
+      const fsMul = farmLvlC === 1 ? 1 : farmLvlC === 2 ? 1.06 : farmLvlC === 3 ? 1.14 : 1.22;
       const fs = Math.max(12, Math.min(26, cell * 0.56 * fsMul));
       const ty = sy0 - cell * (0.1 + (farmLvlC - 1) * 0.03) - pulse * cell * 0.04;
       const teamHexC = owner ? teamColor(owner) : null;
       const rgbC = teamHexC ? hexToRgb(teamHexC) : { r: 186, g: 240, b: 255 };
-      const roman = farmLvlC === 1 ? "I" : farmLvlC === 2 ? "II" : "III";
+      const roman = farmLvlC === 1 ? "I" : farmLvlC === 2 ? "II" : farmLvlC === 3 ? "III" : "IV";
       ctx.save();
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
@@ -11594,6 +11721,12 @@ function placePixel(gx, gy) {
       return;
     }
     if (pendingMapAction.type === "greatWall") {
+      if (getGreatWallChargesClient() < 1) {
+        notifyPurchaseError("no_wall_charges");
+        pendingMapAction = null;
+        setPendingHint();
+        return;
+      }
       if ((clientPixelTeamIdAt(gx, gy) | 0) !== (myTeamId | 0)) {
         notifyPurchaseError("wall_not_yours");
         return;
@@ -11613,7 +11746,7 @@ function placePixel(gx, gy) {
       pixels.set(pkGw, { teamId: myTeamId | 0, shieldedUntil: sh0, wallHp: GREAT_WALL_MAX_HP });
       scheduleDraw({ dirty: { gx0: gx, gy0: gy, gx1: gx, gy1: gy } });
       wsSendJson({ type: "purchaseGreatWall", x: gx, y: gy });
-      pendingMapAction = null;
+      pendingMapAction = { type: "greatWall" };
       setPendingHint();
       playPurchaseSuccess();
       updateToolbarHud();

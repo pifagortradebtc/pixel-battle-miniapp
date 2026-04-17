@@ -684,6 +684,46 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.quick-buy-rail__gw-stock {
+  position: absolute;
+  z-index: 3;
+  top: 1px;
+  left: 2px;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  color: rgba(167, 243, 208, 0.95);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.game-shop__price-row--gw {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.game-shop__gw-stock {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: rgba(167, 243, 208, 0.88);
+  font-variant-numeric: tabular-nums;
+}
+
+.game-shop__gw-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 118px;
+}
+
+.game-shop__gw-btns .shop-btn {
+  width: 100%;
+}
+
 .quick-buy-rail__fab--recovery .quick-buy-rail__glyph {
   margin-top: -2px;
 }
@@ -3320,6 +3360,10 @@ a.overlay__btn {
   border-left-color: rgba(253, 224, 200, 0.95);
   border-color: rgba(140, 120, 100, 0.52);
 }
+.quantum-farm-panel__card--tier-4 {
+  border-left-color: rgba(196, 181, 253, 0.95);
+  border-color: rgba(110, 95, 150, 0.52);
+}
 .qf-command__top {
   position: relative;
   display: flex;
@@ -3441,6 +3485,9 @@ a.overlay__btn {
 .quantum-farm-panel__card--tier-3 .qf-command__blurb {
   color: rgba(240, 220, 200, 0.84);
 }
+.quantum-farm-panel__card--tier-4 .qf-command__blurb {
+  color: rgba(220, 210, 248, 0.86);
+}
 .qf-command__hint {
   margin: 0 0 9px;
   font-size: 0.68rem;
@@ -3486,6 +3533,10 @@ a.overlay__btn {
 .quantum-farm-panel__card--tier-3 .qf-command__cta {
   background: rgba(65, 12, 28, 0.92);
   border-color: rgba(253, 164, 175, 0.48);
+}
+.quantum-farm-panel__card--tier-4 .qf-command__cta {
+  background: rgba(38, 18, 62, 0.92);
+  border-color: rgba(196, 181, 253, 0.52);
 }
 .qf-command__cta:disabled {
   opacity: 0.48;

@@ -524,7 +524,7 @@
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">42 кванта</span>
+                  <span class="game-shop__price">60 квантов</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-zone-capture" data-action="zoneCapture">Выбрать</button>
               </div>
@@ -545,7 +545,7 @@
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">84 кванта</span>
+                  <span class="game-shop__price">110 квантов</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-mass-capture" data-action="massCapture">Выбрать</button>
               </div>
@@ -566,7 +566,7 @@
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">168 квантов</span>
+                  <span class="game-shop__price">200 квантов</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn" id="shop-zone12-capture" data-action="zone12Capture">Выбрать</button>
               </div>
@@ -594,7 +594,7 @@
             </article>
             <article
               class="game-shop__card game-shop__card--premium"
-              title="Укрепите свою закрашенную клетку (не якорь флага базы): 3 HP, без восстановления. Враг снимает по 1 HP за удар; на третьем ударе стена ломается и клетка сразу становится его территорией."
+              title="Кирпич стены — 40 кв.: покупка добавляет в личный запас (не на карту). Кнопка «На карту» — режим установки: тап по своей клетке (не флаг). 3 HP без восстановления."
             >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Оборона</span>
@@ -603,25 +603,33 @@
                 <div class="game-shop__icon" aria-hidden="true">🧱</div>
                 <div class="game-shop__card-text">
                   <h3 class="game-shop__card-title">Великая стена</h3>
-                  <p class="game-shop__card-desc">+3 HP своей клетке (не флаг) · 3 удара</p>
+                  <p class="game-shop__card-desc">
+                    Запас кирпичей → тап по своей клетке (не флаг) · +3 HP · 3 удара
+                  </p>
                 </div>
               </div>
-              <div class="game-shop__price-row">
+              <div class="game-shop__price-row game-shop__price-row--gw">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">40 квантов</span>
+                  <span class="game-shop__price">40 кв. / кирпич</span>
+                  <span class="game-shop__gw-stock" id="shop-great-wall-stock" hidden>Запас: 0</span>
                 </div>
-                <button type="button" class="game-shop__buy shop-btn" id="shop-great-wall" data-action="greatWall">
-                  Укрепить
-                </button>
+                <div class="game-shop__gw-btns">
+                  <button type="button" class="game-shop__buy shop-btn" id="shop-great-wall-buy" data-action="greatWallBuy">
+                    Купить
+                  </button>
+                  <button type="button" class="game-shop__buy shop-btn shop-btn--supreme" id="shop-great-wall-place" data-action="greatWallPlace">
+                    На карту
+                  </button>
+                </div>
               </div>
             </article>
             <article
               class="game-shop__card game-shop__card--premium game-shop__card--elite"
-              title="Таргетируемая способность (не мгновенная покупка): нажмите кнопку → на карте тапните только свою базу — клетку флага главной 6×6 или любую клетку своего плацдарма 2×2. Эффект: +20 HP, не выше максимума базы. 1000 квантов списываются только после успешного применения на валидную цель."
+              title="Таргетируемая способность (не мгновенная покупка): нажмите кнопку → на карте тапните только свою базу — клетку флага главной 6×6 или любую клетку своего плацдарма 2×2. Эффект: +20 HP, не выше максимума базы. 400 квантов списываются только после успешного применения на валидную цель."
             >
               <div class="game-shop__badges">
                 <span class="game-shop__badge game-shop__badge--hot">Таргет</span>
-                <span class="game-shop__badge game-shop__badge--best">1000 → +20 HP</span>
+                <span class="game-shop__badge game-shop__badge--best">400 → +20 HP</span>
               </div>
               <div class="game-shop__card-head">
                 <div class="game-shop__icon" aria-hidden="true">🔧</div>
@@ -634,7 +642,7 @@
               </div>
               <div class="game-shop__price-row">
                 <div class="game-shop__price-stack">
-                  <span class="game-shop__price">1000 квантов</span>
+                  <span class="game-shop__price">400 квантов</span>
                   <span class="game-shop__price-sub">оплата только после тапа по своей базе</span>
                 </div>
                 <button type="button" class="game-shop__buy shop-btn shop-btn--supreme" id="shop-base-repair" data-action="baseRepair">
