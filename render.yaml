@@ -12,3 +12,7 @@ services:
     scaling:
       minInstances: 1
       maxInstances: 1
+    # За прокси (Render/Cloudflare) без TRUST_PROXY все клиенты выглядят как один IP → 401 на /ws и 429 на bridge.
+    envVars:
+      - key: TRUST_PROXY
+        value: "1"

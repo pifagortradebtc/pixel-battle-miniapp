@@ -266,6 +266,7 @@ const NOWPAYMENTS_API_BASE = /^true$/i.test(String(process.env.NOWPAYMENTS_SANDB
   ? API_BASE_SANDBOX
   : API_BASE_PROD;
 
+/** За reverse proxy обязательно 1: иначе remoteAddress один на всех → лимиты WS/bridge по одному «IP» → 401 на /ws, 429 на bridge-token. */
 const TRUST_PROXY = /^(1|true|yes)$/i.test(String(process.env.TRUST_PROXY || "").trim());
 const WS_MAX_CONN_PER_IP = Math.min(200, Math.max(3, Number(process.env.WS_MAX_CONN_PER_IP) || 40));
 const WS_MSG_PER_SEC = Math.min(200, Math.max(8, Number(process.env.WS_MSG_PER_SEC) || 45));
@@ -6277,6 +6278,7 @@ wss = new WebSocketServer({
   server,
   path: WS_PATH,
   maxPayload: 131072,
+  /** false → библиотека ws отвечает 401 (см. TRUST_PROXY и лимиты по IP). */
   verifyClient: (info) => {
     const ip = getClientIpFromReq(info.req);
     if ((activeWsByIp.get(ip) || 0) >= WS_MAX_CONN_PER_IP) return false;
@@ -10859,6 +10861,14 @@ process.on("SIGINT", () => {
 
 server.listen(PORT, () => {
   console.log(`Pixel Battle: http://localhost:${PORT}  (WS ${WS_PATH})`);
+  if (
+    !TRUST_PROXY &&
+    /^(1|true|yes)$/i.test(String(process.env.RENDER || "").trim())
+  ) {
+    console.warn(
+      "[config] RENDER без TRUST_PROXY=1: за прокси один remoteAddress на всех → 401 на WebSocket и 429 на telegram-bridge-token. Добавьте TRUST_PROXY=1 в Environment."
+    );
+  }
   schedulePlayStartBroadcast();
   if (!REDIS_URL || isClusterLeader()) {
     startQuantumFarmIncomeLoop();
