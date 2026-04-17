@@ -3244,7 +3244,12 @@ async function tryClaimMapTreasureForPlayer(pk, cellKey, deferRoundStateSave) {
   if (tq < 1 || tq > 50) return 0;
   treasureClaimedKeys.add(key);
   if (!isDevUnlimitedWallet(pk)) {
-    await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}` });
+    await walletStore.credit(pk, quantToUsdt(tq), { txHash: `map_treasure:${key}`, deferWalletPersist: true });
+    if (typeof walletStore.flushUsersEconomy === "function") {
+      await walletStore.flushUsersEconomy([pk]);
+    } else {
+      await walletStore.save();
+    }
   }
   if (!deferRoundStateSave) saveRoundState();
   broadcast({ type: "treasureClaimed", key });
@@ -3731,7 +3736,10 @@ async function tickQuantumFarmIncome() {
     const qq = q | 0;
     if (qq < 1) continue;
     try {
-      await walletStore.credit(pk, quantToUsdt(qq), { txHash: `passive_quant:${tickTag}:${pk.slice(0, 24)}` });
+      await walletStore.credit(pk, quantToUsdt(qq), {
+        txHash: `passive_quant:${tickTag}:${pk.slice(0, 24)}`,
+        deferWalletPersist: true,
+      });
       passiveCreditOkCount++;
     } catch (e) {
       console.warn("[quantFarmIncome] credit failed", pk.slice(0, 20), e?.message || e);
@@ -5891,8 +5899,14 @@ function nowpaymentsIpnStatusMeansCredited(statusRaw) {
   );
 }
 
+function apiPathnameNoQuery(rawUrl) {
+  const pathOnly = String(rawUrl || "").split("?")[0];
+  if (pathOnly.length > 1 && pathOnly.endsWith("/")) return pathOnly.slice(0, -1);
+  return pathOnly;
+}
+
 async function handleApi(req, res) {
-  const url = (req.url || "").split("?")[0];
+  const url = apiPathnameNoQuery(req.url || "");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   const clientIp = getClientIpFromReq(req);
 
