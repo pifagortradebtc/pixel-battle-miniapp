@@ -46,6 +46,7 @@ import {
   API_BASE_SANDBOX,
 } from "./lib/nowpayments-api.js";
 import { verifyTelegramWebAppInitData } from "./lib/telegram-webapp.js";
+import { isPosterOceanWaterRgb } from "./lib/visual-map-water.js";
 import { isUsdtDepositsEnabled } from "./lib/usdt-deposits-enabled.js";
 import { startTelegramPollWhenRedisLockHeld } from "./lib/telegram-poll-redis-lock.mjs";
 import { SlidingWindowRateLimiter } from "./lib/rate-limit.js";
@@ -2190,7 +2191,7 @@ try {
 let landGrid = null;
 /** Инкремент при каждой пересборке суши (invalidate кэша pickLandRectangle / scoring snapshot). */
 let landGridLayoutSeq = 0;
-/** @type {Uint8Array | null} 1 = можно ставить пиксель (суша по cells и не «вода» по RGB плаката). */
+/** @type {Uint8Array | null} 1 = можно ставить пиксель (суша по cells минус визуальная вода по RGB плаката). */
 let playableGrid = null;
 /** Веса клеток для очков (суша; по умолчанию 1; вода 0). */
 let scoreWeightGrid = null;
@@ -2276,15 +2277,16 @@ function rebuildLandFromRound(ri) {
   }
   applyRoundShapeMask(ri, landGrid, gridW, gridH);
   applyRoundShapeMask(ri, playableGrid, gridW, gridH);
+  applyPosterOceanWaterToPlayableGrid(playableGrid, gridW, gridH);
   let landN = 0;
-  for (let i = 0; i < landGrid.length; i++) {
-    if (landGrid[i] !== 0) landN++;
+  for (let i = 0; i < playableGrid.length; i++) {
+    if (playableGrid[i]) landN++;
   }
   landPixelsTotal = landN;
   scoreWeightGrid = new Float32Array(landGrid.length);
   let wsum = 0;
   for (let i = 0; i < landGrid.length; i++) {
-    if (landGrid[i] !== 0) {
+    if (playableGrid[i]) {
       scoreWeightGrid[i] = 1;
       wsum += 1;
     } else {
@@ -2350,7 +2352,26 @@ function cellIsLand(x, y) {
   return landGrid[y * gridW + x] !== 0;
 }
 
-/** Размещение пикселей и баз: суша по регионам (вода = region id 0). Без доп. отсечки по RGB плаката — иначе ложная «вода» на краях карты. */
+/**
+ * Клетки с region≠0, но с цветом океана на плакате (rgbBase64), считаем неигровыми — как на экране у игрока.
+ */
+function applyPosterOceanWaterToPlayableGrid(playable, w, h) {
+  if (!baseRgb360 || baseRgb360.length !== BASE_GRID * BASE_GRID * 3) return;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      if (playable[idx] === 0) continue;
+      const bx = Math.min(BASE_GRID - 1, Math.floor(((x + 0.5) / w) * BASE_GRID));
+      const by = Math.min(BASE_GRID - 1, Math.floor(((y + 0.5) / h) * BASE_GRID));
+      const ri = (by * BASE_GRID + bx) * 3;
+      if (isPosterOceanWaterRgb(baseRgb360[ri], baseRgb360[ri + 1], baseRgb360[ri + 2])) {
+        playable[idx] = 0;
+      }
+    }
+  }
+}
+
+/** Размещение пикселей и баз: playableGrid (суша по регионам минус «визуальная вода» по RGB плаката). */
 function cellAllowsPixelPlacement(x, y) {
   if (x < 0 || x >= gridW || y < 0 || y >= gridH) return false;
   if (!playableGrid || playableGrid.length !== gridW * gridH) return cellIsLand(x, y);
@@ -2790,7 +2811,8 @@ let quantumFarmIncomeTickSeq = 0;
 /** Планировщик тика дохода ферм: один таймер + срочный тик при смене контроля (без ожидания reload). */
 let quantumFarmIncomeTimer = null;
 let quantumFarmIncomeInFlight = false;
-let quantumFarmIncomeLastCompletedMs = 0;
+/** Следующий запуск тика пассива (effectiveGameClockMs): фиксированные интервалы 5 с от начала тика, не от конца async-credit. */
+let quantumFarmIncomeNextDueMs = 0;
 let quantumFarmIncomeForceTickPending = false;
 /** Уровни ферм 1..QUANTUM_FARM_MAX_LEVEL по индексу quantumFarmLayouts (доход = level кв. / 5 с при контроле). */
 let quantumFarmLevels = [];
@@ -3765,7 +3787,8 @@ function scheduleQuantumFarmIncomeDelayed(ms) {
 }
 
 /**
- * Один проход таймера: обычно раз в QUANTUM_FARM_TICK_MS; при quantumFarmIncomeForceTickPending — сразу после смены контроля/апгрейда.
+ * Один проход таймера: ровно раз в QUANTUM_FARM_TICK_MS по «игровым часам» (якорь — начало тика, не конец wallet.save).
+ * При quantumFarmIncomeForceTickPending — внеочередной тик (смена контроля / апгрейд), затем полный интервал от конца работы.
  */
 async function runQuantumFarmIncomeScheduledPass() {
   if (REDIS_URL && !isClusterLeader()) return;
@@ -3779,26 +3802,33 @@ async function runQuantumFarmIncomeScheduledPass() {
   }
   const now = effectiveGameClockMs();
   const force = quantumFarmIncomeForceTickPending;
-  const dueByTime = now - quantumFarmIncomeLastCompletedMs >= QUANTUM_FARM_TICK_MS - 50;
-  const due = force || dueByTime;
-  if (!due) {
-    scheduleQuantumFarmIncomeDelayed(Math.max(0, QUANTUM_FARM_TICK_MS - (now - quantumFarmIncomeLastCompletedMs)));
+  if (!force && now < quantumFarmIncomeNextDueMs - 50) {
+    scheduleQuantumFarmIncomeDelayed(Math.max(0, quantumFarmIncomeNextDueMs - now));
     return;
   }
   if (force) quantumFarmIncomeForceTickPending = false;
 
+  const tickStart = now;
   quantumFarmIncomeInFlight = true;
   try {
     await tickQuantumFarmIncome();
-    quantumFarmIncomeLastCompletedMs = effectiveGameClockMs();
   } finally {
     quantumFarmIncomeInFlight = false;
+  }
+
+  const after = effectiveGameClockMs();
+  if (force) {
+    quantumFarmIncomeNextDueMs = after + QUANTUM_FARM_TICK_MS;
+  } else {
+    let next = tickStart + QUANTUM_FARM_TICK_MS;
+    if (next <= after) next = after + QUANTUM_FARM_TICK_MS;
+    quantumFarmIncomeNextDueMs = next;
   }
 
   if (quantumFarmIncomeForceTickPending) {
     scheduleQuantumFarmIncomeDelayed(0);
   } else {
-    scheduleQuantumFarmIncomeDelayed(QUANTUM_FARM_TICK_MS);
+    scheduleQuantumFarmIncomeDelayed(Math.max(0, quantumFarmIncomeNextDueMs - effectiveGameClockMs()));
   }
 }
 
@@ -3815,10 +3845,11 @@ function requestQuantumFarmIncomeTickSoon() {
 }
 
 function startQuantumFarmIncomeLoop() {
-  quantumFarmIncomeLastCompletedMs = Date.now();
+  const now = effectiveGameClockMs();
+  quantumFarmIncomeNextDueMs = now + QUANTUM_FARM_TICK_MS;
   quantumFarmIncomeForceTickPending = false;
   clearQuantumFarmIncomeTimer();
-  scheduleQuantumFarmIncomeDelayed(QUANTUM_FARM_TICK_MS);
+  scheduleQuantumFarmIncomeDelayed(Math.max(0, quantumFarmIncomeNextDueMs - now));
 }
 
 function applyFullMessageToPixelsCluster(msg) {
@@ -5612,16 +5643,20 @@ function computeTeamTerritoryCounts() {
     const px = Number(parts[0]);
     const py = Number(parts[1]);
     if (
-      landGrid &&
-      (!Number.isFinite(px) ||
-        !Number.isFinite(py) ||
-        px < 0 ||
-        px >= gridW ||
-        py < 0 ||
-        py >= gridH ||
-        landGrid[py * gridW + px] === 0)
+      !Number.isFinite(px) ||
+      !Number.isFinite(py) ||
+      px < 0 ||
+      px >= gridW ||
+      py < 0 ||
+      py >= gridH
     ) {
       continue;
+    }
+    const pidx = py * gridW + px;
+    if (playableGrid && playableGrid.length === gridW * gridH) {
+      if (playableGrid[pidx] === 0) continue;
+    } else if (landGrid && landGrid.length === gridW * gridH) {
+      if (landGrid[pidx] === 0) continue;
     }
     const tid = pixelTeam(val);
     if (!tid) continue;
@@ -7037,7 +7072,7 @@ async function shiftGameWorldAfterUnpause(d, pauseStart) {
     if (typeof g.deadlineMs === "number" && g.deadlineMs > ps) g.deadlineMs += dd;
   }
 
-  quantumFarmIncomeLastCompletedMs += dd;
+  quantumFarmIncomeNextDueMs += dd;
 
   invalidateTeamScoresAggCache();
   battleSnapCacheKey = "";

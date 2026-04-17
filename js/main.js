@@ -89,6 +89,7 @@ import {
   setMstimClientNowProvider,
 } from "./mstim-alt-season-client.js";
 import { GREAT_WALL_MAX_HP, normalizeWallHp } from "../lib/great-wall.js";
+import { isPosterOceanWaterRgb } from "../lib/visual-map-water.js";
 import { isUsdtDepositsEnabled } from "../lib/usdt-deposits-enabled.js";
 
 let gridW = 360;
@@ -1273,9 +1274,14 @@ function isClientLandCell(x, y) {
   return regionCells[y * gridW + x] !== 0;
 }
 
-/** Куда можно ставить пиксель: суша по регионам (как на сервере после rebuildLandFromRound). Вода только по маске region id 0. */
+/**
+ * Куда можно ставить пиксель: region≠0 и цвет плаката не «океан» (как playableGrid на сервере).
+ */
 function isClientPlayableCell(x, y) {
-  return isClientLandCell(x, y);
+  if (!isClientLandCell(x, y)) return false;
+  if (!regionRgb || regionRgb.length !== gridW * gridH * 3) return true;
+  const i = (y * gridW + x) * 3;
+  return !isPosterOceanWaterRgb(regionRgb[i], regionRgb[i + 1], regionRgb[i + 2]);
 }
 
 function clientPixelTeamIdAt(x, y) {
