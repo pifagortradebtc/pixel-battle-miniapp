@@ -16,3 +16,6 @@ services:
     envVars:
       - key: TRUST_PROXY
         value: "1"
+      # Диск Render: иначе data/ в эфемерной ФС — round-state и снимок карты не переживают деплой.
+      - key: PIXEL_BATTLE_DATA_DIR
+        value: /var/pixel-battle-data

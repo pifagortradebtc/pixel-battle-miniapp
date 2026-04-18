@@ -1862,6 +1862,9 @@ function saveRoundState() {
         greatWallCharges: Object.fromEntries(
           [...greatWallChargesByPk.entries()].filter(([, n]) => (Number(n) | 0) > 0)
         ),
+        teamMemberRoster: Object.fromEntries(
+          [...teamMemberKeys.entries()].map(([tid, set]) => [String(tid), [...set]])
+        ),
       }),
       "utf8"
     );
@@ -1971,6 +1974,31 @@ function loadPixelsSnapshotIfPresentSync() {
     console.log(`[pixels-snapshot] загружено клеток: ${n} (файл seq=${j.seq})`);
   } catch (e) {
     console.warn("[pixels-snapshot] load:", e?.message || e);
+  }
+}
+
+/**
+ * Состав команд (playerKey по teamId) в round-state — переживает рестарт; не путать с онлайн WS.
+ * @param {Record<string, unknown>} j
+ */
+function applyTeamMembershipFromRoundStateJson(j) {
+  teamMemberKeys.clear();
+  teamPlayerCounts.clear();
+  synergyOnlineEpoch++;
+  const roster =
+    j && typeof j.teamMemberRoster === "object" && !Array.isArray(j.teamMemberRoster)
+      ? /** @type {Record<string, unknown>} */ (j.teamMemberRoster)
+      : null;
+  if (!roster) return;
+  for (const [k, arr] of Object.entries(roster)) {
+    const tid = Number(k) | 0;
+    if (!tid || !Array.isArray(arr)) continue;
+    const dt = dynamicTeams.find((t) => (t.id | 0) === tid);
+    if (!dt || dt.solo || dt.eliminated) continue;
+    const set = new Set(arr.map((x) => sanitizePlayerKey(String(x))).filter(Boolean));
+    if (!set.size) continue;
+    teamMemberKeys.set(tid, set);
+    teamPlayerCounts.set(tid, set.size);
   }
 }
 
@@ -2110,6 +2138,7 @@ function loadRoundState() {
       if (gamePaused && clampPositiveEpochMs(pauseWallStartedAt) <= 0) {
         pauseWallStartedAt = Date.now();
       }
+      applyTeamMembershipFromRoundStateJson(j);
     } else {
       roundIndex = 0;
       roundStartMs = Date.now();
@@ -2125,6 +2154,9 @@ function loadRoundState() {
       roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
       round0WarmupMs = WARMUP_MS;
       pendingTreasureRestore = null;
+      teamMemberKeys.clear();
+      teamPlayerCounts.clear();
+      synergyOnlineEpoch++;
       saveRoundState();
     }
   } catch (e) {
@@ -2143,6 +2175,9 @@ function loadRoundState() {
     roundTimerStarted = !WAIT_FOR_TELEGRAM_GO;
     round0WarmupMs = WARMUP_MS;
     pendingTreasureRestore = null;
+    teamMemberKeys.clear();
+    teamPlayerCounts.clear();
+    synergyOnlineEpoch++;
   }
 }
 
@@ -3751,7 +3786,9 @@ async function tickQuantumFarmIncome() {
   } catch (e) {
     console.warn("[quantFarmIncome] wallet save failed:", e?.message || e);
   }
-  await broadcastWalletPayloadToAllClients();
+  /* Не await broadcastWalletPayloadToAllClients: при многих WS + PG каждый тик блокировался на секунды–минуты,
+   * из‑за quantumFarmIncomeInFlight следующие начисления сдвигались — «+7 кв / 5 с» превращалось в редкие капли. */
+  scheduleBroadcastWalletDebounced();
 
   if (DEBUG_QUANTUM_FARM_INCOME) {
     const farmPart = [...farmsPerTeam.entries()].map(([t, n]) => `t${t}=${n}`).join(",");
@@ -5834,6 +5871,7 @@ function tryDeleteTeamWithNoMembers(teamId) {
   broadcast({ type: "teamsFull", teams: teamsForMeta() });
   broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
   scheduleStatsBroadcast();
+  saveRoundState();
   return true;
 }
 
@@ -6389,6 +6427,7 @@ setInterval(() => {
 }, 120000);
 
 async function broadcastWalletToAll() {
+  if (!wss) return;
   for (const client of wss.clients) {
     if (client.readyState !== 1) continue;
     safeSend(client, await buildWalletPayload(client));
@@ -8092,6 +8131,7 @@ wss.on("connection", (ws, req) => {
         spawn: { x0: spawn.x0, y0: spawn.y0, w: spawn.s, h: spawn.s },
       });
       broadcastStatsImmediate();
+      saveRoundState();
       return;
     }
 
@@ -8128,6 +8168,32 @@ wss.on("connection", (ws, req) => {
         safeSend(ws,{ type: "joinError", reason: "already" });
         return;
       }
+      const pkJoin = sanitizePlayerKey(ws.playerKey);
+      const existingSet = teamMemberKeys.get(tid);
+      if (pkJoin && existingSet && existingSet.has(pkJoin)) {
+        ws.teamId = tid;
+        const spRe =
+          typeof dtJoin.spawnX0 === "number" && typeof dtJoin.spawnY0 === "number"
+            ? {
+                x0: dtJoin.spawnX0,
+                y0: dtJoin.spawnY0,
+                w: teamMainSpawnSide(dtJoin),
+                h: teamMainSpawnSide(dtJoin),
+              }
+            : null;
+        safeSend(ws, { type: "joined", teamId: tid, spawn: spRe });
+        if (spRe) {
+          safeSend(ws, { type: "teamBaseHighlighted", teamId: tid, spawn: spRe });
+        }
+        try {
+          safeSend(ws, await buildWalletPayload(ws));
+        } catch (e) {
+          console.warn("[ws] wallet on joinTeam (reconnect):", e?.message || e);
+        }
+        broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
+        broadcastStatsImmediate();
+        return;
+      }
       const cur = teamPlayerCounts.get(tid) || 0;
       if (cur >= getMaxPerTeam()) {
         safeSend(ws,{ type: "joinError", reason: "full" });
@@ -8156,6 +8222,7 @@ wss.on("connection", (ws, req) => {
       }
       broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       broadcastStatsImmediate();
+      saveRoundState();
       return;
     }
 
@@ -8179,6 +8246,7 @@ wss.on("connection", (ws, req) => {
         broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
       }
       broadcastStatsImmediate();
+      saveRoundState();
       return;
     }
 
@@ -9263,15 +9331,7 @@ wss.on("connection", (ws, req) => {
     if (left <= 0) activeWsByIp.delete(cip);
     else activeWsByIp.set(cip, left);
 
-    if (ws.teamId != null) {
-      const tid = ws.teamId;
-      if (ws.playerKey) removeTeamMemberKey(tid, ws.playerKey);
-      const c = teamPlayerCounts.get(tid) ?? 0;
-      teamPlayerCounts.set(tid, Math.max(0, c - 1));
-      if (!tryDeleteTeamWithNoMembers(tid)) {
-        broadcast({ type: "counts", teamCounts: Object.fromEntries(teamPlayerCounts) });
-      }
-    }
+    /* Не снимать игрока с команды при обрыве WS: иначе при деплое/рестарте все вылетают из ростера и команды могут удалиться. */
     broadcastStatsImmediate();
   });
 });
@@ -10853,6 +10913,7 @@ async function telegramPollLoop() {
 
 function shutdownPersistSync() {
   try {
+    saveRoundState();
     flushPixelBroadcastNow();
     writePixelsSnapshotSyncForShutdown();
   } catch (e) {
