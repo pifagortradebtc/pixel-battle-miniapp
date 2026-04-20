@@ -137,6 +137,8 @@ const SESSION_TEAM = "pixel-battle-team";
 const SESSION_TEAM_EDIT = "pixel-battle-team-edit-tokens";
 /** Сохраняется в localStorage: команда, соло-токен, имя, цвет — переживает закрытие Mini App */
 const ONLINE_SESSION_KEY = "pixel-battle-online-session";
+/** Последние известные цвета команд (id → #rrggbb): не даём карте «сереть» при кратком отсутствии команды в teamsMeta. */
+const TEAM_COLORS_CACHE_KEY = "pixel-battle-team-colors-v1";
 /** Токен победителя для участия в раундах после первого (claim при переподключении) */
 const ROUND_ELIGIBLE_KEY = "pixel-battle-round-eligible";
 /** Стабильный id игрока на устройстве (или tg_<id> в Telegram) — сервер выдаёт токен победителя по ключу */
@@ -2385,9 +2387,58 @@ function countryColor(regionId) {
   return `hsl(${h} 36% 23%)`;
 }
 
+function normalizeHexColor(s) {
+  if (typeof s !== "string") return null;
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(s.trim());
+  return m ? `#${m[1].toLowerCase()}` : null;
+}
+
+function rememberTeamColorsFromList(teams) {
+  if (!Array.isArray(teams) || !teams.length) return;
+  try {
+    const raw = localStorage.getItem(TEAM_COLORS_CACHE_KEY);
+    let o = raw ? JSON.parse(raw) : {};
+    if (!o || typeof o !== "object") o = {};
+    let changed = false;
+    for (let i = 0; i < teams.length; i++) {
+      const t = teams[i];
+      if (!t || t.id == null) continue;
+      const hex = normalizeHexColor(typeof t.color === "string" ? t.color : "");
+      if (!hex) continue;
+      const k = String(Number(t.id));
+      if (o[k] !== hex) {
+        o[k] = hex;
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(TEAM_COLORS_CACHE_KEY, JSON.stringify(o));
+  } catch {
+    /* ignore */
+  }
+}
+
+function persistentTeamColorFallback(teamId) {
+  if (teamId == null) return null;
+  try {
+    const raw = localStorage.getItem(TEAM_COLORS_CACHE_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    const v = o[String(Number(teamId))];
+    return normalizeHexColor(typeof v === "string" ? v : "");
+  } catch {
+    return null;
+  }
+}
+
 function teamColor(teamId) {
   const t = teamsMeta?.find((x) => x.id === teamId);
-  return t ? t.color : "#888888";
+  if (t && typeof t.color === "string") {
+    const n = normalizeHexColor(t.color);
+    if (n) return n;
+  }
+  const fb = persistentTeamColorFallback(teamId);
+  if (fb) return fb;
+  return "#888888";
 }
 
 function hexToRgb(hex) {
@@ -3249,6 +3300,7 @@ function applyTeamDisplay(teamId, name, emoji, color) {
   t.name = name;
   t.emoji = emoji;
   if (color && typeof color === "string") t.color = color;
+  rememberTeamColorsFromList([t]);
   invalidateTeamColorByIdCache();
   scheduleDraw();
 }
@@ -4368,6 +4420,7 @@ function onMeta(msg) {
   syncTreasureSpotsFromMeta(msg);
 
   teamsMeta = msg.teams || [];
+  rememberTeamColorsFromList(teamsMeta);
   baseConnCacheFrameId = -1;
   invalidateTeamColorByIdCache();
   syncFlagCaptureStateFromMeta(msg.flags);
@@ -8508,6 +8561,7 @@ function connectWs() {
     }
     if (msg.type === "teamsFull") {
       teamsMeta = msg.teams || [];
+      rememberTeamColorsFromList(teamsMeta);
       baseConnCacheFrameId = -1;
       invalidateTeamColorByIdCache();
       const allowedKeys = new Set();
@@ -8537,6 +8591,7 @@ function connectWs() {
     if (msg.type === "created") {
       endSessionRestore();
       teamsMeta = msg.teams || [];
+      rememberTeamColorsFromList(teamsMeta);
       baseConnCacheFrameId = -1;
       invalidateTeamColorByIdCache();
       teamCounts = msg.teamCounts || {};

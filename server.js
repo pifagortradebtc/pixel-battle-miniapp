@@ -525,15 +525,19 @@ const TELEGRAM_START_BUTTON_TEXT =
   (process.env.TELEGRAM_START_BUTTON_TEXT || "").trim() || "🕹️ Запустить игру";
 
 /**
- * Показывать ли в ответ на /start кнопку запуска игры (Mini App).
- * Если переменная не задана — true (как раньше). Выключить: false / 0 / no / off.
+ * Показывать ли кнопку открытия Mini App в **рассылке** broadcast / рассылка (не в /start).
+ * По умолчанию false: игроки заходят через кнопку меню бота в BotFather, без спама в чате.
+ * Включить: true / 1 / yes / on.
  */
-function parseEnvBoolDefaultTrue(name) {
+function parseEnvBoolDefaultFalse(name) {
   const raw = process.env[name];
-  if (raw == null || String(raw).trim() === "") return true;
+  if (raw == null || String(raw).trim() === "") return false;
   return /^(1|true|yes|on)$/i.test(String(raw).trim());
 }
-const TELEGRAM_START_GAME_BUTTON_ENABLED = parseEnvBoolDefaultTrue("TELEGRAM_START_GAME_BUTTON_ENABLED");
+const TELEGRAM_START_GAME_BUTTON_ENABLED = parseEnvBoolDefaultFalse("TELEGRAM_START_GAME_BUTTON_ENABLED");
+
+/** Текст только для админов при /start (если пусто — TELEGRAM_START_MESSAGE). */
+const TELEGRAM_ADMIN_START_MESSAGE = (process.env.TELEGRAM_ADMIN_START_MESSAGE || "").trim();
 
 function getTelegramMiniAppLaunchUrl() {
   if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
@@ -3352,6 +3356,48 @@ function safePath(urlPath) {
 }
 
 function serveStatic(req, res) {
+  let pathOnly;
+  try {
+    pathOnly = new URL(req.url || "/", "http://127.0.0.1").pathname;
+  } catch {
+    pathOnly = (req.url || "/").split("?")[0];
+  }
+  /* Браузеры и WebView запрашивают /favicon.ico даже при <link rel="icon" href="png"> — отдаём PNG без дублирования .ico на диске. */
+  if (pathOnly === "/favicon.ico") {
+    const fp = path.join(ROOT, "favicon.png");
+    fs.stat(fp, (e, st) => {
+      if (e || !st.isFile()) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": MIME[".png"],
+        "Cache-Control": "public, max-age=86400",
+        "X-Content-Type-Options": "nosniff",
+      });
+      fs.createReadStream(fp).pipe(res);
+    });
+    return;
+  }
+  if (pathOnly === "/apple-touch-icon-precomposed.png") {
+    const fp = path.join(ROOT, "apple-touch-icon.png");
+    fs.stat(fp, (e, st) => {
+      if (e || !st.isFile()) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": MIME[".png"],
+        "Cache-Control": "public, max-age=86400",
+        "X-Content-Type-Options": "nosniff",
+      });
+      fs.createReadStream(fp).pipe(res);
+    });
+    return;
+  }
+
   const full = safePath(req.url || "/");
   if (!full) {
     res.writeHead(403);
@@ -10306,41 +10352,21 @@ async function telegramPollLoop() {
 
         if (isStartCommand(t)) {
           rememberTelegramSubscriberChat(chatId);
-          const launchUrl = buildMiniAppOpenUrl(parseStartPayload(t));
-          const startBtn =
-            TELEGRAM_START_GAME_BUTTON_ENABLED && launchUrl
-              ? buildTelegramStartInlineButton(launchUrl)
-              : null;
-          if (startBtn || TELEGRAM_ADMIN_IDS.has(uid)) {
-            /** @type {{ text: string; url?: string; web_app?: { url: string }; callback_data?: string }[][]} */
-            const rows = [];
-            if (startBtn) rows.push([startBtn]);
-            if (TELEGRAM_ADMIN_IDS.has(uid)) {
-              rows.push([{ text: "⚠️ Полный сброс игры", callback_data: "adm_full_a" }]);
-              rows.push([{ text: "Сбросить рефералов", callback_data: "adm_refreset_a" }]);
-              rows.push([
-                { text: "Сбросить всем кванты", callback_data: "adm_qzero_a" },
-                { text: "Выдать всем кванты", callback_data: "adm_qall_a" },
-              ]);
-            }
-            await telegramSendMessage(chatId, TELEGRAM_START_MESSAGE, {
-              reply_markup: { inline_keyboard: rows },
+          /* Обычным пользователям ничего не шлём: игра открывается кнопкой меню Mini App в Telegram (BotFather). */
+          if (TELEGRAM_ADMIN_IDS.has(uid)) {
+            const adminText = TELEGRAM_ADMIN_START_MESSAGE || TELEGRAM_START_MESSAGE;
+            await telegramSendMessage(chatId, adminText, {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "⚠️ Полный сброс игры", callback_data: "adm_full_a" }],
+                  [{ text: "Сбросить рефералов", callback_data: "adm_refreset_a" }],
+                  [
+                    { text: "Сбросить всем кванты", callback_data: "adm_qzero_a" },
+                    { text: "Выдать всем кванты", callback_data: "adm_qall_a" },
+                  ],
+                ],
+              },
             });
-          } else if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
-            await telegramSendMessage(
-              chatId,
-              `${TELEGRAM_START_MESSAGE}\n\n(Кнопка Mini App отключена: TELEGRAM_START_GAME_BUTTON_ENABLED на сервере.)`
-            );
-          } else if (!launchUrl) {
-            await telegramSendMessage(
-              chatId,
-              `${TELEGRAM_START_MESSAGE}\n\n(Админу: задайте TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME — тогда здесь появится кнопка запуска.)`
-            );
-          } else {
-            await telegramSendMessage(
-              chatId,
-              `${TELEGRAM_START_MESSAGE}\n\n(Админу: ссылка на игру должна быть HTTPS, например https://pifagor.games/ — см. TELEGRAM_MINIAPP_LINK в Render.)`
-            );
           }
           continue;
         }
@@ -11025,17 +11051,12 @@ server.listen(PORT, () => {
         console.log("[cluster] Telegram long poll отключён (CLUSTER_LEADER=false на этом инстансе).");
       }
     })();
-    if (!TELEGRAM_START_GAME_BUTTON_ENABLED) {
-      console.log(
-        "[Telegram] /start: кнопка игры выключена (TELEGRAM_START_GAME_BUTTON_ENABLED=false) — ответ пользователю не отправляется."
-      );
-    } else if (getTelegramMiniAppLaunchUrl()) {
-      console.log(
-        "Telegram: команда /start — сообщение с кнопкой «Запустить игру» (TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME)."
-      );
-    } else {
+    console.log(
+      "[Telegram] /start: обычным пользователям ответ не отправляется; Mini App — кнопка меню бота (BotFather). Рассылка broadcast: кнопка игры только если TELEGRAM_START_GAME_BUTTON_ENABLED=true."
+    );
+    if (!getTelegramMiniAppLaunchUrl()) {
       console.warn(
-        "[Pixel Battle] Задайте TELEGRAM_MINIAPP_LINK или TELEGRAM_BOT_USERNAME + TELEGRAM_MINIAPP_SHORT_NAME — иначе /start без кнопки Mini App."
+        "[Pixel Battle] Не задан TELEGRAM_MINIAPP_LINK / TELEGRAM_BOT_USERNAME+TELEGRAM_MINIAPP_SHORT_NAME — проверьте ссылку меню Mini App в BotFather."
       );
     }
     if (WAIT_FOR_TELEGRAM_GO) {
