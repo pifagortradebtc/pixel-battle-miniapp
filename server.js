@@ -536,9 +536,6 @@ function parseEnvBoolDefaultFalse(name) {
 }
 const TELEGRAM_START_GAME_BUTTON_ENABLED = parseEnvBoolDefaultFalse("TELEGRAM_START_GAME_BUTTON_ENABLED");
 
-/** Текст только для админов при /start (если пусто — TELEGRAM_START_MESSAGE). */
-const TELEGRAM_ADMIN_START_MESSAGE = (process.env.TELEGRAM_ADMIN_START_MESSAGE || "").trim();
-
 function getTelegramMiniAppLaunchUrl() {
   if (TELEGRAM_MINIAPP_LINK) return TELEGRAM_MINIAPP_LINK.replace(/\/$/, "");
   if (TELEGRAM_BOT_USERNAME && TELEGRAM_MINIAPP_SHORT_NAME) {
@@ -10352,22 +10349,7 @@ async function telegramPollLoop() {
 
         if (isStartCommand(t)) {
           rememberTelegramSubscriberChat(chatId);
-          /* Обычным пользователям ничего не шлём: игра открывается кнопкой меню Mini App в Telegram (BotFather). */
-          if (TELEGRAM_ADMIN_IDS.has(uid)) {
-            const adminText = TELEGRAM_ADMIN_START_MESSAGE || TELEGRAM_START_MESSAGE;
-            await telegramSendMessage(chatId, adminText, {
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: "⚠️ Полный сброс игры", callback_data: "adm_full_a" }],
-                  [{ text: "Сбросить рефералов", callback_data: "adm_refreset_a" }],
-                  [
-                    { text: "Сбросить всем кванты", callback_data: "adm_qzero_a" },
-                    { text: "Выдать всем кванты", callback_data: "adm_qall_a" },
-                  ],
-                ],
-              },
-            });
-          }
+          /* Никому не отвечаем на /start (в т.ч. админам): без текста и без inline-кнопок. Игра — меню Mini App в BotFather; админка — текстовые команды (go, новая игра, referralreset, quant …). */
           continue;
         }
 
@@ -11052,7 +11034,7 @@ server.listen(PORT, () => {
       }
     })();
     console.log(
-      "[Telegram] /start: обычным пользователям ответ не отправляется; Mini App — кнопка меню бота (BotFather). Рассылка broadcast: кнопка игры только если TELEGRAM_START_GAME_BUTTON_ENABLED=true."
+      "[Telegram] /start: ответа нет ни у кого (включая админов). Mini App — меню бота в BotFather. Рассылка broadcast: кнопка игры только при TELEGRAM_START_GAME_BUTTON_ENABLED=true."
     );
     if (!getTelegramMiniAppLaunchUrl()) {
       console.warn(
