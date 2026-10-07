@@ -7865,6 +7865,14 @@ wss.on("connection", (ws, req) => {
   ws.eliminated = gameFinished || roundIndex !== 0;
   /** Первый meta после connect: только один раз и после clientProfile (иначе eligible=false для r>0 затирает корректный meta). */
   ws._handshakeMetaSent = false;
+  /**
+   * I-X1 (проверка z26-libs, агент Кодекс-Юля): без обработчика ошибка сокета (слишком большой, не-UTF-8, немаскированный
+   * или фрагментированный сверх лимита кадр) всплывала как uncaughtException и завершала весь процесс (health пропадал).
+   * Библиотека ws сама закрывает такой сокет кодом 1007/1009/1002 — нам нужно только не упасть и записать причину.
+   */
+  ws.on("error", (err) => {
+    console.warn("[ws error]", ws._connId, ip, err?.code || err?.message || err);
+  });
 
   /**
    * Тяжёлый full + stats по всем пикселям на одном тике блокирует event loop (десятки мс–секунды)
